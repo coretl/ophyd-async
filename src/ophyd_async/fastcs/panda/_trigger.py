@@ -88,7 +88,7 @@ class ScanSpecSeqTableTriggerLogic(FlyerController[ScanSpecInfo]):
             rows += SeqTable.row(
                 trigger=trig,
                 position=int(
-                    chunk.midpoints[fast_axis][start]
+                    chunk.lower[fast_axis][start]
                     / await fast_axis.encoder_res.get_value()
                 ),
             )
