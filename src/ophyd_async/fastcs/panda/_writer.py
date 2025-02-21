@@ -8,12 +8,14 @@ from p4p.client.thread import Context
 
 from ophyd_async.core import (
     DEFAULT_TIMEOUT,
+    AsyncStatus,
     DetectorWriter,
     HDFDataset,
     HDFFile,
     NameProvider,
     PathProvider,
     observe_value,
+    set_and_wait_for_value,
     wait_for_value,
 )
 
@@ -37,6 +39,7 @@ class PandaHDFWriter(DetectorWriter):
         self._datasets: list[HDFDataset] = []
         self._file: HDFFile | None = None
         self._multiplier = 1
+        self._capture_status: AsyncStatus | None = None
 
     # Triggered on PCAP arm
     async def open(self, multiplier: int = 1) -> dict[str, DataKey]:
@@ -68,13 +71,18 @@ class PandaHDFWriter(DetectorWriter):
             )
 
         # Wait for it to start, stashing the status that tells us when it finishes
-        await self.panda_data_block.capture.set(True)
+        self._capture_status = await set_and_wait_for_value(
+            self.panda_data_block.capture, True, wait_for_set_completion=False
+        )
         if multiplier > 1:
             raise ValueError(
                 "All PandA datasets should be scalar, multiplier should be 1"
             )
 
         return await self._describe()
+
+    def is_open(self) -> bool:
+        return False if self._capture_status is None else not self._capture_status.done
 
     async def _describe(self) -> dict[str, DataKey]:
         """Return a describe based on the datasets PV."""
@@ -156,6 +164,10 @@ class PandaHDFWriter(DetectorWriter):
 
     # Could put this function as default for StandardDetector
     async def close(self):
-        await self.panda_data_block.capture.set(
-            False, wait=True, timeout=DEFAULT_TIMEOUT
+        await self.panda_data_block.capture.set(False, wait=False)
+        await wait_for_value(
+            self.panda_data_block.capture, False, timeout=DEFAULT_TIMEOUT
         )
+        if self._capture_status:
+            # We kicked off an open, so wait for it to return
+            await self._capture_status
