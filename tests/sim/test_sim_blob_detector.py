@@ -78,7 +78,7 @@ async def test_sim_blob_detector_fly(
         yield from bps.declare_stream(blob_detector, name="primary")
         yield from bps.kickoff(blob_detector, wait=True)
         yield from bps.collect_while_completing(
-            flyers=[blob_detector], dets=[blob_detector], flush_period=0.5
+            flyers=[blob_detector], dets=[blob_detector], flush_period=0.42
         )
 
     docs = defaultdict(list)
