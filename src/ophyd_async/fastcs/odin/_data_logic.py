@@ -31,7 +31,11 @@ class OdinDataLogic(DetectorDataLogic):
         self.detector_bit_depth = detector_bit_depth
         self.pixel_mask = pixel_mask
 
-    async def prepare_unbounded(self, datakey_name: str) -> StreamableDataProvider:
+    async def prepare_unbounded(
+        self, datakey_name: str, period: float
+    ) -> StreamableDataProvider:
+        # Odin sizes its own chunks, so the frame period is not used here yet.
+        del period
         # Work out where to write
         path_info = self.path_provider(datakey_name)
         # Get the current bit depth

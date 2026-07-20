@@ -164,17 +164,31 @@ class ADHDFDataLogic(DetectorDataLogic):
     plugins: Sequence[NDPluginBaseIO] = ()
     datakey_suffix: str = ""
     hinted: bool = True
+    #: Target seconds between HDF flushes. When set, the chunk is sized from
+    #: this and the frame period so the file flushes at roughly this rate
+    #: (#1309). Left as None, the chunk size is read back from the IOC, the
+    #: behaviour before #1309.
+    flush_period: float | None = None
 
-    async def prepare_unbounded(self, datakey_name: str) -> StreamableDataProvider:
+    async def prepare_unbounded(
+        self, datakey_name: str, period: float
+    ) -> StreamableDataProvider:
         # Work out where to write
         path_info = self.path_provider(datakey_name)
-        # Determine number of frames that will be saved per HDF chunk.
-        # On a fresh IOC startup, this is set to zero until the first capture,
-        # so if it is zero, set it to 1.
-        frames_per_chunk = await self.writer.num_frames_chunks.get_value()
-        if frames_per_chunk == 0:
-            frames_per_chunk = 1
+        # Size the HDF chunk from the frame period and the target flush period:
+        # e.g. 400 Hz frames (period 2.5 ms) with a 0.5 s flush period gives 200
+        # frames per chunk, so the file is flushed at ~2 Hz (#1309). Only when a
+        # flush_period is configured and the period is known (non-zero); otherwise
+        # fall back to reading the chunk size back from the IOC, forcing a
+        # fresh-startup 0 to 1.
+        if self.flush_period is not None and period > 0:
+            frames_per_chunk = max(1, round(self.flush_period / period))
             await self.writer.num_frames_chunks.set(frames_per_chunk)
+        else:
+            frames_per_chunk = await self.writer.num_frames_chunks.get_value()
+            if frames_per_chunk == 0:
+                frames_per_chunk = 1
+                await self.writer.num_frames_chunks.set(frames_per_chunk)
         # Setup the HDF writer
         await asyncio.gather(
             self.writer.chunk_size_auto.set(True),
@@ -251,7 +265,12 @@ class ADMultipartDataLogic(DetectorDataLogic):
     datakey_suffix: str = ""
     hinted: bool = True
 
-    async def prepare_unbounded(self, datakey_name: str) -> StreamableDataProvider:
+    async def prepare_unbounded(
+        self, datakey_name: str, period: float
+    ) -> StreamableDataProvider:
+        # A multipart writer writes one file per frame, so there is no chunk to
+        # size from the period.
+        del period
         # Work out where to write
         path_info = self.path_provider(datakey_name)
         # Setup the file writer
@@ -373,6 +392,7 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
         | Callable[[ADBaseIO], NDArrayDescription]
         | None = None,
         hinted: bool = True,
+        flush_period: float | None = None,
     ) -> "ADWriterFactory[NDFileHDF5IO]":
         """Create a factory for an HDF5 file writer.
 
@@ -389,6 +409,10 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
             when the shape/type comes from a plugin rather than the main driver
             (e.g. an ROI plugin).
         :param hinted: Include the image in hints. Set False for BestEffortCallback.
+        :param flush_period: Target seconds between HDF flushes. When set, the
+            chunk is sized from this and the frame period so the file flushes at
+            roughly this rate (#1309). Left as ``None`` (the default), the chunk
+            size is read back from the IOC as before.
         """
         return ADWriterFactory(
             writer_cls=NDFileHDF5IO,
@@ -404,6 +428,7 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
                 plugins=list(plugins),
                 datakey_suffix=datakey_suffix,
                 hinted=hinted,
+                flush_period=flush_period,
             ),
         )
 
