@@ -56,15 +56,13 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
                 writer, data_logic = factory(prefix, driver, plugin_list)
                 setattr(self, factory.writer_name, writer)
                 self.add_detector_logics(data_logic)
-        # Register the driver's timing signals, plus anything the caller asked
-        # for, as configuration. Plugins are deliberately not registered here:
-        # a detector normally carries far more plugins than are wired into the
-        # chain, so opt in per plugin with set_readable_format() instead.
-        for signal in (
-            self.driver.acquire_period,
-            self.driver.acquire_time,
-            *config_sigs,
-        ):
+        # The driver is always wired up, so register it whole and let ADBaseIO
+        # declare which of its signals are configuration. Plugins are
+        # deliberately *not* registered: a detector normally carries far more
+        # plugins than are wired into the chain, so opt in per plugin with
+        # `set_readable_format(det.stats, Format.CHILD)` instead.
+        self.set_readable_format(self.driver, Format.CHILD)
+        for signal in config_sigs:
             self.set_readable_format(signal, Format.CONFIG_SIGNAL)
         super().__init__(name=name)
 
