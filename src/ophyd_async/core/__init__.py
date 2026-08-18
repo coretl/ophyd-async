@@ -154,6 +154,7 @@ from ._utils import (
     SubsetEnum,
     SupersetEnum,
     WatcherUpdate,
+    abstract_cached_property,
     error_if_none,
     gather_dict,
     get_dtype,
@@ -323,6 +324,7 @@ __all__ = [
     "make_datakey",
     "wait_for_connection",
     "Ignore",
+    "abstract_cached_property",
     "non_zero",
     "simulate_move",
     # Derived signal
