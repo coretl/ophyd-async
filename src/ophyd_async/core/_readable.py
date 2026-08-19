@@ -402,28 +402,6 @@ class StandardReadable(
                     raise TypeError(f"{device} is not a SignalR")
                 self._readables[device] = (device, format)
 
-    def get_config_signals(self) -> set[SignalR]:
-        """Return every `Signal` contributing to `read_configuration()`.
-
-        Recurses into children registered as
-        [](#StandardReadableFormat.CHILD), so a Device that registers a
-        sub-Device whole picks up whatever that sub-Device declares as
-        configuration.
-
-        Unlike [](#walk_config_signals) this reads the registry rather than
-        calling `read_configuration()`, so it does no I/O and includes
-        read-only `SignalR`s as well as `SignalRW`s.
-        """
-        signals: set[SignalR] = set()
-        for device, format in self._readables.items():
-            if format is StandardReadableFormat.CONFIG_SIGNAL:
-                signals.add(_as_signal_r(device))
-            elif format is StandardReadableFormat.CHILD and isinstance(
-                device, StandardReadable
-            ):
-                signals |= device.get_config_signals()
-        return signals
-
     def reset_readable_formats(self) -> None:
         """Put the formats back to those registered by the end of construction.
 
@@ -487,6 +465,36 @@ class StandardReadable(
         )
         for device in devices:
             self.set_readable_format(device, format)
+
+
+def _config_signals(device: Device) -> set[SignalR]:
+    """Return every `Signal` contributing to a Device's `read_configuration()`.
+
+    Recurses into children registered as [](#StandardReadableFormat.CHILD), so
+    a Device that registers a sub-Device whole picks up whatever that
+    sub-Device declares as configuration. A Device that is not a
+    `StandardReadable` contributes nothing.
+
+    Unlike `walk_config_signals` this reads the registry rather than calling
+    `read_configuration()`, so it does no I/O and includes read-only `SignalR`s
+    as well as `SignalRW`s -- `ADBaseIO.model` is a `SignalR`, and it is
+    exactly the signal an areaDetector trigger logic needs for deadtime.
+
+    Deliberately private and unexported: #1367 restructures detector logic, so
+    what the public shape of this should be is not settled yet.
+    """
+    signals: set[SignalR] = set()
+    if not isinstance(device, StandardReadable):
+        return signals
+    for entry in device._readables.values():  # noqa: SLF001
+        match entry:
+            case (signal, Format.CONFIG_SIGNAL):
+                signals.add(signal)
+            case (child, Format.CHILD):
+                signals |= _config_signals(child)
+            case _:
+                pass
+    return signals
 
 
 #: The changes to the readable formats of a Device tree since construction:
