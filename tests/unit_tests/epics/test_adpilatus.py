@@ -61,9 +61,14 @@ async def test_threshold_apply_triggers_command(
 )
 async def test_deadtime(readout_time: adpilatus.PilatusReadoutTime, tmp_path):
     path_provider = StaticPathProvider(StaticFilenameProvider("data"), tmp_path)
-    pilatus = adpilatus.PilatusDetector(
-        "PREFIX:", adcore.ADWriterFactory.hdf(path_provider), readout_time=readout_time
-    )
+    # Connected because get_trigger_deadtime() now reads every configuration
+    # signal, even for a logic like this one whose deadtime is a constant
+    async with init_devices(mock=True):
+        pilatus = adpilatus.PilatusDetector(
+            "PREFIX:",
+            adcore.ADWriterFactory.hdf(path_provider),
+            readout_time=readout_time,
+        )
     trigger_modes, deadtime = await pilatus.get_trigger_deadtime()
     assert trigger_modes == {
         DetectorTrigger.INTERNAL,
