@@ -102,8 +102,6 @@ from ._readable import (
     DEVICE_NAMES_KEY,
     READABLE_FORMATS_KEY,
     ROOT_DEVICE_KEY,
-    ConfigSignal,
-    HintedSignal,
     ReadableFormats,
     StandardReadable,
     StandardReadableFormat,
@@ -347,8 +345,6 @@ __all__ = [
     "DerivedSignalFactory",
     "merge_gathered_dicts",
     # Back compat - delete before 1.0
-    "ConfigSignal",
-    "HintedSignal",
     # Standard enums
     "EnabledDisabled",
     "EnableDisable",
