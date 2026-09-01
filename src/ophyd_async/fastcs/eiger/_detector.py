@@ -45,7 +45,6 @@ class EigerDetector(StandardDetector):
                 detector_bit_depth=self.detector.bit_depth_image,
                 pixel_mask=self.pixel_mask,
             ),
-            publish_collect_methods=self._publish_collect_methods,
         )
 
         self.add_config_signals(self.pixel_mask)
