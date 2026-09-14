@@ -11,6 +11,7 @@ from ._command import (
     soft_command,
 )
 from ._data_providers import (
+    EventPageDataProvider,
     PageableDataProvider,
     StreamableDataProvider,
     StreamResourceDataProvider,
@@ -304,6 +305,7 @@ __all__ = [
     "AutoMaxIncrementingPathProvider",
     "UUIDFilenameProvider",
     # Data Providers
+    "EventPageDataProvider",
     "PageableDataProvider",
     "StreamableDataProvider",
     "StreamResourceInfo",

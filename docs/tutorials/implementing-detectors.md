@@ -229,7 +229,7 @@ Then we have `BlobDataLogic`, a [](#DetectorDataLogic) subclass:
 
 Its job is to manage the file writing and data streaming:
 - `make_data_provider()` works out where the file will go and returns a [](#StreamableDataProvider) describing the datasets that will be written, without opening anything
-- `start()` opens the file, so nothing is written until the detector has decided it wants this data
+- `start()` opens the file at the path `make_data_provider()` handed back, so nothing is written until the detector has decided it wants this data
 - `get_hinted_fields()` returns the data keys that are interesting to plot
 - `stop()` tells the detector to close the file
 
@@ -248,7 +248,7 @@ A [](#DetectorDataLogic) is not declared as one kind or another: the detector as
 
 A source that produces one value per event, like a plugin scalar, needs no data logic at all: a detector is a [](#StandardReadable), so register the signal with [](#StandardReadable.set_readable_format).
 
-`make_data_provider` is given the total `num_collections` for the scan, 0 meaning unbounded, and the frame `period` (livetime + deadtime), resolved by `prepare()` from the trigger logic even when the [](#TriggerInfo) leaves `livetime` at 0. It must not start anything: only the providers the detector settles on get their `start()` called.
+`make_data_provider` is given the total `num_collections` for the scan, 0 meaning unbounded; the frame `period` (livetime + deadtime), resolved by `prepare()` from the trigger logic even when the [](#TriggerInfo) leaves `livetime` at 0; and the `flush_period` the [](#TriggerInfo) asked for. It must not start anything: only the providers the detector settles on get their `start()` called. Whatever it worked out that `start()` will need comes back alongside the provider, and the detector hands it straight back — a logic keeps no state of its own between the two.
 
 A detector may carry several data logics, but must not end up producing both kinds at once — those are mutually exclusive document kinds, and `prepare()` raises if it would.
 

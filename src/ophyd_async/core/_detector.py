@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequen
 from dataclasses import dataclass
 from enum import Enum
 from functools import cached_property
-from typing import cast
+from typing import Any, Generic, TypeVar, cast
 
 from bluesky.protocols import (
     Collectable,
@@ -103,6 +103,15 @@ class TriggerInfo(ConfinedModel):
         gt=0,
     )
     """What is the maximum timeout on waiting for an exposure"""
+
+    flush_period: float = Field(default=0.0, ge=0.0)
+    """How many seconds between flushes of the data being written.
+
+    A data logic that buffers before it writes sizes that buffer from this and
+    the exposure period, so data appears at roughly this rate: an HDF chunk of
+    `flush_period / period` frames, say. Set it to the rate the plan collects at
+    so a fly scan sees each batch as it lands. 0 means leave whatever the
+    hardware is set to."""
 
     @computed_field
     @cached_property
@@ -307,14 +316,25 @@ async def _get_collections_written(
 #: [](#DetectorDataLogic.make_data_provider).
 _DataProvider = StreamableDataProvider | PageableDataProvider
 
+#: What a `DetectorDataLogic` works out in `make_data_provider` and needs back
+#: in `start`. Use `None` for a logic whose `start` needs nothing.
+DataCtxT = TypeVar("DataCtxT")
 
-class DetectorDataLogic:
+
+class DetectorDataLogic(Generic[DataCtxT]):
     """Abstract base class for detector data logic and handling.
 
     An implementation describes the data it would produce in
     `make_data_provider`, and does the writes that make it happen in `start`.
     The detector asks every data logic it has what it would make, decides which
     providers it will use, and starts only those.
+
+    What `make_data_provider` worked out and `start` needs is threaded between
+    them through an explicit context object rather than stored on the logic, as
+    `FlyableLogic` threads its own: the detector may make a provider and then
+    never start it, so a logic holding that state on itself would be left
+    carrying a plan that was abandoned. A logic whose `start` needs nothing from
+    `make_data_provider` uses `None` for the context.
 
     Whether the data is streamed or paged is the type of the provider that
     `make_data_provider` returns, not a declaration on the logic, so one logic
@@ -330,15 +350,20 @@ class DetectorDataLogic:
     datakey_suffix: str = ""
 
     async def make_data_provider(
-        self, datakey_name: str, num_collections: int, period: float
-    ) -> StreamableDataProvider | PageableDataProvider | None:
+        self,
+        datakey_name: str,
+        num_collections: int,
+        period: float,
+        flush_period: float,
+    ) -> tuple[StreamableDataProvider | PageableDataProvider, DataCtxT] | None:
         """Describe the data this logic would produce for this scan.
 
         This must not start anything acquiring: the detector may discard the
         provider without calling `start`, and only starts the ones it will use.
         Return a [](#StreamableDataProvider) for a source that can produce any
         number of collections, or a [](#PageableDataProvider) for one holding a
-        finite buffer sized to `num_collections`.
+        finite buffer sized to `num_collections`, together with the context to
+        hand back to `start`.
 
         Return `None` to sit this scan out, for instance a finite buffer asked
         for an unbounded number of collections, or a plugin that is switched
@@ -350,14 +375,19 @@ class DetectorDataLogic:
         :param period: how long each collection takes, livetime + deadtime, so
             the provider can size its chunks or its buffer. 0 means "use
             whatever is currently set on the hardware".
+        :param flush_period: how many seconds between flushes of the data being
+            written, so a logic that buffers can size that buffer. 0 means "use
+            whatever is currently set on the hardware".
         """
         raise NotImplementedError(self)
 
-    async def start(self) -> None:
+    async def start(self, ctx: DataCtxT) -> None:
         """Make the provider just returned by `make_data_provider` take data.
 
         Called only for the providers the detector will actually use, so this is
         where writes that arm hardware or open files belong.
+
+        :param ctx: the context returned by `make_data_provider`.
         """
 
     def get_hinted_fields(self, datakey_name: str) -> Sequence[str]:
@@ -370,6 +400,18 @@ class DetectorDataLogic:
 
 
 @dataclass
+class _Served:
+    """One data logic, the provider it made, and the context to start it with."""
+
+    logic: "DetectorDataLogic[Any]"
+    provider: _DataProvider
+    ctx: Any
+
+    async def start(self) -> None:
+        await self.logic.start(self.ctx)
+
+
+@dataclass
 class _DetectorData:
     """The data providers a detector has prepared, and what they were made for.
 
@@ -378,23 +420,31 @@ class _DetectorData:
     `complete()` has returned. Cleared by `stage()`/`unstage()`.
     """
 
-    serving: Sequence[tuple[DetectorDataLogic, _DataProvider]]
+    serving: Sequence[_Served]
     #: What the providers were made for, and so when they can be reused
     collections_per_event: int
     period: float
 
     @property
     def streamable(self) -> list[StreamableDataProvider]:
-        return [dp for _, dp in self.serving if isinstance(dp, StreamableDataProvider)]
+        return [
+            s.provider
+            for s in self.serving
+            if isinstance(s.provider, StreamableDataProvider)
+        ]
 
     @property
     def pageable(self) -> list[PageableDataProvider]:
-        return [dp for _, dp in self.serving if isinstance(dp, PageableDataProvider)]
+        return [
+            s.provider
+            for s in self.serving
+            if isinstance(s.provider, PageableDataProvider)
+        ]
 
     @property
     def collectable(self) -> list[_DataProvider]:
         """Every provider, whether it collects as stream datums or as pages."""
-        return [dp for _, dp in self.serving]
+        return [s.provider for s in self.serving]
 
 
 @dataclass
@@ -417,11 +467,11 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
 
     def __init__(
         self,
-        *logics: DetectorTriggerLogic | DetectorAcquireLogic | DetectorDataLogic,
+        *logics: "DetectorTriggerLogic | DetectorAcquireLogic | DetectorDataLogic[Any]",
     ) -> None:
         self.trigger_logic: DetectorTriggerLogic | None = None
         self.acquire_logic: DetectorAcquireLogic | None = None
-        self.data_logics: tuple[DetectorDataLogic, ...] = ()
+        self.data_logics: tuple[DetectorDataLogic[Any], ...] = ()
         #: The trigger types the trigger logic implements
         self.supported_triggers: set[DetectorTrigger] = {DetectorTrigger.INTERNAL}
         #: Prefix for the datakeys the data logics produce, set from `Device.name`
@@ -491,7 +541,9 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
         produce.
         """
         logics = (
-            [dl for dl, _ in self.data.serving] if self.data else list(self.data_logics)
+            [s.logic for s in self.data.serving]
+            if self.data
+            else list(self.data_logics)
         )
         for dl in logics:
             if fields := dl.get_hinted_fields(self._datakey_name(dl)):
@@ -601,7 +653,7 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
             return await self.trigger_logic.default_trigger_info()
         return TriggerInfo()
 
-    def _datakey_name(self, dl: DetectorDataLogic) -> str:
+    def _datakey_name(self, dl: "DetectorDataLogic[Any]") -> str:
         return self.datakey_prefix + dl.datakey_suffix
 
     async def _prepare_trigger_logic(self, value: TriggerInfo) -> None:
@@ -692,40 +744,42 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
         )
         return self.data
 
-    async def _make_serving(
-        self, trigger_info: TriggerInfo
-    ) -> Sequence[tuple[DetectorDataLogic, _DataProvider]]:
+    async def _make_serving(self, trigger_info: TriggerInfo) -> Sequence[_Served]:
         """Ask every data logic what it would make, and start the ones we use."""
         # Stop what is running before anything new is made, since a logic that
         # cannot describe its data without opening its file does so here
         if self.data is not None:
-            await asyncio.gather(*(dl.stop() for dl, _ in self.data.serving))
+            await asyncio.gather(*(s.logic.stop() for s in self.data.serving))
         cpe = trigger_info.collections_per_event
-        period = trigger_info.livetime + trigger_info.deadtime
         made = await asyncio.gather(
-            *(
-                dl.make_data_provider(
-                    self._datakey_name(dl), trigger_info.number_of_collections, period
-                )
-                for dl in self.data_logics
-            )
+            *(self._make_one(dl, trigger_info) for dl in self.data_logics)
         )
         # A logic returns None to sit this scan out, e.g. a finite buffer asked
         # for an unbounded number of collections, or a plugin that is switched off
-        serving = [
-            (dl, dp)
-            for dl, dp in zip(self.data_logics, made, strict=True)
-            if dp is not None
-        ]
+        serving = [s for s in made if s is not None]
         serving = await self._drop_shadowed(serving, cpe)
-        await asyncio.gather(*(dl.start() for dl, _ in serving))
+        await asyncio.gather(*(s.start() for s in serving))
         return serving
+
+    async def _make_one(
+        self, dl: "DetectorDataLogic[Any]", trigger_info: TriggerInfo
+    ) -> _Served | None:
+        made = await dl.make_data_provider(
+            self._datakey_name(dl),
+            trigger_info.number_of_collections,
+            trigger_info.livetime + trigger_info.deadtime,
+            trigger_info.flush_period,
+        )
+        if made is None:
+            return None
+        provider, ctx = made
+        return _Served(logic=dl, provider=provider, ctx=ctx)
 
     async def _drop_shadowed(
         self,
-        serving: Sequence[tuple[DetectorDataLogic, _DataProvider]],
+        serving: Sequence[_Served],
         collections_per_event: int,
-    ) -> Sequence[tuple[DetectorDataLogic, _DataProvider]]:
+    ) -> Sequence[_Served]:
         """Drop finite buffers whose datakeys the stream assets already carry.
 
         A detector cannot produce both stream assets and event pages: the bundler
@@ -736,19 +790,21 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
         produce is also written to the file, the file wins and the buffer sits the
         scan out. Anything else is a conflict, so it raises.
         """
-        pageable = [
-            (dl, dp) for dl, dp in serving if isinstance(dp, PageableDataProvider)
+        pageable = [s for s in serving if isinstance(s.provider, PageableDataProvider)]
+        streamable = [
+            s.provider
+            for s in serving
+            if isinstance(s.provider, StreamableDataProvider)
         ]
-        streamable = [dp for _, dp in serving if isinstance(dp, StreamableDataProvider)]
         if not (pageable and streamable):
             return serving
         stream_keys: set[str] = set()
         for dp in streamable:
             stream_keys |= set(await dp.make_datakeys(collections_per_event))
         shadowed = []
-        for dl, dp in pageable:
+        for s in pageable:
             unshadowed = (
-                set(await dp.make_datakeys(collections_per_event)) - stream_keys
+                set(await s.provider.make_datakeys(collections_per_event)) - stream_keys
             )
             if unshadowed:
                 raise TypeError(
@@ -756,28 +812,25 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
                     f"{sorted(unshadowed)} as event pages and the rest of its data "
                     "as stream assets; these cannot be combined on one detector"
                 )
-            shadowed.append(dl)
+            shadowed.append(s.logic)
         # Nothing has been started yet, so a shadowed logic needs no stopping
-        return [(dl, dp) for dl, dp in serving if dl not in shadowed]
+        return [s for s in serving if s.logic not in shadowed]
 
     async def _rearm_bounded(
         self, previous: _DetectorData, trigger_info: TriggerInfo
-    ) -> Sequence[tuple[DetectorDataLogic, _DataProvider]]:
+    ) -> Sequence[_Served]:
         """Re-make and re-start the finite buffers, keeping everything else."""
-        period = trigger_info.livetime + trigger_info.deadtime
-        serving: list[tuple[DetectorDataLogic, _DataProvider]] = []
-        for dl, dp in previous.serving:
-            if isinstance(dp, PageableDataProvider):
-                await dl.stop()
-                rearmed = await dl.make_data_provider(
-                    self._datakey_name(dl), trigger_info.number_of_collections, period
-                )
+        serving: list[_Served] = []
+        for s in previous.serving:
+            if isinstance(s.provider, PageableDataProvider):
+                await s.logic.stop()
+                rearmed = await self._make_one(s.logic, trigger_info)
                 if rearmed is None:
                     continue
-                await dl.start()
-                serving.append((dl, rearmed))
+                await rearmed.start()
+                serving.append(rearmed)
             else:
-                serving.append((dl, dp))
+                serving.append(s)
         return serving
 
     async def _wait_for_collections(

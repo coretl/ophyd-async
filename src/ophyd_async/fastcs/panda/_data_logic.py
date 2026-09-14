@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -10,7 +11,6 @@ from ophyd_async.core import (
     StreamableDataProvider,
     StreamResourceDataProvider,
     StreamResourceInfo,
-    error_if_none,
 )
 
 from ._block import DataBlock, PandaCaptureMode
@@ -18,7 +18,15 @@ from ._block import DataBlock, PandaCaptureMode
 logger = logging.getLogger("ophyd_async")
 
 
-class PandaHDFDataLogic(DetectorDataLogic):
+@dataclass
+class PandaHDFDataCtx:
+    """What `PandaHDFDataLogic.make_data_provider` worked out for `start`."""
+
+    path_info: PathInfo
+    flush_period: float
+
+
+class PandaHDFDataLogic(DetectorDataLogic[PandaHDFDataCtx]):
     def __init__(
         self,
         path_provider: PathProvider,
@@ -26,16 +34,17 @@ class PandaHDFDataLogic(DetectorDataLogic):
     ):
         self.path_provider = path_provider
         self.data_block = data_block
-        # Where make_data_provider decided to write, for start to set up
-        self._to_start: PathInfo | None = None
 
     async def make_data_provider(
-        self, datakey_name: str, num_collections: int, period: float
-    ) -> StreamableDataProvider:
-        # TODO: derive the PandA flush period / chunk size from `period` once the
-        # IOC exposes the chunk-size signal (see the chunk_shape TODO below). The
-        # PandA captures forever, so the number of collections is not needed.
-        del period, num_collections
+        self,
+        datakey_name: str,
+        num_collections: int,
+        period: float,
+        flush_period: float,
+    ) -> tuple[StreamableDataProvider, PandaHDFDataCtx]:
+        # TODO: size the chunk from `period` once the IOC exposes the chunk-size
+        # signal (see the chunk_shape TODO below). The PandA captures forever, so
+        # the number of collections is not needed.
         # Work out where to write
         path_info = self.path_provider(datakey_name)
         # Load data from the datasets PV on the panda, which tells us which
@@ -60,24 +69,24 @@ class PandaHDFDataLogic(DetectorDataLogic):
             )
             for dataset_name in capture_table.name
         ]
-        self._to_start = path_info
-        return StreamResourceDataProvider(
+        provider = StreamResourceDataProvider(
             uri=f"{path_info.directory_uri}{path_info.filename}.h5",
             resources=resources,
             mimetype="application/x-hdf5",
             collections_written_signal=self.data_block.num_captured,
         )
+        return provider, PandaHDFDataCtx(path_info, flush_period)
 
-    async def start(self) -> None:
-        path_info = error_if_none(
-            self._to_start, "make_data_provider() has not been called"
-        )
+    async def start(self, ctx: PandaHDFDataCtx) -> None:
+        path_info = ctx.path_info
         # Set create dir depth first to guarantee that callback when setting
         # directory path has correct value
         await self.data_block.create_directory.set(path_info.create_dir_depth)
-        # Setup the HDF writer
+        # Setup the HDF writer. The PandA flushes on a timer rather than by
+        # chunk size, so it takes the flush period directly; 0 means it flushes
+        # only when its buffer fills.
         await asyncio.gather(
-            self.data_block.flush_period.set(0),
+            self.data_block.flush_period.set(ctx.flush_period),
             self.data_block.hdf_directory.set(str(path_info.directory_path)),
             self.data_block.hdf_file_name.set(
                 f"{path_info.filename}.h5",

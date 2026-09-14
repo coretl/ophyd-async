@@ -5,6 +5,7 @@ https://github.com/areaDetector/ADCore
 
 from ._acquire_logic import ADAcquireLogic, ADContAcqAcquireLogic
 from ._data_logic import (
+    ADHDFDataCtx,
     ADHDFDataLogic,
     ADMultipartDataLogic,
     ADWriterFactory,
@@ -40,7 +41,7 @@ from ._ndattribute import (
     ndattributes_to_xml,
 )
 from ._plan_stubs import setup_ndattributes, setup_ndstats_sum
-from ._stats_time_series import StatsTimeSeriesDataLogic, StatsTimeSeriesProvider
+from ._stats_time_series import StatsTimeSeriesDataLogic
 from ._trigger_logic import (
     ADContAcqTriggerLogic,
     prepare_exposures,
@@ -77,11 +78,11 @@ __all__ = [
     "ADContAcqAcquireLogic",
     # DataLogic
     "NDArrayDescription",
+    "ADHDFDataCtx",
     "ADHDFDataLogic",
     "ADMultipartDataLogic",
     "ADWriterFactory",
     "StatsTimeSeriesDataLogic",
-    "StatsTimeSeriesProvider",
     # Detector
     "AreaDetector",
     "ContAcqDetector",
