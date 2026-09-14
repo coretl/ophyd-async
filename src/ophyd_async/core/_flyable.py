@@ -1,9 +1,9 @@
 import asyncio
 from abc import abstractmethod
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Coroutine
 from enum import Enum
 from functools import cached_property
-from typing import Generic, TypeVar, cast
+from typing import Any, Generic, TypeVar, cast
 
 from bluesky.protocols import Flyable, Preparable
 from pydantic import Field
@@ -61,7 +61,9 @@ class FlyableLogic(Generic[PrepareT, CtxT]):
         """
 
     @abstractmethod
-    def on_complete(self, ctx: CtxT) -> Awaitable[None] | AsyncIterator[WatcherUpdate]:
+    def on_complete(
+        self, ctx: CtxT
+    ) -> Coroutine[Any, Any, None] | AsyncIterator[WatcherUpdate]:
         """Block until the fly scan is done.
 
         Write it as an `async def` to just block, or as an async generator
@@ -75,6 +77,11 @@ class FlyableLogic(Generic[PrepareT, CtxT]):
 
         Called by `on_stage` and `on_unstage` by default; override those instead
         if stage and unstage need to differ.
+
+        Deliberately the same name as `MovableLogic.stop`, so that a logic
+        implementing both -- a motor record's, which is moved *and* flown --
+        writes one stop that serves as the move-stop verb and as fly-scan
+        teardown. The hardware action is the same in both cases.
         """
         pass
 
@@ -130,11 +137,6 @@ class FlyMotorInfo(ConfinedModel):
             * (self.end_position - self.start_position)
             / (2 * self.time_for_move)
         )
-
-
-async def _awaited(awaitable: Awaitable[None]) -> None:
-    # AsyncStatus takes a coroutine, while on_complete may return any awaitable
-    await awaitable
 
 
 class _FlyStage(Enum):
@@ -204,12 +206,10 @@ class StandardFlyable(
         self._fly_ctx = cast(CtxT, None)
         self._fly_stage = _FlyStage.IDLE
 
-    @AsyncStatus.wrap
     async def _on_stage(self) -> None:
         await self.logic.on_stage()
         self._reset_fly_state()
 
-    @AsyncStatus.wrap
     async def _on_unstage(self) -> None:
         await self.logic.on_unstage()
         self._reset_fly_state()
@@ -259,7 +259,7 @@ class StandardFlyable(
                 logic.setpoint.get_value(),
                 logic.get_units_precision(),
             )
-            async with AsyncStatus(_awaited(completing)) as completed:
+            async with AsyncStatus(completing) as completed:
                 async for current_position in observe_value(
                     logic.readback, done_status=completed
                 ):
