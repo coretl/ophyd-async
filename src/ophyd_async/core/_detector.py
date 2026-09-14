@@ -419,7 +419,6 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
         self,
         *logics: DetectorTriggerLogic | DetectorAcquireLogic | DetectorDataLogic,
     ) -> None:
-        self.logics = logics
         self.trigger_logic: DetectorTriggerLogic | None = None
         self.acquire_logic: DetectorAcquireLogic | None = None
         self.data_logics: tuple[DetectorDataLogic, ...] = ()
@@ -459,7 +458,7 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
                     raise RuntimeError("Detector already has acquire logic")
                 self.acquire_logic = logic
             elif isinstance(logic, DetectorDataLogic):
-                self.data_logics = (*self.data_logics, logic)
+                self.data_logics += (logic,)
             else:
                 raise TypeError(f"Unknown logic type: {type(logic)}")
         #: Whether the trigger logic can calculate a deadtime
