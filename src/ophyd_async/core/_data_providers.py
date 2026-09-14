@@ -1,37 +1,15 @@
 from abc import abstractmethod
-from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
-from bluesky.protocols import Reading, StreamAsset
+import numpy as np
+from bluesky.protocols import StreamAsset
 from event_model import ComposeStreamResource, DataKey, StreamRange
+from event_model.documents import PartialEventPage
 
+from ._datatypes import Array1D
 from ._signal import SignalR, SignalW
-from ._utils import ConfinedModel
-
-
-class ReadableDataProvider:
-    @abstractmethod
-    async def make_datakeys(self) -> dict[str, DataKey]:
-        """Return a DataKey for each Readable that produces a Reading.
-
-        Called before the first exposure is taken.
-        """
-
-    @abstractmethod
-    async def make_readings(self) -> dict[str, Reading]:
-        """Read the Signals and return their values."""
-
-
-@dataclass
-class SignalDataProvider(ReadableDataProvider):
-    signal: SignalR
-
-    async def make_datakeys(self) -> dict[str, DataKey]:
-        return await self.signal.describe()
-
-    async def make_readings(self) -> dict[str, Reading]:
-        return await self.signal.read(cached=False)
+from ._utils import ConfinedModel, error_if_none, gather_dict, get_dtype
 
 
 class StreamableDataProvider:
@@ -56,6 +34,123 @@ class StreamableDataProvider:
         """
         while False:
             yield
+
+
+class PageableDataProvider:
+    """For bounded data held in a finite buffer, emitted as event pages.
+
+    Used by data logics whose device must be told how many collections to
+    expect before it starts acquiring, because it holds a finite buffer that
+    has to be sized upfront: an areaDetector stats time series (`TSNumPoints`),
+    or a scaler whose MCA array length is the frame count. Such a device
+    produces its data as event pages at the end of an event rather than as
+    stream datums as it goes.
+
+    A step-scan event has a single collection window, so `make_pages` yields
+    one page of one event, which `StandardDetector.read` extracts to a single
+    reading; the same `make_pages` serves fly-scan collection.
+    """
+
+    collections_written_signal: SignalR[int]
+
+    @abstractmethod
+    async def make_datakeys(self, collections_per_event: int) -> dict[str, DataKey]:
+        """Return a DataKey for each field this provider produces.
+
+        Called before the first exposure is taken.
+
+        :param collections_per_event: this should appear in the shape of each DataKey
+        """
+
+    @abstractmethod
+    def make_pages(
+        self, collections_written: int, collections_per_event: int
+    ) -> AsyncIterator[PartialEventPage]:
+        """Emit event pages for collections written since the last call.
+
+        :param collections_written: how many collections have been written so far
+        :param collections_per_event: how many collections make up one event
+        """
+
+
+class EventPageDataProvider(PageableDataProvider):
+    """Emits a fixed-length array of collections as event pages.
+
+    For a device that fills one array per field as it acquires, alongside an
+    array of per-collection timestamps and a signal counting how many
+    collections it has filled: an areaDetector stats time series, or a scaler's
+    MCA arrays. Each array is sliced into `collections_per_event`-length chunks,
+    one per event, and the last collection of an event supplies that event's
+    timestamp.
+
+    :param data: datakey (already suffixed) to the array signal that backs it
+    :param collections_written_signal: counts the collections filled so far
+    :param timestamps: the acquisition time of each collection
+    """
+
+    def __init__(
+        self,
+        data: Mapping[str, SignalR[Array1D[Any]]],
+        collections_written_signal: SignalR[int],
+        timestamps: SignalR[Array1D[np.float64]],
+    ) -> None:
+        self.data = dict(data)
+        self.collections_written_signal = collections_written_signal
+        self.timestamps = timestamps
+        self.last_emitted = 0
+
+    async def make_datakeys(self, collections_per_event: int) -> dict[str, DataKey]:
+        return {
+            datakey: DataKey(
+                source=signal.source,
+                shape=[collections_per_event],
+                dtype="array",
+                dtype_numpy=get_dtype(
+                    error_if_none(signal.datatype, f"{signal.source} has no datatype")
+                ).str,
+            )
+            for datakey, signal in self.data.items()
+        }
+
+    async def make_pages(
+        self, collections_written: int, collections_per_event: int
+    ) -> AsyncIterator[PartialEventPage]:
+        events = collections_written // collections_per_event
+        if events <= self.last_emitted:
+            return
+        new = range(self.last_emitted, events)
+        # Read every array and the per-collection timestamps in one parallel batch
+        read: dict[SignalR[Array1D[Any]], Array1D[Any]] = await gather_dict(
+            {
+                signal: signal.get_value()
+                for signal in (*self.data.values(), self.timestamps)
+            }
+        )
+        stamps = read[self.timestamps]
+        # One timestamp per event: the acquisition time of that event's last
+        # collection.
+        event_times = [
+            float(stamps[(event + 1) * collections_per_event - 1]) for event in new
+        ]
+        page: PartialEventPage = {
+            # TODO: numpy arrays are not in PartialEventPage's value type, but
+            # they round trip through the bundler fine; fix upstream in
+            # event-model rather than converting to lists here
+            "data": {  # type: ignore[typeddict-item]
+                datakey: [
+                    read[signal][
+                        event * collections_per_event : (event + 1)
+                        * collections_per_event
+                    ]
+                    for event in new
+                ]
+                for datakey, signal in self.data.items()
+            },
+            "time": event_times,
+            "timestamps": dict.fromkeys(self.data, event_times),
+        }
+        self.last_emitted = events
+        yield page
 
 
 class StreamResourceInfo(ConfinedModel):

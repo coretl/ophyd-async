@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import PureWindowsPath
 from typing import Any, Generic
@@ -8,11 +8,11 @@ from xml.etree import ElementTree as ET
 import numpy as np
 
 from ophyd_async.core import (
+    Array1D,
     DetectorDataLogic,
     EnableDisable,
     PathInfo,
     PathProvider,
-    SignalDataProvider,
     SignalR,
     StreamableDataProvider,
     StreamResourceDataProvider,
@@ -29,26 +29,13 @@ from ._io import (
     NDArrayBaseIO,
     NDFileHDF5IO,
     NDPluginBaseIO,
+    NDPluginBaseIOT,
     NDPluginFileIO,
-    NDPluginFileIOT,
+    NDStatsIO,
+    plugin_is_enabled,
 )
 from ._ndattribute import NDAttributeDataType, NDAttributePvDbrType
-
-
-@dataclass
-class PluginSignalDataLogic(DetectorDataLogic):
-    driver: ADBaseIO
-    signal: SignalR
-    hinted: bool = True
-
-    async def prepare_single(self, datakey_name: str) -> SignalDataProvider:
-        # Need to wait for all the plugins to have finished before we can read
-        # the plugin signal
-        await self.driver.wait_for_plugins.set(True)
-        return SignalDataProvider(self.signal)
-
-    def get_hinted_fields(self, datakey_name: str) -> Sequence[str]:
-        return [self.signal.name] if self.hinted else []
+from ._stats_time_series import StatsTimeSeriesDataLogic
 
 
 @dataclass
@@ -162,7 +149,15 @@ async def prepare_file_paths(
 
 
 @dataclass
-class ADHDFDataLogic(DetectorDataLogic):
+class ADHDFDataCtx:
+    """What `ADHDFDataLogic.make_data_provider` worked out for `start` to write."""
+
+    path_info: PathInfo
+    frames_per_chunk: int
+
+
+@dataclass
+class ADHDFDataLogic(DetectorDataLogic[ADHDFDataCtx]):
     """Data logic for AreaDetector HDF5 writer plugin.
 
     :param array_description: Signals describing the NDArray shape and data type.
@@ -179,34 +174,35 @@ class ADHDFDataLogic(DetectorDataLogic):
     writer: NDFileHDF5IO
     plugins: Sequence[NDPluginBaseIO] = ()
     datakey_suffix: str = ""
+    #: Whether to switch the plugin on when starting. Left True, the plugin is
+    #: enabled as part of starting, which is the behaviour beamlines rely on.
+    #: Set False to follow whatever the plugin is set to instead: a disabled
+    #: plugin then makes no provider, so another data logic can serve the scan.
+    enable_callbacks: bool = True
 
-    async def prepare_unbounded(self, datakey_name: str) -> StreamableDataProvider:
+    async def make_data_provider(
+        self,
+        datakey_name: str,
+        num_collections: int,
+        period: float,
+        flush_period: float,
+    ) -> tuple[StreamableDataProvider, ADHDFDataCtx] | None:
+        # A file writer captures for as long as it is told to, so it does not
+        # need to know how many collections the scan will take.
+        if not self.enable_callbacks and not await plugin_is_enabled(self.writer):
+            return None
         # Work out where to write
         path_info = self.path_provider(datakey_name)
-        # Determine number of frames that will be saved per HDF chunk.
-        # On a fresh IOC startup, this is set to zero until the first capture,
-        # so if it is zero, set it to 1.
-        frames_per_chunk = await self.writer.num_frames_chunks.get_value()
-        if frames_per_chunk == 0:
-            frames_per_chunk = 1
-            await self.writer.num_frames_chunks.set(frames_per_chunk)
-        # Setup the HDF writer
-        await asyncio.gather(
-            self.writer.chunk_size_auto.set(True),
-            self.writer.num_extra_dims.set(0),
-            self.writer.lazy_open.set(True),
-            self.writer.swmr_mode.set(True),
-            self.writer.xml_file_name.set(""),
-            self.writer.enable_callbacks.set(EnableDisable.ENABLE),
-            prepare_file_paths(
-                path_info=path_info, file_template="%s%s.h5", writer=self.writer
-            ),
-        )
-        # Start capturing
-        await set_and_wait_for_value(
-            self.writer.capture, True, wait_for_set_completion=False
-        )
-        # Return a provider that reflects what we have made
+        # Size the HDF chunk from the frame period and the target flush period:
+        # e.g. 400 Hz frames (period 2.5 ms) with a 0.5 s flush period gives 200
+        # frames per chunk, so the file is flushed at ~2 Hz (#1309). Only when
+        # both are known (non-zero); otherwise fall back to reading the chunk
+        # size back from the IOC, forcing a fresh-startup 0 to 1.
+        if flush_period > 0 and period > 0:
+            frames_per_chunk = max(1, round(flush_period / period))
+        else:
+            frames_per_chunk = await self.writer.num_frames_chunks.get_value() or 1
+        # Describe what we would write
         main_dataset = await get_ndarray_resource_info(
             array_description=self.array_description,
             data_key=datakey_name,
@@ -229,12 +225,37 @@ class ADHDFDataLogic(DetectorDataLogic):
             )
             for name, (dtype_numpy, source) in ndattribute_dtype_sources.items()
         ]
-        return StreamResourceDataProvider(
+        provider = StreamResourceDataProvider(
             uri=f"{path_info.directory_uri}{path_info.filename}.h5",
             resources=[main_dataset] + ndattribute_datasets,
             mimetype="application/x-hdf5",
             collections_written_signal=self.writer.num_captured,
             flush_signal=self.writer.flush_now,
+        )
+        return provider, ADHDFDataCtx(path_info, frames_per_chunk)
+
+    async def start(self, ctx: ADHDFDataCtx) -> None:
+        path_info = ctx.path_info
+        # Write back the chunk size the provider was described with, so the file
+        # matches the chunk_shape in its stream resource either way
+        await self.writer.num_frames_chunks.set(ctx.frames_per_chunk)
+        # Setup the HDF writer
+        coros: list[Awaitable] = [
+            self.writer.chunk_size_auto.set(True),
+            self.writer.num_extra_dims.set(0),
+            self.writer.lazy_open.set(True),
+            self.writer.swmr_mode.set(True),
+            self.writer.xml_file_name.set(""),
+            prepare_file_paths(
+                path_info=path_info, file_template="%s%s.h5", writer=self.writer
+            ),
+        ]
+        if self.enable_callbacks:
+            coros.append(self.writer.enable_callbacks.set(EnableDisable.ENABLE))
+        await asyncio.gather(*coros)
+        # Start capturing
+        await set_and_wait_for_value(
+            self.writer.capture, True, wait_for_set_completion=False
         )
 
     async def stop(self) -> None:
@@ -246,7 +267,7 @@ class ADHDFDataLogic(DetectorDataLogic):
 
 
 @dataclass
-class ADMultipartDataLogic(DetectorDataLogic):
+class ADMultipartDataLogic(DetectorDataLogic[PathInfo]):
     """Data logic for multipart AreaDetector file writers (e.g. JPEG, TIFF).
 
     :param array_description: Signals describing the NDArray shape and data type.
@@ -265,32 +286,43 @@ class ADMultipartDataLogic(DetectorDataLogic):
     mimetype: str
     datakey_suffix: str = ""
 
-    async def prepare_unbounded(self, datakey_name: str) -> StreamableDataProvider:
+    async def make_data_provider(
+        self,
+        datakey_name: str,
+        num_collections: int,
+        period: float,
+        flush_period: float,
+    ) -> tuple[StreamableDataProvider, PathInfo]:
+        # A multipart writer writes one file per frame, so there is nothing to
+        # size from the period, and it writes for as long as it is told to.
         # Work out where to write
         path_info = self.path_provider(datakey_name)
-        # Setup the file writer
-        await prepare_file_paths(
-            path_info=path_info,
-            file_template="%s%s_%6.6d" + self.extension,
-            writer=self.writer,
-        )
-        # Start capturing
-        await set_and_wait_for_value(
-            self.writer.capture, True, wait_for_set_completion=False
-        )
-        # Return a provider that reflects what we have made
+        # Describe what we would write
         main_dataset = await get_ndarray_resource_info(
             array_description=self.array_description,
             data_key=datakey_name,
             parameters={"template": path_info.filename + "_{:06d}" + self.extension},
         )
-        return StreamResourceDataProvider(
+        provider = StreamResourceDataProvider(
             # TODO: remove the type ignore after
             # https://github.com/bluesky/ophyd-async/issues/1186
             uri=path_info.directory_uri,
             resources=[main_dataset],
             mimetype=self.mimetype,
             collections_written_signal=self.writer.num_captured,
+        )
+        return provider, path_info
+
+    async def start(self, ctx: PathInfo) -> None:
+        # Setup the file writer
+        await prepare_file_paths(
+            path_info=ctx,
+            file_template="%s%s_%6.6d" + self.extension,
+            writer=self.writer,
+        )
+        # Start capturing
+        await set_and_wait_for_value(
+            self.writer.capture, True, wait_for_set_completion=False
         )
 
     async def stop(self) -> None:
@@ -302,17 +334,17 @@ class ADMultipartDataLogic(DetectorDataLogic):
 
 
 @dataclass
-class ADWriterFactory(Generic[NDPluginFileIOT]):
-    """Factory that creates a file-writer plugin and its matching data logic.
+class ADWriterFactory(Generic[NDPluginBaseIOT]):
+    """Factory that creates a writer plugin and its matching data logic.
 
-    Construct using the classmethods `hdf`, `jpeg`, or `tiff`, then pass one
-    or more instances to `AreaDetector` as positional `*writer_factories`
+    Construct using the classmethods `hdf`, `jpeg`, `tiff` or `stats`, then pass
+    one or more instances to `AreaDetector` as positional `*writer_factories`
     arguments.  When the detector is initialised `__call__` is invoked with
     the detector's PV `prefix`, its `driver`, and the flat list of extra
     `plugins`; it returns the writer device and the corresponding
     `DetectorDataLogic`.
 
-    :param writer_cls: Concrete `NDPluginFileIO` subclass to instantiate.
+    :param writer_cls: Concrete `NDPluginBaseIO` subclass to instantiate.
     :param writer_suffix: PV suffix appended to *prefix* to form the writer's PV prefix.
     :param writer_name:
         Attribute name under which the writer device is stored on the
@@ -331,7 +363,7 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
         that builds the data logic given the already-constructed writer.
     """
 
-    writer_cls: type[NDPluginFileIOT]
+    writer_cls: type[NDPluginBaseIOT]
     writer_suffix: str
     writer_name: str
     datakey_suffix: str
@@ -339,7 +371,7 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
         NDArrayDescription | Callable[[ADBaseIO], NDArrayDescription] | None
     )
     data_logic_factory: Callable[
-        [NDPluginFileIOT, NDArrayDescription, ADBaseIO, Sequence[NDPluginBaseIO]],
+        [NDPluginBaseIOT, NDArrayDescription, ADBaseIO, Sequence[NDPluginBaseIO]],
         DetectorDataLogic,
     ]
 
@@ -348,7 +380,7 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
         prefix: str,
         driver: ADBaseIO,
         plugins: Sequence[NDPluginBaseIO],
-    ) -> tuple[NDPluginFileIOT, DetectorDataLogic]:
+    ) -> tuple[NDPluginBaseIOT, DetectorDataLogic]:
         """Instantiate the writer plugin and build the data logic.
 
         :param prefix: EPICS PV prefix for the detector (same as `AreaDetector.prefix`).
@@ -384,6 +416,7 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
         array_description: NDArrayDescription
         | Callable[[ADBaseIO], NDArrayDescription]
         | None = None,
+        enable_callbacks: bool = True,
     ) -> "ADWriterFactory[NDFileHDF5IO]":
         """Create a factory for an HDF5 file writer.
 
@@ -399,6 +432,10 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
             Pass an `NDArrayDescription` or a callable ``(driver) → NDArrayDescription``
             when the shape/type comes from a plugin rather than the main driver
             (e.g. an ROI plugin).
+        :param enable_callbacks: Whether to switch the plugin on when starting,
+            defaults to ``True``. Set ``False`` to follow whatever the plugin is
+            set to instead: a disabled plugin then writes nothing and another
+            data logic can serve the scan.
         """
         return ADWriterFactory(
             writer_cls=NDFileHDF5IO,
@@ -413,6 +450,7 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
                 writer=writer,
                 plugins=list(plugins),
                 datakey_suffix=datakey_suffix,
+                enable_callbacks=enable_callbacks,
             ),
         )
 
@@ -496,6 +534,53 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
                     extension=".tiff",
                     mimetype="multipart/related;type=image/tiff",
                     datakey_suffix=datakey_suffix,
+                )
+            ),
+        )
+
+    @staticmethod
+    def stats(
+        writer_suffix: str = "STAT:",
+        writer_name: str = "stats",
+        datakey_suffix: str = "",
+        stat_signals: Callable[
+            [NDStatsIO], Sequence[tuple[str, SignalR[Array1D[np.float64]]]]
+        ]
+        | None = None,
+        enable_callbacks: bool = True,
+    ) -> "ADWriterFactory[NDStatsIO]":
+        """Create a factory for an NDPluginStats time series.
+
+        Unlike `hdf`, `jpeg` and `tiff`, this writes no file: the stats plugin's
+        time series is a fixed-length buffer read back as event pages, for
+        detectors that cannot write assets (see `StatsTimeSeriesDataLogic`).
+
+        :param enable_callbacks: Whether to switch the plugin on when starting,
+            defaults to ``True``. Set ``False`` to follow whatever the plugin is
+            set to instead: a disabled plugin then produces nothing.
+        :param writer_suffix: PV suffix for the NDPluginStats plugin, defaults to
+            ``STAT:``.
+        :param writer_name:
+            Attribute name for the plugin on the detector, defaults to ``"stats"``.
+        :param datakey_suffix: Suffix appended to the datakey name, defaults to ``""``.
+        :param stat_signals:
+            Callable ``(stats) → [(suffix, array_signal), ...]`` choosing which
+            statistics to expose, given the constructed plugin. Left as ``None``
+            (the default), only the ``Total`` series is exposed under the bare
+            datakey name.
+        """
+        return ADWriterFactory(
+            writer_cls=NDStatsIO,
+            writer_suffix=writer_suffix,
+            writer_name=writer_name,
+            datakey_suffix=datakey_suffix,
+            array_description=None,
+            data_logic_factory=lambda writer, desc, driver, plugins: (
+                StatsTimeSeriesDataLogic(
+                    stats=writer,
+                    stat_signals=list(stat_signals(writer)) if stat_signals else [],
+                    datakey_suffix=datakey_suffix,
+                    enable_callbacks=enable_callbacks,
                 )
             ),
         )

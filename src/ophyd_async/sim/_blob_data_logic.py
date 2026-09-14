@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from pathlib import PurePath
 
 import numpy as np
 
@@ -16,7 +17,7 @@ WIDTH = 320
 HEIGHT = 240
 
 
-class BlobDataLogic(DetectorDataLogic):
+class BlobDataLogic(DetectorDataLogic[PurePath]):
     def __init__(
         self,
         path_provider: PathProvider,
@@ -25,13 +26,19 @@ class BlobDataLogic(DetectorDataLogic):
         self.path_provider = path_provider
         self.pattern_generator = pattern_generator
 
-    async def prepare_unbounded(self, datakey_name: str) -> StreamableDataProvider:
+    async def make_data_provider(
+        self,
+        datakey_name: str,
+        num_collections: int,
+        period: float,
+        flush_period: float,
+    ) -> tuple[StreamableDataProvider, PurePath]:
+        # The sim blob writer uses a fixed chunk shape and writes for as long as
+        # it is told to, so neither the periods nor the count are needed.
         # Work out where to write
         path_info = self.path_provider(datakey_name)
-        # Open the file
         write_path = path_info.directory_path / f"{path_info.filename}.h5"
-        self.pattern_generator.open_file(write_path, WIDTH, HEIGHT)
-        # Return a provider that reflects what we have made
+        # Describe what we would write
         data_resource = StreamResourceInfo(
             data_key=datakey_name,
             shape=(HEIGHT, WIDTH),
@@ -50,12 +57,16 @@ class BlobDataLogic(DetectorDataLogic):
             dtype_numpy=np.dtype(np.int64).str,
             parameters={"dataset": SUM_PATH},
         )
-        return StreamResourceDataProvider(
+        provider = StreamResourceDataProvider(
             uri=f"{path_info.directory_uri}{path_info.filename}.h5",
             resources=[data_resource, sum_resource],
             mimetype="application/x-hdf5",
             collections_written_signal=self.pattern_generator.images_written,
         )
+        return provider, write_path
+
+    async def start(self, ctx: PurePath) -> None:
+        self.pattern_generator.open_file(ctx, WIDTH, HEIGHT)
 
     async def stop(self) -> None:
         self.pattern_generator.close_file()
