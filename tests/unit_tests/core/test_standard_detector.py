@@ -133,7 +133,7 @@ class MockAcquireLogic(DetectorAcquireLogic):
         self.disarm_count += 1
 
 
-class StreamableOnlyDataLogic(DetectorDataLogic):
+class StreamableOnlyDataLogic(DetectorDataLogic[None]):
     """Produces only streamable (file-based) data."""
 
     def __init__(self, tmp_path, datakey_suffix: str = ""):
@@ -143,8 +143,12 @@ class StreamableOnlyDataLogic(DetectorDataLogic):
         self.datakey_suffix = datakey_suffix
 
     async def make_data_provider(
-        self, datakey_name: str, num_collections: int, period: float
-    ) -> StreamableDataProvider:
+        self,
+        datakey_name: str,
+        num_collections: int,
+        period: float,
+        flush_period: float,
+    ) -> tuple[StreamableDataProvider, None]:
         resource = StreamResourceInfo(
             data_key=datakey_name,
             shape=(10, 15),
@@ -158,7 +162,7 @@ class StreamableOnlyDataLogic(DetectorDataLogic):
             mimetype="application/x-hdf5",
             collections_written_signal=self.collections_written,
         )
-        return provider
+        return provider, None
 
     async def stop(self) -> None:
         self.stop_count += 1
@@ -198,7 +202,7 @@ class MockPageableProvider(PageableDataProvider):
             yield page
 
 
-class BoundedOnlyDataLogic(DetectorDataLogic):
+class BoundedOnlyDataLogic(DetectorDataLogic[tuple[int, float]]):
     """Produces bounded data held in a finite buffer, sized when it is armed."""
 
     def __init__(self, datakey_suffix: str = ""):
@@ -206,20 +210,22 @@ class BoundedOnlyDataLogic(DetectorDataLogic):
         self.collections_written = soft_signal_rw(int)
         self.prepare_calls: list[tuple[int, float]] = []
         self.stop_count = 0
-        self._to_start: tuple[int, float] | None = None
 
     async def make_data_provider(
-        self, datakey_name: str, num_collections: int, period: float
-    ) -> PageableDataProvider | None:
+        self,
+        datakey_name: str,
+        num_collections: int,
+        period: float,
+        flush_period: float,
+    ) -> tuple[PageableDataProvider, tuple[int, float]] | None:
         if num_collections == 0:
             # A finite buffer cannot serve an unbounded scan
             return None
-        self._to_start = (num_collections, period)
-        return MockPageableProvider(datakey_name, self.collections_written)
+        provider = MockPageableProvider(datakey_name, self.collections_written)
+        return provider, (num_collections, period)
 
-    async def start(self) -> None:
-        assert self._to_start is not None
-        self.prepare_calls.append(self._to_start)
+    async def start(self, ctx: tuple[int, float]) -> None:
+        self.prepare_calls.append(ctx)
         # A real buffer clears its progress counter when armed
         await self.collections_written.set(0)
 
@@ -1209,13 +1215,13 @@ async def test_trigger_logic_not_implemented_errors():
 
 async def test_data_logic_not_implemented_errors():
     """Test NotImplementedError for unimplemented DetectorDataLogic methods."""
-    logic = DetectorDataLogic()
+    logic = DetectorDataLogic[None]()
 
     with pytest.raises(NotImplementedError):
-        await logic.make_data_provider("test", 1, 0.1)
+        await logic.make_data_provider("test", 1, 0.1, 0.0)
 
     # start() and stop() should not raise (they have default implementations)
-    await logic.start()
+    await logic.start(None)
     await logic.stop()
 
 

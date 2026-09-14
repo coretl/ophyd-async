@@ -17,7 +17,7 @@ from ophyd_async.core import (
 from ._io import OdinIO
 
 
-class OdinDataLogic(DetectorDataLogic):
+class OdinDataLogic(DetectorDataLogic[None]):
     def __init__(
         self,
         path_provider: PathProvider,
@@ -29,11 +29,14 @@ class OdinDataLogic(DetectorDataLogic):
         self.detector_bit_depth = detector_bit_depth
 
     async def make_data_provider(
-        self, datakey_name: str, num_collections: int, period: float
-    ) -> StreamableDataProvider:
+        self,
+        datakey_name: str,
+        num_collections: int,
+        period: float,
+        flush_period: float,
+    ) -> tuple[StreamableDataProvider, None]:
         # Odin sizes its own chunks and writes for as long as it is told to, so
-        # neither the frame period nor the count is used here yet.
-        del period, num_collections
+        # neither the periods nor the count are used here yet.
         # Unlike other data logics this one cannot describe its data without
         # starting: the frame shape is only readable from the file processor
         # once it is writing. So it does its own writes here and has nothing
@@ -73,13 +76,14 @@ class OdinDataLogic(DetectorDataLogic):
             dtype_numpy=np.dtype(datatype).str,
             parameters={"dataset": "/data"},
         )
-        return StreamResourceDataProvider(
+        provider = StreamResourceDataProvider(
             # Should be _vds instead of _000001, see https://github.com/bluesky/ophyd-async/issues/1272
             uri=f"{path_info.directory_uri}{filename}_000001.h5",
             resources=[resource],
             mimetype="application/x-hdf5",
             collections_written_signal=self.odin.fp.frames_written,
         )
+        return provider, None
 
     async def stop(self) -> None:
         await asyncio.gather(

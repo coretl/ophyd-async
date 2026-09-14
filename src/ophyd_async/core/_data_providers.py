@@ -1,13 +1,15 @@
 from abc import abstractmethod
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
+import numpy as np
 from bluesky.protocols import StreamAsset
 from event_model import ComposeStreamResource, DataKey, StreamRange
 from event_model.documents import PartialEventPage
 
+from ._datatypes import Array1D
 from ._signal import SignalR, SignalW
-from ._utils import ConfinedModel
+from ._utils import ConfinedModel, error_if_none, gather_dict, get_dtype
 
 
 class StreamableDataProvider:
@@ -69,6 +71,86 @@ class PageableDataProvider:
         :param collections_written: how many collections have been written so far
         :param collections_per_event: how many collections make up one event
         """
+
+
+class EventPageDataProvider(PageableDataProvider):
+    """Emits a fixed-length array of collections as event pages.
+
+    For a device that fills one array per field as it acquires, alongside an
+    array of per-collection timestamps and a signal counting how many
+    collections it has filled: an areaDetector stats time series, or a scaler's
+    MCA arrays. Each array is sliced into `collections_per_event`-length chunks,
+    one per event, and the last collection of an event supplies that event's
+    timestamp.
+
+    :param data: datakey (already suffixed) to the array signal that backs it
+    :param collections_written_signal: counts the collections filled so far
+    :param timestamps: the acquisition time of each collection
+    """
+
+    def __init__(
+        self,
+        data: Mapping[str, SignalR[Array1D[Any]]],
+        collections_written_signal: SignalR[int],
+        timestamps: SignalR[Array1D[np.float64]],
+    ) -> None:
+        self.data = dict(data)
+        self.collections_written_signal = collections_written_signal
+        self.timestamps = timestamps
+        self.last_emitted = 0
+
+    async def make_datakeys(self, collections_per_event: int) -> dict[str, DataKey]:
+        return {
+            datakey: DataKey(
+                source=signal.source,
+                shape=[collections_per_event],
+                dtype="array",
+                dtype_numpy=get_dtype(
+                    error_if_none(signal.datatype, f"{signal.source} has no datatype")
+                ).str,
+            )
+            for datakey, signal in self.data.items()
+        }
+
+    async def make_pages(
+        self, collections_written: int, collections_per_event: int
+    ) -> AsyncIterator[PartialEventPage]:
+        events = collections_written // collections_per_event
+        if events <= self.last_emitted:
+            return
+        new = range(self.last_emitted, events)
+        # Read every array and the per-collection timestamps in one parallel batch
+        read: dict[SignalR[Array1D[Any]], Array1D[Any]] = await gather_dict(
+            {
+                signal: signal.get_value()
+                for signal in (*self.data.values(), self.timestamps)
+            }
+        )
+        stamps = read[self.timestamps]
+        # One timestamp per event: the acquisition time of that event's last
+        # collection.
+        event_times = [
+            float(stamps[(event + 1) * collections_per_event - 1]) for event in new
+        ]
+        page: PartialEventPage = {
+            # TODO: numpy arrays are not in PartialEventPage's value type, but
+            # they round trip through the bundler fine; fix upstream in
+            # event-model rather than converting to lists here
+            "data": {  # type: ignore[typeddict-item]
+                datakey: [
+                    read[signal][
+                        event * collections_per_event : (event + 1)
+                        * collections_per_event
+                    ]
+                    for event in new
+                ]
+                for datakey, signal in self.data.items()
+            },
+            "time": event_times,
+            "timestamps": dict.fromkeys(self.data, event_times),
+        }
+        self.last_emitted = events
+        yield page
 
 
 class StreamResourceInfo(ConfinedModel):

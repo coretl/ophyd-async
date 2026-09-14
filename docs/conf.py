@@ -156,6 +156,7 @@ obj_ignore = [
     "ophyd_async.core._standard_base._StandardBase",
     "ophyd_async.core._flyable.PrepareT",
     "ophyd_async.core._flyable.CtxT",
+    "ophyd_async.core._detector.DataCtxT",
     "ophyd_async.core._utils.P",
     "ophyd_async.core._utils.P.args",
     "ophyd_async.core._utils.P.kwargs",

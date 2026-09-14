@@ -11,6 +11,7 @@ from ophyd_async.core import (
     DetectorLogic,
     DetectorTriggerLogic,
     EnableDisable,
+    EventPageDataProvider,
     StandardDetector,
     TriggerInfo,
     init_devices,
@@ -20,7 +21,6 @@ from ophyd_async.epics import adcore
 from ophyd_async.epics.adcore import (
     NDStatsTSAcquireMode,
     StatsTimeSeriesDataLogic,
-    StatsTimeSeriesProvider,
 )
 
 
@@ -33,14 +33,16 @@ async def stats() -> adcore.NDStatsIO:
 
 async def test_start_sizes_and_arms_the_buffer(stats: adcore.NDStatsIO):
     logic = StatsTimeSeriesDataLogic(stats)
-    provider = await logic.make_data_provider(
-        "det-stats", num_collections=5, period=0.1
+    made = await logic.make_data_provider(
+        "det-stats", num_collections=5, period=0.1, flush_period=0.0
     )
-    assert isinstance(provider, StatsTimeSeriesProvider)
+    assert made is not None
+    provider, ctx = made
+    assert isinstance(provider, EventPageDataProvider)
     # Describing the buffer does not arm it
     assert await stats.ts_num_points.get_value() == 0
 
-    await logic.start()
+    await logic.start(ctx)
     assert await stats.ts_num_points.get_value() == 5
     assert await stats.ts_acquire_mode.get_value() == NDStatsTSAcquireMode.FIXED_LENGTH
     # ts_acquire=1 arms and clears the buffer
@@ -55,7 +57,12 @@ async def test_start_sizes_and_arms_the_buffer(stats: adcore.NDStatsIO):
 async def test_unbounded_scan_makes_no_provider(stats: adcore.NDStatsIO):
     """A finite buffer cannot serve an unbounded scan, so it sits it out."""
     logic = StatsTimeSeriesDataLogic(stats)
-    assert await logic.make_data_provider("det", num_collections=0, period=0.1) is None
+    assert (
+        await logic.make_data_provider(
+            "det", num_collections=0, period=0.1, flush_period=0.0
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize(
@@ -78,11 +85,13 @@ async def test_follows_the_plugin_when_not_enabling_it(
     set_mock_value(stats.enable_callbacks, plugin_enabled)
     logic = StatsTimeSeriesDataLogic(stats, enable_callbacks=enable_callbacks)
 
-    provider = await logic.make_data_provider("det", num_collections=5, period=0.1)
-    assert (provider is not None) is makes_provider
+    made = await logic.make_data_provider(
+        "det", num_collections=5, period=0.1, flush_period=0.0
+    )
+    assert (made is not None) is makes_provider
 
-    if makes_provider:
-        await logic.start()
+    if made is not None:
+        await logic.start(made[1])
         # Only the default reaches out and switches the plugin on
         expected = EnableDisable.ENABLE if enable_callbacks else plugin_enabled
         assert await stats.enable_callbacks.get_value() is expected
@@ -93,44 +102,6 @@ async def test_stop_stops_the_time_series(stats: adcore.NDStatsIO):
     set_mock_value(stats.ts_acquire, True)
     await logic.stop()
     assert await stats.ts_acquire.get_value() is False
-
-
-@pytest.mark.parametrize(
-    "collections_per_event,expected_data,expected_times",
-    [
-        # step scan: one event holds the whole 5-point buffer, timed by its
-        # last point
-        (5, [[10.0, 11.0, 12.0, 13.0, 14.0]], [104.0]),
-        # fly scan: five events of one point each, timed point by point
-        (
-            1,
-            [[10.0], [11.0], [12.0], [13.0], [14.0]],
-            [100.0, 101.0, 102.0, 103.0, 104.0],
-        ),
-    ],
-)
-async def test_provider_slices_array_into_events(
-    stats: adcore.NDStatsIO,
-    collections_per_event: int,
-    expected_data: list[list[float]],
-    expected_times: list[float],
-):
-    set_mock_value(stats.ts_total, np.array([10.0, 11.0, 12.0, 13.0, 14.0]))
-    set_mock_value(stats.ts_timestamp, np.array([100.0, 101.0, 102.0, 103.0, 104.0]))
-    set_mock_value(stats.ts_current_point, 5)
-    provider = StatsTimeSeriesProvider(
-        {"det-stats": stats.ts_total}, stats.ts_current_point, stats.ts_timestamp
-    )
-
-    pages = [
-        page
-        async for page in provider.make_pages(
-            collections_written=5, collections_per_event=collections_per_event
-        )
-    ]
-    (page,) = pages
-    assert page["data"]["det-stats"] == expected_data
-    assert page["time"] == expected_times
 
 
 class _JustInternal(DetectorTriggerLogic):
@@ -192,7 +163,7 @@ def test_step_scan_through_run_engine(RE: RunEngine, stats_detector: StandardDet
     assert descriptor["data_keys"]["det"]["shape"] == [4]
     assert "external" not in descriptor["data_keys"]["det"]
     (event,) = docs["event"]
-    assert event["data"]["det"] == [5.0, 6.0, 7.0, 8.0]
+    np.testing.assert_array_equal(event["data"]["det"], [5.0, 6.0, 7.0, 8.0])
     assert event["timestamps"]["det"] == 203.0
 
 
@@ -214,7 +185,7 @@ def test_fly_scan_emits_event_pages(RE: RunEngine, stats_detector: StandardDetec
     RE(plan(), lambda name, doc: docs[name].append(doc))
 
     (page,) = docs["event_page"]
-    assert page["data"]["det"] == [[5.0], [6.0], [7.0], [8.0]]
+    np.testing.assert_array_equal(page["data"]["det"], [[5.0], [6.0], [7.0], [8.0]])
     assert docs["stop"][0]["num_events"] == {"primary": 4}
 
 
@@ -226,6 +197,6 @@ async def test_step_scan_read_derives_single_reading(stats_detector: StandardDet
     await det.prepare(TriggerInfo(collections_per_event=4))
     await det.trigger()
     reading = await det.read()
-    assert reading["det"]["value"] == [5.0, 6.0, 7.0, 8.0]
+    np.testing.assert_array_equal(reading["det"]["value"], [5.0, 6.0, 7.0, 8.0])
     assert reading["det"]["timestamp"] == 203.0
     await det.unstage()

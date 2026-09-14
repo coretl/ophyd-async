@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import PureWindowsPath
 from typing import Any, Generic
 from xml.etree import ElementTree as ET
@@ -17,7 +17,6 @@ from ophyd_async.core import (
     StreamableDataProvider,
     StreamResourceDataProvider,
     StreamResourceInfo,
-    error_if_none,
     set_and_wait_for_value,
 )
 from ophyd_async.epics.core import stop_busy_record
@@ -150,7 +149,15 @@ async def prepare_file_paths(
 
 
 @dataclass
-class ADHDFDataLogic(DetectorDataLogic):
+class ADHDFDataCtx:
+    """What `ADHDFDataLogic.make_data_provider` worked out for `start` to write."""
+
+    path_info: PathInfo
+    frames_per_chunk: int
+
+
+@dataclass
+class ADHDFDataLogic(DetectorDataLogic[ADHDFDataCtx]):
     """Data logic for AreaDetector HDF5 writer plugin.
 
     :param array_description: Signals describing the NDArray shape and data type.
@@ -167,44 +174,34 @@ class ADHDFDataLogic(DetectorDataLogic):
     writer: NDFileHDF5IO
     plugins: Sequence[NDPluginBaseIO] = ()
     datakey_suffix: str = ""
-    #: Target seconds between HDF flushes. When set, the chunk is sized from
-    #: this and the frame period so the file flushes at roughly this rate
-    #: (#1309). Left as None, the chunk size is read back from the IOC, the
-    #: behaviour before #1309.
-    flush_period: float | None = None
     #: Whether to switch the plugin on when starting. Left True, the plugin is
     #: enabled as part of starting, which is the behaviour beamlines rely on.
     #: Set False to follow whatever the plugin is set to instead: a disabled
     #: plugin then makes no provider, so another data logic can serve the scan.
     enable_callbacks: bool = True
-    #: What make_data_provider worked out for start to write
-    _to_start: "tuple[PathInfo, int | None] | None" = field(
-        default=None, init=False, repr=False
-    )
 
     async def make_data_provider(
-        self, datakey_name: str, num_collections: int, period: float
-    ) -> StreamableDataProvider | None:
+        self,
+        datakey_name: str,
+        num_collections: int,
+        period: float,
+        flush_period: float,
+    ) -> tuple[StreamableDataProvider, ADHDFDataCtx] | None:
         # A file writer captures for as long as it is told to, so it does not
         # need to know how many collections the scan will take.
-        del num_collections
         if not self.enable_callbacks and not await plugin_is_enabled(self.writer):
             return None
         # Work out where to write
         path_info = self.path_provider(datakey_name)
         # Size the HDF chunk from the frame period and the target flush period:
         # e.g. 400 Hz frames (period 2.5 ms) with a 0.5 s flush period gives 200
-        # frames per chunk, so the file is flushed at ~2 Hz (#1309). Only when a
-        # flush_period is configured and the period is known (non-zero); otherwise
-        # fall back to reading the chunk size back from the IOC, forcing a
-        # fresh-startup 0 to 1. Only a value we chose is written back, in start().
-        if self.flush_period is not None and period > 0:
-            frames_per_chunk = to_write = max(1, round(self.flush_period / period))
+        # frames per chunk, so the file is flushed at ~2 Hz (#1309). Only when
+        # both are known (non-zero); otherwise fall back to reading the chunk
+        # size back from the IOC, forcing a fresh-startup 0 to 1.
+        if flush_period > 0 and period > 0:
+            frames_per_chunk = max(1, round(flush_period / period))
         else:
-            frames_per_chunk = await self.writer.num_frames_chunks.get_value()
-            to_write = None
-            if frames_per_chunk == 0:
-                frames_per_chunk = to_write = 1
+            frames_per_chunk = await self.writer.num_frames_chunks.get_value() or 1
         # Describe what we would write
         main_dataset = await get_ndarray_resource_info(
             array_description=self.array_description,
@@ -228,21 +225,20 @@ class ADHDFDataLogic(DetectorDataLogic):
             )
             for name, (dtype_numpy, source) in ndattribute_dtype_sources.items()
         ]
-        self._to_start = (path_info, to_write)
-        return StreamResourceDataProvider(
+        provider = StreamResourceDataProvider(
             uri=f"{path_info.directory_uri}{path_info.filename}.h5",
             resources=[main_dataset] + ndattribute_datasets,
             mimetype="application/x-hdf5",
             collections_written_signal=self.writer.num_captured,
             flush_signal=self.writer.flush_now,
         )
+        return provider, ADHDFDataCtx(path_info, frames_per_chunk)
 
-    async def start(self) -> None:
-        path_info, frames_per_chunk = error_if_none(
-            self._to_start, "make_data_provider() has not been called"
-        )
-        if frames_per_chunk is not None:
-            await self.writer.num_frames_chunks.set(frames_per_chunk)
+    async def start(self, ctx: ADHDFDataCtx) -> None:
+        path_info = ctx.path_info
+        # Write back the chunk size the provider was described with, so the file
+        # matches the chunk_shape in its stream resource either way
+        await self.writer.num_frames_chunks.set(ctx.frames_per_chunk)
         # Setup the HDF writer
         coros: list[Awaitable] = [
             self.writer.chunk_size_auto.set(True),
@@ -271,7 +267,7 @@ class ADHDFDataLogic(DetectorDataLogic):
 
 
 @dataclass
-class ADMultipartDataLogic(DetectorDataLogic):
+class ADMultipartDataLogic(DetectorDataLogic[PathInfo]):
     """Data logic for multipart AreaDetector file writers (e.g. JPEG, TIFF).
 
     :param array_description: Signals describing the NDArray shape and data type.
@@ -290,15 +286,15 @@ class ADMultipartDataLogic(DetectorDataLogic):
     mimetype: str
     datakey_suffix: str = ""
 
-    #: Where make_data_provider decided to write, for start to set up
-    _to_start: "PathInfo | None" = field(default=None, init=False, repr=False)
-
     async def make_data_provider(
-        self, datakey_name: str, num_collections: int, period: float
-    ) -> StreamableDataProvider:
-        # A multipart writer writes one file per frame, so there is no chunk to
+        self,
+        datakey_name: str,
+        num_collections: int,
+        period: float,
+        flush_period: float,
+    ) -> tuple[StreamableDataProvider, PathInfo]:
+        # A multipart writer writes one file per frame, so there is nothing to
         # size from the period, and it writes for as long as it is told to.
-        del period, num_collections
         # Work out where to write
         path_info = self.path_provider(datakey_name)
         # Describe what we would write
@@ -307,8 +303,7 @@ class ADMultipartDataLogic(DetectorDataLogic):
             data_key=datakey_name,
             parameters={"template": path_info.filename + "_{:06d}" + self.extension},
         )
-        self._to_start = path_info
-        return StreamResourceDataProvider(
+        provider = StreamResourceDataProvider(
             # TODO: remove the type ignore after
             # https://github.com/bluesky/ophyd-async/issues/1186
             uri=path_info.directory_uri,
@@ -316,14 +311,12 @@ class ADMultipartDataLogic(DetectorDataLogic):
             mimetype=self.mimetype,
             collections_written_signal=self.writer.num_captured,
         )
+        return provider, path_info
 
-    async def start(self) -> None:
-        path_info = error_if_none(
-            self._to_start, "make_data_provider() has not been called"
-        )
+    async def start(self, ctx: PathInfo) -> None:
         # Setup the file writer
         await prepare_file_paths(
-            path_info=path_info,
+            path_info=ctx,
             file_template="%s%s_%6.6d" + self.extension,
             writer=self.writer,
         )
@@ -423,7 +416,6 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
         array_description: NDArrayDescription
         | Callable[[ADBaseIO], NDArrayDescription]
         | None = None,
-        flush_period: float | None = None,
         enable_callbacks: bool = True,
     ) -> "ADWriterFactory[NDFileHDF5IO]":
         """Create a factory for an HDF5 file writer.
@@ -440,10 +432,6 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
             Pass an `NDArrayDescription` or a callable ``(driver) → NDArrayDescription``
             when the shape/type comes from a plugin rather than the main driver
             (e.g. an ROI plugin).
-        :param flush_period: Target seconds between HDF flushes. When set, the
-            chunk is sized from this and the frame period so the file flushes at
-            roughly this rate (#1309). Left as ``None`` (the default), the chunk
-            size is read back from the IOC as before.
         :param enable_callbacks: Whether to switch the plugin on when starting,
             defaults to ``True``. Set ``False`` to follow whatever the plugin is
             set to instead: a disabled plugin then writes nothing and another
@@ -462,7 +450,6 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
                 writer=writer,
                 plugins=list(plugins),
                 datakey_suffix=datakey_suffix,
-                flush_period=flush_period,
                 enable_callbacks=enable_callbacks,
             ),
         )

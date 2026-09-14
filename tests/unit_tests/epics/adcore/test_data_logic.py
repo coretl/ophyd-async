@@ -52,12 +52,14 @@ async def test_make_data_provider_does_not_write(
         writer=writer,
     )
 
-    provider = await logic.make_data_provider("det", num_collections=5, period=0.1)
-    assert provider is not None
+    made = await logic.make_data_provider(
+        "det", num_collections=5, period=0.1, flush_period=0.0
+    )
+    assert made is not None
     assert await writer.capture.get_value() is False
     assert await writer.file_name.get_value() == ""
 
-    await logic.start()
+    await logic.start(made[1])
     assert await writer.capture.get_value() is True
     assert await writer.file_name.get_value() != ""
 
@@ -95,11 +97,13 @@ async def test_hdf_follows_the_plugin_when_not_enabling_it(
         enable_callbacks=enable_callbacks,
     )
 
-    provider = await logic.make_data_provider("det", num_collections=5, period=0.1)
-    assert (provider is not None) is makes_provider
+    made = await logic.make_data_provider(
+        "det", num_collections=5, period=0.1, flush_period=0.0
+    )
+    assert (made is not None) is makes_provider
 
-    if makes_provider:
-        await logic.start()
+    if made is not None:
+        await logic.start(made[1])
         expected = EnableDisable.ENABLE if enable_callbacks else plugin_enabled
         assert await writer.enable_callbacks.get_value() is expected
 
@@ -181,11 +185,11 @@ async def test_hdf_chunk_sized_from_flush_period(
     deadtime: float,
     expected_frames_per_chunk: int,
 ):
-    """A configured flush_period sizes the HDF chunk from the frame period."""
+    """A TriggerInfo flush_period sizes the HDF chunk from the frame period."""
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider, flush_period=flush_period),
+            adcore.ADWriterFactory.hdf(static_path_provider),
         )
     set_mock_value(det.driver.array_size_x, 1024)
     set_mock_value(det.driver.array_size_y, 768)
@@ -193,7 +197,12 @@ async def test_hdf_chunk_sized_from_flush_period(
     writer = det.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
     await det.prepare(
-        TriggerInfo(livetime=livetime, deadtime=deadtime, number_of_events=3)
+        TriggerInfo(
+            livetime=livetime,
+            deadtime=deadtime,
+            number_of_events=3,
+            flush_period=flush_period,
+        )
     )
     assert await writer.num_frames_chunks.get_value() == expected_frames_per_chunk
     (sr, *_) = [doc async for doc in det.collect_asset_docs(3)]

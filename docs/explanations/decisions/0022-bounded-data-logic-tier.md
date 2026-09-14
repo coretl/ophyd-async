@@ -69,17 +69,22 @@ fly scan.
 ### One method that describes, and one that starts
 
 ```python
-class DetectorDataLogic:
+class DetectorDataLogic(Generic[DataCtxT]):
     async def make_data_provider(
-        self, datakey_name: str, num_collections: int, period: float
-    ) -> StreamableDataProvider | PageableDataProvider | None: ...
-    async def start(self) -> None: ...
+        self, datakey_name: str, num_collections: int,
+        period: float, flush_period: float,
+    ) -> tuple[StreamableDataProvider | PageableDataProvider, DataCtxT] | None: ...
+    async def start(self, ctx: DataCtxT) -> None: ...
 ```
 
 `make_data_provider` says what this logic *would* produce for this scan without starting
 anything; `start` does the writes that make it happen, and is called only for the providers
 the detector will use. So the detector asks every logic what it would make, decides which ones
 it wants, and starts only those.
+
+What the first worked out and the second needs is threaded between them through an explicit
+context object, the same way `FlyableLogic` threads its own, rather than stashed on the logic.
+A logic that stored it would be left holding a plan for a scan it was never asked to serve.
 
 One `prepare_*` per tier, doing both jobs, was tried first. It forces the detector to arm
 hardware to find out what it would get, so a provider it then decides not to use has to be
@@ -196,13 +201,14 @@ contending over one `TSAcquire`. Which statistics are wanted becomes a construct
 ## Consequences
 
 `DetectorDataLogic` implementations must be rewritten onto `make_data_provider` and `start`,
-and take the new `period` argument. This is a breaking change for out-of-tree data logics; the
+and take the new `period` and `flush_period` arguments. This is a breaking change for out-of-tree data logics; the
 library is in alpha and no shim is provided. Splitting them is usually mechanical — describe in
 one, write in the other — but a logic that cannot describe its data without starting (in tree,
 `OdinDataLogic`, whose frame shape is only readable once the file processor is writing) has to
 do its writes in `make_data_provider` and leave `start` empty, which is safe only while such a
-logic is never the one a detector drops. In-tree, `ADHDFDataLogic` and `PandaHDFDataLogic` can
-compute chunk size and flush period from the rate, replacing the TODOs that stand in for it.
+logic is never the one a detector drops. In-tree, `ADHDFDataLogic` sizes its chunk from
+`TriggerInfo.flush_period` and the rate, and `PandaHDFDataLogic` sets its flush period signal
+from the same field, replacing the TODOs that stood in for both.
 
 `DetectorTriggerLogic.default_trigger_info()` implementations should return the current
 `livetime` and `deadtime` alongside the frame count. Those that do not still work, but their
