@@ -14,6 +14,7 @@ from typing import Any, Generic, TypeVar, cast
 from bluesky.protocols import (
     Collectable,
     HasHints,
+    Hints,
     Reading,
     Stageable,
     StreamAsset,
@@ -32,7 +33,6 @@ from ._readable import (
     StandardReadable,
     StandardReadableFormat,
     _config_signals,
-    _HintedFields,
 )
 from ._settings import Settings
 from ._signal import SignalDict, SignalR, SignalRW, observe_signals_value
@@ -922,7 +922,7 @@ class StandardDetector(
         # children, so the verb methods themselves need no overriding
         self._read_funcs += (self._data_read,)
         self._describe_funcs += (self._data_describe,)
-        self._hint_sources += (self._data_hint_sources,)
+        self._hint_funcs += (self._data_hints,)
 
     @abstract_cached_property
     def logic(self) -> DetectorLogic:
@@ -1079,10 +1079,10 @@ class StandardDetector(
         ]
         return await merge_gathered_dicts(coros)
 
-    def _data_hint_sources(self) -> Iterator[HasHints]:
+    def _data_hints(self) -> Iterator[Hints]:
         """The data logics' hinted fields, alongside the children's."""
         for fields in self.logic.get_hinted_fields():
-            yield _HintedFields(fields)
+            yield {"fields": list(fields)}
 
     async def _pageable_readings(
         self, provider: PageableDataProvider, collections_per_event: int
