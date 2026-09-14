@@ -12,7 +12,6 @@ from ._device import Device, DeviceMap, DeviceVector
 from ._protocol import AsyncConfigurable, AsyncReadable, AsyncStageable
 from ._signal import SignalR, walk_devices
 from ._standard_base import _StandardBase
-from ._status import AsyncStatus
 from ._utils import merge_gathered_dicts
 
 
@@ -156,11 +155,9 @@ class StandardReadable(
         self._stage_funcs += (self._stage_readables,)
         self._unstage_funcs += (self._unstage_readables,)
 
-    @AsyncStatus.wrap
     async def _stage_readables(self) -> None:
         await asyncio.gather(*(sig.stage().task for sig in self._signals_to_stage()))
 
-    @AsyncStatus.wrap
     async def _unstage_readables(self) -> None:
         await asyncio.gather(*(sig.unstage().task for sig in self._signals_to_stage()))
 
