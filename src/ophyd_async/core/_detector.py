@@ -1,7 +1,6 @@
 """Module which defines abstract classes to work with detectors."""
 
 import asyncio
-import functools
 import os
 import time
 import warnings
@@ -34,7 +33,6 @@ from ._readable import (
     StandardReadableFormat,
     _config_signals,
     _HintedFields,
-    _Verb,
 )
 from ._settings import Settings
 from ._signal import SignalDict, SignalR, SignalRW, observe_signals_value
@@ -918,6 +916,14 @@ class StandardDetector(
     whichever it is gets bound as an instance attribute by `prepare()`.
     """
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # What the data logics produce, gathered alongside the registered
+        # children, so the verb methods themselves need no overriding
+        self._read_funcs += (self._data_read,)
+        self._describe_funcs += (self._data_describe,)
+        self._hint_sources += (self._data_hint_sources,)
+
     @abstract_cached_property
     def logic(self) -> DetectorLogic:
         """The logic that drives this detector, built in the subclass `__init__`."""
@@ -1032,34 +1038,38 @@ class StandardDetector(
         # may sit the rest of the scan out, so the verbs are recomputed
         self._publish_collect_methods()
 
-    def _extra_funcs_for(self, verb: _Verb) -> Iterator[Callable[[], Awaitable[dict]]]:
-        """Contribute what the data logics produce to read() and describe().
-
-        StandardReadable gathers these alongside the registered children, so
-        the verb methods themselves need no overriding.
+    async def _data_read(self) -> dict[str, Reading]:
+        """What the data logics contribute to `read()`.
 
         Raises if nothing has been prepared, since an unprepared detector has no
         data keys and would otherwise emit a descriptor missing its data.
         `trigger()` prepares implicitly, so a step scan never sees this.
-        `read_configuration()` and `describe_configuration()` are unaffected.
+        `read_configuration()` is unaffected.
+
+        Bounded providers hold a single-event page for this step-scan point,
+        which `_pageable_readings` extracts back to a reading. That extraction
+        lives here rather than on the provider so a provider cannot override it.
+        Streamable providers produce their data through `collect_asset_docs`
+        rather than `read()`, so they contribute nothing here.
         """
-        if verb not in (_Verb.DESCRIBE, _Verb.READ):
-            return
         data = self.logic.prepared_data
         cpe = data.collections_per_event
-        # Bounded providers hold a single-event page for this step-scan point,
-        # which _pageable_readings extracts back to a reading. That extraction
-        # lives here rather than on the provider so a provider cannot override it.
-        for pdp in data.pageable:
-            if verb is _Verb.DESCRIBE:
-                yield functools.partial(pdp.make_datakeys, cpe)
-            else:
-                yield functools.partial(self._pageable_readings, pdp, cpe)
-        if verb is _Verb.DESCRIBE:
-            # Streamable providers describe their shape for a step scan, but
-            # produce their data through collect_asset_docs rather than read()
-            for sdp in data.streamable:
-                yield functools.partial(sdp.make_datakeys, cpe)
+        return await merge_gathered_dicts(
+            [self._pageable_readings(pdp, cpe) for pdp in data.pageable]
+        )
+
+    async def _data_describe(self) -> dict[str, DataKey]:
+        """What the data logics contribute to `describe()`.
+
+        Every provider describes its shape for a step scan, whichever way it
+        goes on to produce the data. Raises if nothing has been prepared, as
+        `_data_read` does.
+        """
+        data = self.logic.prepared_data
+        cpe = data.collections_per_event
+        return await merge_gathered_dicts(
+            [dp.make_datakeys(cpe) for dp in data.collectable]
+        )
 
     async def describe_collect(self) -> dict[str, DataKey]:
         data = self.logic.prepared_data
@@ -1069,8 +1079,8 @@ class StandardDetector(
         ]
         return await merge_gathered_dicts(coros)
 
-    def _extra_hint_sources(self) -> Iterator[HasHints]:
-        """Contribute the data logics' hinted fields alongside the children's."""
+    def _data_hint_sources(self) -> Iterator[HasHints]:
+        """The data logics' hinted fields, alongside the children's."""
         for fields in self.logic.get_hinted_fields():
             yield _HintedFields(fields)
 

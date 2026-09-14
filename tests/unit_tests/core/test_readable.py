@@ -19,7 +19,7 @@ from ophyd_async.core import StandardReadableFormat as Format
 def test_standard_readable_rejects_a_non_format():
     sr = StandardReadable()
     with pytest.raises(TypeError, match="is not a StandardReadableFormat"):
-        sr.add_readables([soft_signal_rw(int)], "CONFIG_SIGNAL")  # type: ignore
+        sr.set_readable_format(soft_signal_rw(int), "CONFIG_SIGNAL")  # type: ignore
 
 
 def test_standard_readable_hints():
@@ -36,7 +36,9 @@ def test_standard_readable_hints():
     hint3 = MagicMock(spec=HasHints)
     hint3.hints = {"fields": ["jkl"], "gridding": "rectilinear_nonsequential"}
 
-    sr.add_readables([hint1, hint2, hint3])
+    sr.set_readable_format(hint1, Format.CHILD)
+    sr.set_readable_format(hint2, Format.CHILD)
+    sr.set_readable_format(hint3, Format.CHILD)
 
     assert sr.hints == {
         "fields": ["abc", "def", "ghi", "jkl"],
@@ -54,7 +56,8 @@ def test_standard_readable_hints_raises_when_overriding_string_literal():
     hint2 = MagicMock(spec=HasHints)
     hint2.hints = {"gridding": "a different string"}
 
-    sr.add_readables([hint1, hint2])
+    sr.set_readable_format(hint1, Format.CHILD)
+    sr.set_readable_format(hint2, Format.CHILD)
 
     with pytest.raises(RuntimeError, match=r"Hints key .* value may not be overridden"):
         sr.hints  # noqa: B018
@@ -69,7 +72,8 @@ def test_standard_readable_hints_raises_when_overriding_sequence():
     hint2 = MagicMock(spec=HasHints)
     hint2.hints = {"fields": ["field2"]}
 
-    sr.add_readables([hint1, hint2])
+    sr.set_readable_format(hint1, Format.CHILD)
+    sr.set_readable_format(hint2, Format.CHILD)
 
     with pytest.raises(RuntimeError, match=r"Hint fields .* overrides existing hint"):
         sr.hints  # noqa: B018
@@ -82,7 +86,7 @@ def test_standard_readable_hints_invalid_types(invalid_type):
     hint1 = MagicMock(spec=HasHints)
     hint1.hints = {"test": invalid_type}
 
-    sr.add_readables([hint1])
+    sr.set_readable_format(hint1, Format.CHILD)
 
     with pytest.raises(TypeError, match=r"Unknown type for value .* for key .*"):
         sr.hints  # noqa: B018
@@ -90,17 +94,12 @@ def test_standard_readable_hints_invalid_types(invalid_type):
 
 def test_standard_readable_add_children_context_manager():
     sr = StandardReadable()
-    mock = MagicMock()
-    sr.add_readables = mock
     with sr.add_children_as_readables():
         sr.a = MagicMock(spec=SignalR)
         sr.b = MagicMock(spec=SignalR)
         sr.c = MagicMock(spec=SignalR)
 
-    # Can't use assert_called_once_with() as the order of items returned from
-    # internal dict comprehension is not guaranteed
-    mock.assert_called_once()
-    assert set(mock.call_args.args[0]) == {sr.a, sr.b, sr.c}
+    assert sr.get_readable_formats() == dict.fromkeys((sr.a, sr.b, sr.c), Format.CHILD)
 
 
 @pytest.mark.parametrize(
@@ -112,26 +111,19 @@ def test_standard_readable_add_children_context_manager():
 )
 def test_standard_readable_add_children_cm_device_with_mappings(device_type, keys):
     sr = StandardReadable()
-    mock = MagicMock()
-    sr.add_readables = mock
 
-    # Create a mock for the DeviceVector/DeviceMap.children() call
+    # A DeviceVector/DeviceMap registers its values, not itself
     devices = [MagicMock(spec=SignalR) for _ in range(3)]
     device = device_type(dict(zip(keys, devices, strict=True)))
 
     with sr.add_children_as_readables():
         sr.a = device
 
-    # Can't use assert_called_once_with() as the order of items returned from
-    # internal dict comprehension is not guaranteed
-    mock.assert_called_once()
-    assert set(mock.call_args.args[0]) == set(devices)
+    assert sr.get_readable_formats() == dict.fromkeys(devices, Format.CHILD)
 
 
 def test_standard_readable_add_children_cm_filters_non_devices():
     sr = StandardReadable()
-    mock = MagicMock()
-    sr.add_readables = mock
 
     with sr.add_children_as_readables():
         sr.a = MagicMock(spec=SignalR)
@@ -140,10 +132,8 @@ def test_standard_readable_add_children_cm_filters_non_devices():
         sr.d = "abc"
         sr.e = MagicMock(spec=MockSignalBackend)
 
-    # Can't use assert_called_once_with() as the order of items returned from
-    # internal dict comprehension is not guaranteed
-    mock.assert_called_once()
-    assert set(mock.call_args.args[0]) == {sr.a, sr.b}
+    # Only the Devices are registered
+    assert sr.get_readable_formats() == dict.fromkeys((sr.a, sr.b), Format.CHILD)
 
 
 async def assert_contributes(
@@ -227,7 +217,16 @@ def test_standard_readable_add_readables_raises_signalr_typeerror(format) -> Non
 
     # Ensure it raises TypeError
     with pytest.raises(TypeError, match=f"{mock_device} is not a SignalR"):
-        sr.add_readables([mock_device], format=format)
+        sr.set_readable_format(mock_device, format)
+
+
+def test_add_readables_is_deprecated() -> None:
+    sr = StandardReadable()
+    sig = soft_signal_rw(int)
+    with pytest.warns(DeprecationWarning, match="set_readable_format"):
+        sr.add_readables([sig], Format.CONFIG_SIGNAL)
+    # Still does the job it always did
+    assert sr.get_readable_formats() == {sig: Format.CONFIG_SIGNAL}
 
 
 @pytest.mark.parametrize(

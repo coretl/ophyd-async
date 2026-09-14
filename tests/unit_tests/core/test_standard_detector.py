@@ -1146,10 +1146,10 @@ async def test_child_readable_config_signals_in_describe_configuration():
     """Child StandardReadable CONFIG_SIGNALs appear in describe_configuration."""
     child = StandardReadable(name="child")
     config_sig = soft_signal_rw(float, initial_value=1.5, name="child-exposure")
-    child.add_readables([config_sig], Format.CONFIG_SIGNAL)
+    child.set_readable_format(config_sig, Format.CONFIG_SIGNAL)
 
     det = DetectorLogic().with_device("det")
-    det.add_readables([child], Format.CHILD)
+    det.set_readable_format(child, Format.CHILD)
     await det.prepare(TriggerInfo())
 
     config = await det.describe_configuration()
@@ -1163,10 +1163,10 @@ async def test_child_readable_read_signals_in_read(tmp_path):
     """Child StandardReadable HINTED_SIGNALs appear in read/describe."""
     child = StandardReadable(name="child")
     read_sig = soft_signal_rw(int, initial_value=99, name="child-counts")
-    child.add_readables([read_sig], Format.HINTED_SIGNAL)
+    child.set_readable_format(read_sig, Format.HINTED_SIGNAL)
 
     det = DetectorLogic(StreamableOnlyDataLogic(tmp_path)).with_device("det")
-    det.add_readables([child], Format.CHILD)
+    det.set_readable_format(child, Format.CHILD)
     await det.prepare(TriggerInfo())
 
     # The data logic describes its stream, the child describes its signal
@@ -1183,10 +1183,10 @@ async def test_child_readable_hints_merged(tmp_path):
     """Child StandardReadable hints are merged with data logic hints."""
     child = StandardReadable(name="child")
     hinted_sig = soft_signal_rw(float, name="child-intensity")
-    child.add_readables([hinted_sig], Format.HINTED_SIGNAL)
+    child.set_readable_format(hinted_sig, Format.HINTED_SIGNAL)
 
     det = DetectorLogic(StreamableOnlyDataLogic(tmp_path)).with_device("det")
-    det.add_readables([child], Format.CHILD)
+    det.set_readable_format(child, Format.CHILD)
 
     assert "fields" in det.hints
     assert "child-intensity" in det.hints["fields"]
