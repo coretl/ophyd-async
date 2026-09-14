@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 import warnings
 from collections.abc import Awaitable, Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
@@ -13,19 +14,6 @@ from ._protocol import AsyncConfigurable, AsyncReadable, AsyncStageable
 from ._signal import SignalR, walk_devices
 from ._standard_base import _StandardBase
 from ._utils import merge_gathered_dicts
-
-
-class _Verb(Enum):
-    """The four bluesky verbs a registered child can contribute to."""
-
-    DESCRIBE_CONFIG = "DESCRIBE_CONFIG"
-    READ_CONFIG = "READ_CONFIG"
-    DESCRIBE = "DESCRIBE"
-    READ = "READ"
-
-
-_CONFIG_VERBS = frozenset({_Verb.DESCRIBE_CONFIG, _Verb.READ_CONFIG})
-_READ_VERBS = frozenset({_Verb.DESCRIBE, _Verb.READ})
 
 
 def _as_signal_r(device: Device) -> SignalR:
@@ -69,7 +57,7 @@ class StandardReadableFormat(Enum):
     def __call__(self, parent: Device, child: Device):
         if not isinstance(parent, StandardReadable):
             raise TypeError(f"Expected parent to be StandardReadable, got {parent}")
-        parent.add_readables([child], self)
+        parent.set_readable_format(child, self)
 
 
 #: The formats whose devices take part in `stage()`/`unstage()`, if they are
@@ -148,12 +136,29 @@ class StandardReadable(
     # so the shared class level default is safe.
     _default_readables: dict[Device, StandardReadableFormat] = {}
 
+    # What contributes to each verb, gathered in parallel by the verb methods.
+    # Immutable defaults to avoid accidental sharing between instances. A
+    # subclass producing data from somewhere other than a registered child adds
+    # to these rather than overriding the verbs, so registered children keep
+    # working; `StandardDetector` does it for its data logics.
+    _read_funcs: tuple[Callable[[], Awaitable[dict[str, Reading]]], ...] = ()
+    _describe_funcs: tuple[Callable[[], Awaitable[dict[str, DataKey]]], ...] = ()
+    _read_config_funcs: tuple[Callable[[], Awaitable[dict[str, Reading]]], ...] = ()
+    _describe_config_funcs: tuple[Callable[[], Awaitable[dict[str, DataKey]]], ...] = ()
+    _hint_sources: tuple[Callable[[], Iterator[HasHints]], ...] = ()
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # Staging is derived from _readables on each call rather than registered
-        # up-front, so a format changed between runs is picked up on next stage().
+        # Each of these derives from _readables on every call rather than being
+        # registered up-front, so a format changed between runs is picked up on
+        # the next stage() or the next descriptor.
         self._stage_funcs += (self._stage_readables,)
         self._unstage_funcs += (self._unstage_readables,)
+        self._read_funcs += (self._formatted_read,)
+        self._describe_funcs += (self._formatted_describe,)
+        self._read_config_funcs += (self._formatted_read_configuration,)
+        self._describe_config_funcs += (self._formatted_describe_configuration,)
+        self._hint_sources += (self._formatted_hint_sources,)
 
     async def _stage_readables(self) -> None:
         await asyncio.gather(*(sig.stage().task for sig in self._signals_to_stage()))
@@ -169,81 +174,65 @@ class StandardReadable(
             if format in _STAGED_FORMATS and isinstance(device, AsyncStageable):
                 yield device
 
-    def _extra_funcs_for(self, verb: _Verb) -> Iterator[Callable[[], Awaitable[dict]]]:
-        """Contribute to a verb from something other than the registry.
-
-        Subclasses that produce data from somewhere other than a registered
-        child override this rather than the verb methods themselves, so that
-        registered children keep working without being reimplemented.
-        `StandardDetector` uses it for the data its data logics produce.
-        """
-        return iter(())
-
-    def _funcs_for(self, verb: _Verb) -> Iterator[Callable[[], Awaitable[dict]]]:
-        """Derive the callables contributing to one verb from the registry."""
-        yield from self._extra_funcs_for(verb)
+    async def _formatted_read(self) -> dict[str, Reading]:
+        """What the registered children contribute to `read()`."""
+        coros = []
         for device, format in self._readables.items():
             match format:
-                case StandardReadableFormat.CHILD:
-                    if verb in _CONFIG_VERBS and isinstance(device, AsyncConfigurable):
-                        yield (
-                            device.describe_configuration
-                            if verb is _Verb.DESCRIBE_CONFIG
-                            else device.read_configuration
-                        )
-                    elif verb in _READ_VERBS and isinstance(device, AsyncReadable):
-                        yield device.describe if verb is _Verb.DESCRIBE else device.read
-                case StandardReadableFormat.CONFIG_SIGNAL:
-                    signal = _as_signal_r(device)
-                    if verb is _Verb.DESCRIBE_CONFIG:
-                        yield signal.describe
-                    elif verb is _Verb.READ_CONFIG:
-                        yield signal.read
+                case StandardReadableFormat.CHILD if isinstance(device, AsyncReadable):
+                    coros.append(device.read())
                 case StandardReadableFormat.HINTED_SIGNAL:
-                    signal = _as_signal_r(device)
-                    if verb is _Verb.DESCRIBE:
-                        yield signal.describe
-                    elif verb is _Verb.READ:
-                        yield signal.read
+                    coros.append(_as_signal_r(device).read())
                 case (
                     StandardReadableFormat.UNCACHED_SIGNAL
                     | StandardReadableFormat.HINTED_UNCACHED_SIGNAL
                 ):
-                    signal = _as_signal_r(device)
-                    if verb is _Verb.DESCRIBE:
-                        yield signal.describe
-                    elif verb is _Verb.READ:
-                        yield _UncachedRead(signal)
+                    coros.append(_as_signal_r(device).read(cached=False))
+        return await merge_gathered_dicts(coros)
 
-    async def describe_configuration(self) -> dict[str, DataKey]:
-        return await merge_gathered_dicts(
-            [func() for func in self._funcs_for(_Verb.DESCRIBE_CONFIG)]
-        )
+    async def _formatted_describe(self) -> dict[str, DataKey]:
+        """What the registered children contribute to `describe()`."""
+        coros = []
+        for device, format in self._readables.items():
+            match format:
+                case StandardReadableFormat.CHILD if isinstance(device, AsyncReadable):
+                    coros.append(device.describe())
+                case (
+                    StandardReadableFormat.HINTED_SIGNAL
+                    | StandardReadableFormat.UNCACHED_SIGNAL
+                    | StandardReadableFormat.HINTED_UNCACHED_SIGNAL
+                ):
+                    coros.append(_as_signal_r(device).describe())
+        return await merge_gathered_dicts(coros)
 
-    async def read_configuration(self) -> dict[str, Reading]:
-        return await merge_gathered_dicts(
-            [func() for func in self._funcs_for(_Verb.READ_CONFIG)]
-        )
+    async def _formatted_read_configuration(self) -> dict[str, Reading]:
+        """What the registered children contribute to `read_configuration()`."""
+        coros = []
+        for device, format in self._readables.items():
+            match format:
+                case StandardReadableFormat.CHILD if isinstance(
+                    device, AsyncConfigurable
+                ):
+                    coros.append(device.read_configuration())
+                case StandardReadableFormat.CONFIG_SIGNAL:
+                    coros.append(_as_signal_r(device).read())
+        return await merge_gathered_dicts(coros)
 
-    async def describe(self) -> dict[str, DataKey]:
-        return await merge_gathered_dicts(
-            [func() for func in self._funcs_for(_Verb.DESCRIBE)]
-        )
+    async def _formatted_describe_configuration(self) -> dict[str, DataKey]:
+        """What the registered children contribute to `describe_configuration()`."""
+        coros = []
+        for device, format in self._readables.items():
+            match format:
+                case StandardReadableFormat.CHILD if isinstance(
+                    device, AsyncConfigurable
+                ):
+                    coros.append(device.describe_configuration())
+                case StandardReadableFormat.CONFIG_SIGNAL:
+                    coros.append(_as_signal_r(device).describe())
+        return await merge_gathered_dicts(coros)
 
-    async def read(self) -> dict[str, Reading]:
-        return await merge_gathered_dicts(
-            [func() for func in self._funcs_for(_Verb.READ)]
-        )
-
-    def _extra_hint_sources(self) -> Iterator[HasHints]:
-        """Contribute hints from something other than the registry.
-
-        The counterpart of [](#StandardReadable._extra_funcs_for) for `hints`.
-        """
-        return iter(())
-
-    def _hint_sources(self) -> Iterator[HasHints]:
-        yield from self._extra_hint_sources()
+    def _formatted_hint_sources(self) -> Iterator[HasHints]:
+        """What the registered children contribute to `hints`."""
         for device, format in self._readables.items():
             match format:
                 case StandardReadableFormat.CHILD if isinstance(device, HasHints):
@@ -254,10 +243,26 @@ class StandardReadable(
                 ):
                     yield _HintsFromName(device)
 
+    async def describe_configuration(self) -> dict[str, DataKey]:
+        return await merge_gathered_dicts(
+            [func() for func in self._describe_config_funcs]
+        )
+
+    async def read_configuration(self) -> dict[str, Reading]:
+        return await merge_gathered_dicts([func() for func in self._read_config_funcs])
+
+    async def describe(self) -> dict[str, DataKey]:
+        return await merge_gathered_dicts([func() for func in self._describe_funcs])
+
+    async def read(self) -> dict[str, Reading]:
+        return await merge_gathered_dicts([func() for func in self._read_funcs])
+
     @property
     def hints(self) -> Hints:
         hints: Hints = {}
-        for new_hint in self._hint_sources():
+        for new_hint in itertools.chain.from_iterable(
+            source() for source in self._hint_sources
+        ):
             # Merge the existing and new hints, based on the type of the value.
             # This avoids default dict merge behavior that overrides the values;
             # we want to combine them when they are Sequences, and ensure they are
@@ -296,11 +301,11 @@ class StandardReadable(
         self,
         format: StandardReadableFormat = StandardReadableFormat.CHILD,
     ) -> Generator[None, None, None]:
-        """Context manager that calls [](#add_readables) on child Devices added within.
+        """Register child Devices added within with the given format.
 
         Scans `self.children()` on entry and exit to context manager, and calls
-        `add_readables()` on any that are added with the provided
-        `StandardReadableFormat`.
+        [](#StandardReadable.set_readable_format) on any that are added with the
+        provided `StandardReadableFormat`.
         """
         dict_copy = dict(self.children())
 
@@ -331,8 +336,9 @@ class StandardReadable(
             else:
                 flattened_values.append(value)
 
-        new_devices = list(filter(lambda x: isinstance(x, Device), flattened_values))
-        self.add_readables(new_devices, format)
+        for device in flattened_values:
+            if isinstance(device, Device):
+                self.set_readable_format(device, format)
 
     def set_readable_format(
         self, device: Device, format: StandardReadableFormat | None
@@ -406,6 +412,7 @@ class StandardReadable(
         """
         return dict(self._readables)
 
+    # Back compat - delete before 1.0
     def add_readables(
         self,
         devices: Sequence[Device],
@@ -413,19 +420,18 @@ class StandardReadable(
     ) -> None:
         """Add devices to contribute to various bluesky verbs.
 
-        Use output from the given devices to contribute to the verbs of the following
-        interfaces:
-
-        - [](#bluesky.protocols.Readable)
-        - [](#bluesky.protocols.Configurable)
-        - [](#bluesky.protocols.Stageable)
-        - [](#bluesky.protocols.HasHints)
-
         :param devices: The devices to be added
         :param format:
             Determines which of the devices functions are added to which verb as
             per the [](#StandardReadableFormat) documentation
         """
+        warnings.warn(
+            DeprecationWarning(
+                "Use `set_readable_format(device, format)` on each device "
+                "instead of `add_readables(devices, format)`"
+            ),
+            stacklevel=2,
+        )
         for device in devices:
             self.set_readable_format(device, format)
 
@@ -455,14 +461,6 @@ def _config_signals(device: Device) -> set[SignalR]:
         elif format is StandardReadableFormat.CHILD:
             signals |= _config_signals(child)
     return signals
-
-
-class _UncachedRead:
-    def __init__(self, signal: SignalR) -> None:
-        self.signal = signal
-
-    async def __call__(self) -> dict[str, Reading]:
-        return await self.signal.read(cached=False)
 
 
 class _HintedFields(HasHints):

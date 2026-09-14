@@ -137,13 +137,13 @@ A detector's step-scan signals are registered exactly like any other Device's, a
 `read()`, `describe()` and `hints` merge them on top of whatever the data logics produce.
 `add_config_signals` becomes a deprecated wrapper.
 
-The detector does not *reimplement* any of those verbs to achieve it. `StandardReadable`
-grows two hooks, `_extra_funcs_for(verb)` and `_extra_hint_sources()`, that contribute
-from somewhere other than the registry, and `StandardDetector` overrides those to add what
-its data logics produce. Likewise it registers its stage and unstage work into
-`_stage_funcs`/`_unstage_funcs`, the way `StandardFlyable` already does, rather than
-replacing `stage()`. Overriding the verbs meant re-deriving the registered children's
-contributions by hand in each one, which is exactly what would drift.
+The detector does not *reimplement* any of those verbs to achieve it. Each verb gathers a
+tuple of callables — `_read_funcs`, `_describe_funcs` and friends — exactly as `stage()`
+gathers `_stage_funcs`. `StandardReadable` puts the registry's contribution in each tuple,
+and `StandardDetector` appends what its data logics produce, the way `StandardFlyable`
+already appends to `_stage_funcs` rather than replacing `stage()`. Overriding the verbs
+meant re-deriving the registered children's contributions by hand in each one, which is
+exactly what would drift. Everything in a tuple runs in parallel.
 
 One consequence: a detector with no hinted fields now reports `hints` as `{}` rather than
 `{"fields": []}`, because it no longer special cases what `StandardReadable` already does.
@@ -247,7 +247,9 @@ values, so a failed value write leaves the readable registry untouched.
 - A Device can be switched between techniques at runtime, and the switch can be saved and
   restored, closing #1394.
 - `add_readables` keeps working unchanged for all 85 in-tree call sites and for downstream
-  Devices, but gains "set" semantics.
+  Devices, but gains "set" semantics. Having gained them it is no longer adding anything,
+  so it has since been deprecated in favour of `set_readable_format`, which says what it
+  does; it still works, with a `DeprecationWarning`.
 - Tests that asserted on `_read_funcs`, `_has_hints` and friends had to be rewritten onto
   the public verbs. Those assertions were already against the testing conventions in
   `CLAUDE.md`, and the derived-on-demand design makes them impossible rather than merely
