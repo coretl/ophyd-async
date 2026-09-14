@@ -145,7 +145,7 @@ class StandardReadable(
     _describe_funcs: tuple[Callable[[], Awaitable[dict[str, DataKey]]], ...] = ()
     _read_config_funcs: tuple[Callable[[], Awaitable[dict[str, Reading]]], ...] = ()
     _describe_config_funcs: tuple[Callable[[], Awaitable[dict[str, DataKey]]], ...] = ()
-    _hint_sources: tuple[Callable[[], Iterator[HasHints]], ...] = ()
+    _hint_funcs: tuple[Callable[[], Iterator[Hints]], ...] = ()
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -158,7 +158,7 @@ class StandardReadable(
         self._describe_funcs += (self._formatted_describe,)
         self._read_config_funcs += (self._formatted_read_configuration,)
         self._describe_config_funcs += (self._formatted_describe_configuration,)
-        self._hint_sources += (self._formatted_hint_sources,)
+        self._hint_funcs += (self._formatted_hints,)
 
     async def _stage_readables(self) -> None:
         await asyncio.gather(*(sig.stage().task for sig in self._signals_to_stage()))
@@ -231,17 +231,19 @@ class StandardReadable(
                     coros.append(_as_signal_r(device).describe())
         return await merge_gathered_dicts(coros)
 
-    def _formatted_hint_sources(self) -> Iterator[HasHints]:
+    def _formatted_hints(self) -> Iterator[Hints]:
         """What the registered children contribute to `hints`."""
         for device, format in self._readables.items():
             match format:
                 case StandardReadableFormat.CHILD if isinstance(device, HasHints):
-                    yield device
+                    yield device.hints
                 case (
                     StandardReadableFormat.HINTED_SIGNAL
                     | StandardReadableFormat.HINTED_UNCACHED_SIGNAL
                 ):
-                    yield _HintsFromName(device)
+                    # An unnamed signal has nothing to put in `fields`, but is
+                    # still hinted, so it contributes the key and no name
+                    yield {"fields": [device.name] if device.name else []}
 
     async def describe_configuration(self) -> dict[str, DataKey]:
         return await merge_gathered_dicts(
@@ -261,13 +263,13 @@ class StandardReadable(
     def hints(self) -> Hints:
         hints: Hints = {}
         for new_hint in itertools.chain.from_iterable(
-            source() for source in self._hint_sources
+            func() for func in self._hint_funcs
         ):
             # Merge the existing and new hints, based on the type of the value.
             # This avoids default dict merge behavior that overrides the values;
             # we want to combine them when they are Sequences, and ensure they are
             # identical when string values.
-            for key, value in new_hint.hints.items():
+            for key, value in new_hint.items():
                 # fail early for unkwon types
                 if isinstance(value, str):
                     if key in hints:
@@ -289,8 +291,7 @@ class StandardReadable(
                         hints[key] = value  # type: ignore[literal-required]
                 else:
                     msg = (
-                        f"{new_hint.name}: Unknown type for value '{value}'"
-                        f" for key '{key}'"
+                        f"{self.name}: Unknown type for value '{value}' for key '{key}'"
                     )
                     raise TypeError(msg)
 
@@ -461,35 +462,6 @@ def _config_signals(device: Device) -> set[SignalR]:
         elif format is StandardReadableFormat.CHILD:
             signals |= _config_signals(child)
     return signals
-
-
-class _HintedFields(HasHints):
-    """Present a fixed list of field names as `hints`."""
-
-    def __init__(self, fields: Sequence[str]) -> None:
-        self._fields = list(fields)
-
-    @property
-    def name(self) -> str:
-        return ""
-
-    @property
-    def hints(self) -> Hints:
-        return {"fields": self._fields}
-
-
-class _HintsFromName(HasHints):
-    def __init__(self, device: Device) -> None:
-        self.device = device
-
-    @property
-    def name(self) -> str:
-        return self.device.name
-
-    @property
-    def hints(self) -> Hints:
-        fields = [self.name] if self.name else []
-        return {"fields": fields}
 
 
 #: Reserved key under which [](#store_settings) writes readable formats. Chosen
