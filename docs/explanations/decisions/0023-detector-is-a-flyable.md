@@ -136,6 +136,23 @@ been, then asks the data state to re-arm what needs re-arming: a finite buffer h
 event at a time so it is re-made per point, while a streaming provider carries on. The
 trigger logic is not re-prepared per point, so a step scan does not repeat its puts.
 
+### One context type, not one per stage
+
+`FlyableLogic` takes a single `CtxT` threaded through all three stages, so a field that
+only exists after `kickoff()` is `| None` on the one dataclass — `_FlyCtx`'s
+`kickoff_collections_written`, `MotorFlyCtx`'s `status`, `PmacFlyCtx`'s
+`trajectory_status` — and `on_complete` unwraps it.
+
+Splitting into `PrepareCtxT` and `KickoffCtxT` would make those fields non-optional. It
+was not worth it. Every flyer would need a second dataclass, or inheritance between two,
+and `on_kickoff` would have to rebuild one from the other; every declaration site gains a
+third parameter, including the three PandA logics that carry no state and would read
+`FlyableLogic[SeqTableInfo, None, None]`. `StandardFlyable` gains nothing either, since
+the context it holds changes type part way through the lifecycle and so cannot be typed
+as one or the other regardless. Against that, three `error_if_none` calls in the whole
+tree. The `| None` is doing useful work as documentation: it says *this appears at
+kickoff*, which is exactly what a reader needs to know.
+
 ## Consequences
 
 - `StandardDetector` subclasses build a `DetectorLogic` in `__init__` and return it from
