@@ -2,7 +2,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import PureWindowsPath
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic
 from xml.etree import ElementTree as ET
 
 import numpy as np
@@ -30,16 +30,13 @@ from ._io import (
     NDArrayBaseIO,
     NDFileHDF5IO,
     NDPluginBaseIO,
+    NDPluginBaseIOT,
     NDPluginFileIO,
     NDStatsIO,
     plugin_is_enabled,
 )
 from ._ndattribute import NDAttributeDataType, NDAttributePvDbrType
 from ._stats_time_series import StatsTimeSeriesDataLogic
-
-#: A writer plugin built by an `ADWriterFactory`: a file writer (HDF, TIFF, JPEG)
-#: or a stats plugin whose time series is read as event pages.
-NDWriterPluginT = TypeVar("NDWriterPluginT", bound=NDPluginBaseIO)
 
 
 @dataclass
@@ -344,7 +341,7 @@ class ADMultipartDataLogic(DetectorDataLogic):
 
 
 @dataclass
-class ADWriterFactory(Generic[NDWriterPluginT]):
+class ADWriterFactory(Generic[NDPluginBaseIOT]):
     """Factory that creates a writer plugin and its matching data logic.
 
     Construct using the classmethods `hdf`, `jpeg`, `tiff` or `stats`, then pass
@@ -373,7 +370,7 @@ class ADWriterFactory(Generic[NDWriterPluginT]):
         that builds the data logic given the already-constructed writer.
     """
 
-    writer_cls: type[NDWriterPluginT]
+    writer_cls: type[NDPluginBaseIOT]
     writer_suffix: str
     writer_name: str
     datakey_suffix: str
@@ -381,7 +378,7 @@ class ADWriterFactory(Generic[NDWriterPluginT]):
         NDArrayDescription | Callable[[ADBaseIO], NDArrayDescription] | None
     )
     data_logic_factory: Callable[
-        [NDWriterPluginT, NDArrayDescription, ADBaseIO, Sequence[NDPluginBaseIO]],
+        [NDPluginBaseIOT, NDArrayDescription, ADBaseIO, Sequence[NDPluginBaseIO]],
         DetectorDataLogic,
     ]
 
@@ -390,7 +387,7 @@ class ADWriterFactory(Generic[NDWriterPluginT]):
         prefix: str,
         driver: ADBaseIO,
         plugins: Sequence[NDPluginBaseIO],
-    ) -> tuple[NDWriterPluginT, DetectorDataLogic]:
+    ) -> tuple[NDPluginBaseIOT, DetectorDataLogic]:
         """Instantiate the writer plugin and build the data logic.
 
         :param prefix: EPICS PV prefix for the detector (same as `AreaDetector.prefix`).
