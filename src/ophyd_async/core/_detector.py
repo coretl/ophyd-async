@@ -422,6 +422,13 @@ class _DetectorData:
     #: What the providers were made for, and so when they can be reused
     collections_per_event: int
     period: float
+    #: Where every provider was when the current event started, set by the
+    #: trigger or kickoff that started it. One number covers all of them only
+    #: because `_drop_shadowed` bans a detector serving both kinds at once: a
+    #: finite buffer and a file writer would be at different counts, and there
+    #: is no use case for mixing them. Lift that ban and this becomes one
+    #: baseline per provider.
+    initial_collections_written: int = 0
 
     @property
     def streamable(self) -> list[StreamableDataProvider]:
@@ -450,8 +457,6 @@ class _FlyCtx:
     """What prepare() set up, threaded through kickoff() to complete()."""
 
     trigger_info: TriggerInfo
-    #: What the providers had written when kickoff() ran, None until then
-    kickoff_collections_written: int | None = None
     #: Whether a finite buffer holds a previous point's data, so needs re-arming
     needs_rearm: bool = False
 
@@ -588,7 +593,11 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
                 f"Detector {self.datakey_prefix} has no collectable data, "
                 "so cannot kickoff"
             )
-        ctx.kickoff_collections_written = await _get_collections_written(collectable)
+        # Read live: a buffer accumulates across the kickoffs of one prepare, so
+        # it is not back at zero the way a re-armed one is in on_trigger()
+        self.prepared_data.initial_collections_written = await _get_collections_written(
+            collectable
+        )
         # External triggering has already started; internal starts now
         if self.acquire_logic and ctx.trigger_info.trigger is DetectorTrigger.INTERNAL:
             await self.acquire_logic.start_acquiring()
@@ -598,9 +607,6 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
         """Wait for the scan to finish, reporting collections written as progress."""
         return self._wait_for_collections(
             trigger_info=ctx.trigger_info,
-            initial_collections_written=error_if_none(
-                ctx.kickoff_collections_written, "Kickoff not run"
-            ),
             collections_requested=ctx.trigger_info.number_of_collections,
             watcher_divisor=ctx.trigger_info.collections_per_event,
         )
@@ -624,15 +630,14 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
         # the two would be counted towards this event. A re-armed buffer starts
         # from zero, where a streaming provider continues from wherever it has got
         # to -- which is not where prepare left it, since a step scan triggers many
-        # times against one prepare. A detector never mixes the two.
-        initial = (
+        # times against one prepare.
+        data.initial_collections_written = (
             0 if data.pageable else await _get_collections_written(data.collectable)
         )
         if self.acquire_logic:
             await self.acquire_logic.start_acquiring()
         async for update in self._wait_for_collections(
             trigger_info=ctx.trigger_info,
-            initial_collections_written=initial,
             collections_requested=ctx.trigger_info.collections_per_event,
         ):
             yield update
@@ -841,11 +846,14 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
     async def _wait_for_collections(
         self,
         trigger_info: TriggerInfo,
-        initial_collections_written: int,
         collections_requested: int,
         watcher_divisor: int = 1,
     ) -> AsyncIterator[WatcherUpdate]:
-        data_providers = self.prepared_data.collectable
+        data = self.prepared_data
+        data_providers = data.collectable
+        # Where this event started from, recorded by the trigger or kickoff that
+        # started it, since by now the providers have moved on
+        initial_collections_written = data.initial_collections_written
         start_time = time.monotonic()
         current_collections_written = {
             dp.collections_written_signal: initial_collections_written
