@@ -634,7 +634,10 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
         data.initial_collections_written = (
             0 if data.pageable else await _get_collections_written(data.collectable)
         )
-        if self.acquire_logic:
+        # External triggering started acquiring at prepare and is sitting waiting
+        # for its trigger source, so starting it again would restart it; internal
+        # starts here, as it does in on_kickoff()
+        if self.acquire_logic and ctx.trigger_info.trigger is DetectorTrigger.INTERNAL:
             await self.acquire_logic.start_acquiring()
         async for update in self._wait_for_collections(
             trigger_info=ctx.trigger_info,

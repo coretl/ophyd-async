@@ -452,22 +452,34 @@ async def test_arm_timing(trigger_type, arm_timing, tmp_path):
         assert al.armed is True
 
 
-async def test_trigger_arms_detector(tmp_path):
-    """Test that trigger() arms the detector when arm logic is present."""
+@pytest.mark.parametrize(
+    "trigger_type,arms_at_trigger",
+    [
+        (DetectorTrigger.INTERNAL, True),
+        (DetectorTrigger.EXTERNAL_EDGE, False),
+        (DetectorTrigger.EXTERNAL_LEVEL, False),
+    ],
+)
+async def test_trigger_arms_only_an_internally_triggered_detector(
+    trigger_type, arms_at_trigger, tmp_path
+):
+    """trigger() arms the detector, unless prepare() already did.
+
+    An externally triggered detector was armed by prepare() and is sitting
+    waiting on its trigger source, so arming it again would restart it.
+    """
     al = MockAcquireLogic()
     dl = StreamableOnlyDataLogic(tmp_path)
-    det = DetectorLogic(JustInternalTriggerLogic(), al, dl).with_device()
+    det = DetectorLogic(AllTriggerTypesLogic(), al, dl).with_device()
 
-    await det.prepare(TriggerInfo())
+    await det.prepare(TriggerInfo(trigger=trigger_type))
+    assert al.arm_count == (0 if arms_at_trigger else 1)
+    assert al.armed is not arms_at_trigger
 
-    # Should not be armed yet
-    assert al.armed is False
-    assert al.arm_count == 0
-
-    # Trigger should arm it
     status = det.trigger()
     # Give it a moment to arm
     await wait_for_pending_wakeups(raise_if_exceeded=False)
+    # Armed either way by now, but only ever once
     assert al.armed is True
     assert al.arm_count == 1
 
