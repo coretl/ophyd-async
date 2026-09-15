@@ -129,10 +129,13 @@ because both are baked into a `StreamResource` when it is made — the shape fro
 chunking from the second — and areaDetector's `num_frames_chunks` can only be set before
 `capture` starts. A period change therefore starts a new file.
 
-A finite buffer is re-made on every `prepare()` and `trigger()` regardless, because re-making
-it is what re-arms it, and `kickoff()` never re-makes one: exactly the set of places a buffer
-should and should not be re-armed. A re-armed buffer sitting at 0 alongside a monotonic HDF
-writer at 15 would trip the `_all_the_same` reducer, so the two kinds are tracked separately.
+A finite buffer is re-made on every `prepare()` regardless, and on every `trigger()` after the
+first one since that `prepare()`, because re-making it is what re-arms it; `kickoff()` never
+re-makes one. That is exactly the set of places a buffer should and should not be re-armed: the
+first point of a step scan is already armed by the `prepare()` in front of it, and re-arming it
+again would erase an empty buffer, putting a spurious stop/start on the arming control before a
+frame had arrived. A re-armed buffer sitting at 0 alongside a monotonic HDF writer at 15 would
+trip the `_all_the_same` reducer, so the two kinds are tracked separately.
 
 ### A bounded provider's progress baseline is zero in `trigger()`
 

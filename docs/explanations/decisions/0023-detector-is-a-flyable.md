@@ -133,10 +133,12 @@ reuses an open file across its points, and `collect_while_completing` collects *
 `DetectorLogic.data`, which is cleared by `stage()`/`unstage()`, while the fly context
 enforces the ordering of the fly verbs.
 
-`trigger()` therefore needs no context of its own. It prepares implicitly if nothing has
-been, then asks the data state to re-arm what needs re-arming: a finite buffer holds one
-event at a time so it is re-made per point, while a streaming provider carries on. The
-trigger logic is not re-prepared per point, so a step scan does not repeat its puts.
+`trigger()` therefore needs no context of its own, beyond a `needs_rearm` flag on the fly
+context. It prepares implicitly if nothing has been, then asks the data state to re-arm what
+needs re-arming: a finite buffer holds one event at a time so it is re-made per point, while a
+streaming provider carries on. The flag is what keeps the first point from being re-armed on
+top of the `prepare()` that just armed it. The trigger logic is not re-prepared per point, so
+a step scan does not repeat its puts.
 
 ### One context type, not one per stage
 

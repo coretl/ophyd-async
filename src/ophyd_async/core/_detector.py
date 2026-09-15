@@ -452,6 +452,8 @@ class _FlyCtx:
     trigger_info: TriggerInfo
     #: What the providers had written when kickoff() ran, None until then
     kickoff_collections_written: int | None = None
+    #: Whether a finite buffer holds a previous point's data, so needs re-arming
+    needs_rearm: bool = False
 
 
 class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
@@ -611,8 +613,13 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
                 f"prepared with number_of_events={ctx.trigger_info.number_of_events}."
             )
         # A finite buffer holds one event at a time, so it is re-armed for each
-        # point of a step scan; a streaming provider carries on from where it was
-        data = await self._prepare_data(ctx.trigger_info)
+        # point of a step scan; a streaming provider carries on from where it was.
+        # prepare() armed it for the first point, so re-arming here as well would
+        # erase and re-erase it before a frame arrived.
+        if ctx.needs_rearm:
+            await self._prepare_data(ctx.trigger_info)
+        ctx.needs_rearm = True
+        data = self.prepared_data
         # Take the baseline before acquisition starts, or frames written between
         # the two would be counted towards this event. A re-armed buffer starts
         # from zero, where a streaming provider continues from wherever it has got

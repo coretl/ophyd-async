@@ -947,10 +947,20 @@ async def test_bounded_step_scan_reads_derived_from_page():
     await dl.collections_written.set(5)
     assert status.done
     assert status.success
-    # trigger() re-armed the buffer, so prepare_bounded ran a second time
-    assert dl.prepare_calls == [(5, pytest.approx(0.1)), (5, pytest.approx(0.1))]
+    # prepare() armed the buffer for this point, so trigger() does not re-arm it
+    assert dl.prepare_calls == [(5, pytest.approx(0.1))]
+    assert dl.stop_count == 0
     reading = await det.read()
     assert reading["foo"]["value"] == [0, 0, 0, 0, 0]
+
+    # The next point does re-arm, as the buffer holds the last point's data
+    status = det.trigger()
+    await wait_for_pending_wakeups(raise_if_exceeded=False)
+    await dl.collections_written.set(5)
+    assert status.done
+    assert status.success
+    assert dl.prepare_calls == [(5, pytest.approx(0.1)), (5, pytest.approx(0.1))]
+    assert dl.stop_count == 1
 
 
 async def test_bounded_fly_scan_accumulates_across_kickoffs():
