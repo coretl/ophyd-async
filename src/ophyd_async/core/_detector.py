@@ -934,34 +934,6 @@ class StandardDetector(
         # The data logics name their datakeys after the Device
         self.logic.datakey_prefix = name
 
-    def _publish_collect_methods(self) -> None:
-        """Bind the collect verb that matches what the data logics will produce.
-
-        Whichever applies is bound as a real instance attribute, so the bluesky
-        bundler's isinstance checks (`WritesStreamAssets` vs
-        `EventPageCollectable`) see exactly one of them. They resolve with
-        `inspect.getattr_static` on Python 3.12+, which does not call
-        `__getattr__`, so a dynamic hook would be invisible. Both names are
-        reserved by `Device`, hence `object.__setattr__`.
-
-        Called from every prepare and trigger, so the verb that no longer
-        applies is removed rather than left behind from a previous scan.
-
-        TODO: the bundler treats the two protocols as mutually exclusive from
-        the static type, so a detector cannot declare both and pick per scan.
-        Once bluesky decides from what a device actually produced, both verbs
-        become plain methods and this goes; see ADR 0023.
-        """
-        data = self.logic.data
-        for verb, method, wanted in (
-            ("collect_asset_docs", self._collect_asset_docs, data and data.streamable),
-            ("collect_pages", self._collect_pages, data and data.pageable),
-        ):
-            if wanted:
-                object.__setattr__(self, verb, method)
-            elif verb in self.__dict__:
-                object.__delattr__(self, verb)
-
     # Back compat - delete before 1.0
     def add_config_signals(self, *signals: SignalR) -> None:
         """Add a signal to read_configuration().
@@ -1018,7 +990,25 @@ class StandardDetector(
     async def prepare(self, value: TriggerInfo) -> None:
         """Set the detector up for a scan, as described by the TriggerInfo."""
         await super().prepare(value)
-        self._publish_collect_methods()
+        # Bind the collect verb matching what the data logics will produce, as a
+        # real instance attribute so the bundler's isinstance checks
+        # (WritesStreamAssets vs EventPageCollectable) see exactly one of them.
+        # Those resolve with inspect.getattr_static on Python 3.12+, which does not
+        # call __getattr__, so a dynamic hook would be invisible; both names are
+        # reserved by Device, hence object.__setattr__.
+        # TODO: all of this goes once the run bundler picks the collect verb from
+        # what a device actually produced rather than from its static type - a
+        # change in progress upstream. _collect_asset_docs and _collect_pages then
+        # become plain public methods and a detector declares both. See ADR 0023.
+        data = self.logic.data
+        for verb, method, wanted in (
+            ("collect_asset_docs", self._collect_asset_docs, data and data.streamable),
+            ("collect_pages", self._collect_pages, data and data.pageable),
+        ):
+            if wanted:
+                object.__setattr__(self, verb, method)
+            elif verb in self.__dict__:
+                object.__delattr__(self, verb)
 
     @WatchableAsyncStatus.wrap
     async def trigger(self) -> AsyncIterator[WatcherUpdate[int]]:
@@ -1034,9 +1024,6 @@ class StandardDetector(
             await self.prepare(await self.logic.default_trigger_info())
         async for update in self.logic.on_trigger(self._prepared_fly_ctx):
             yield update
-        # A step scan re-arms its finite buffers on every trigger, and a logic
-        # may sit the rest of the scan out, so the verbs are recomputed
-        self._publish_collect_methods()
 
     async def _data_read(self) -> dict[str, Reading]:
         """What the data logics contribute to `read()`.

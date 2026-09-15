@@ -73,10 +73,12 @@ decides which to ask for from the *static* type — `collect_pages()` is called 
 device that is not a `WritesStreamAssets` — so a detector that declared both would have its
 pages silently dropped, and one that declared neither could not fly at all.
 
-So `StandardDetector.prepare()` and `trigger()` bind whichever verb applies as a real
-instance attribute, and remove the other. It is the Device that does this, from what
-`DetectorLogic.data` holds after preparing; the logic reports what it made and is not told
-where that goes, so it holds no back-reference.
+So `StandardDetector.prepare()` binds whichever verb applies as a real instance attribute,
+and removes the other. It is the Device that does this, from what `DetectorLogic.data` holds
+after preparing; the logic reports what it made and is not told where that goes, so it holds
+no back-reference. Only `prepare()` does it: re-arming a bounded provider on each point of a
+step scan cannot change which verb applies, because the providers are re-made from the same
+`TriggerInfo` that `prepare()` used.
 
 Choosing from the static type is a bundler limitation rather than a fact about detectors: a
 device knows what it produced, and the bundler could decide from *that*, erroring only if
