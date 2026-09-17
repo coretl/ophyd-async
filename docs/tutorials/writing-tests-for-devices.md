@@ -57,6 +57,12 @@ automatically use `InstantMotorMock` without any fixture setup. You can still ov
 the automatic mock for specific tests by passing an explicit [](#DeviceMock) instance
 or a plain [](#LazyMock) directly to `connect()`, as the `mock_motor` fixture above does.
 
+You can also pass a `DeviceMock` *subclass* (rather than an instance) to `connect()` or
+`init_devices(mock=...)`, to use it for that Device in place of its registered default.
+For a composite Device, pass a `dict` mapping Device types to `DeviceMock` subclasses
+instead: it applies to every Device in the tree (including the top-level one), picking
+the value of the first key each Device is an `isinstance` of.
+
 ### pytest-asyncio setup
 
 :::{note}

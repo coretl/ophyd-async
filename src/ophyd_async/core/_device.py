@@ -88,6 +88,13 @@ class DeviceMock(Generic[DeviceT]):
         self.name = name
         self.parent = parent
         self._mock: Mock | None = None
+        # The per-Device-type mock class overrides in force for this connect, if
+        # any. Inherited from the parent so it reaches descendants constructed
+        # during recursive mock connection without changing `connect_mock`'s
+        # signature.
+        self._overrides: dict[type[Device], type[DeviceMock]] = (
+            parent._overrides if parent is not None else {}  # noqa: SLF001
+        )
 
     def __call__(self) -> Mock:
         if self._mock is None:
@@ -107,6 +114,22 @@ class DeviceMock(Generic[DeviceT]):
 # Keep LazyMock as an alias for backwards compatibility
 # Remove for ophyd-async 1.0
 LazyMock = DeviceMock
+
+
+def _select_mock_class(
+    device: Device,
+    overrides: Mapping[type[Device], type[DeviceMock]],
+    default: type[DeviceMock],
+) -> type[DeviceMock]:
+    """Pick the `DeviceMock` subclass to use for `device`.
+
+    Walks `overrides` in insertion order and returns the first value whose key
+    `device` is an instance of, falling back to `default` if none match.
+    """
+    for device_cls, mock_cls in overrides.items():
+        if isinstance(device, device_cls):
+            return mock_cls
+    return default
 
 
 class DeviceConnector:
@@ -140,7 +163,11 @@ class DeviceConnector:
         exceptions: dict[str, Exception] = {}
         for name, child_device in device.children():
             try:
-                child_mock_class = child_device._mock_class  # noqa: SLF001
+                child_mock_class = _select_mock_class(
+                    child_device,
+                    mock._overrides,  # noqa: SLF001
+                    child_device._mock_class,  # noqa: SLF001
+                )
                 await child_device.connect(mock=child_mock_class(name, mock))
             except Exception as exc:
                 exceptions[name] = exc
@@ -299,7 +326,10 @@ class Device(HasName):
 
     async def connect(
         self,
-        mock: bool | DeviceMock = False,
+        mock: bool
+        | type[DeviceMock]
+        | dict[type[Device], type[DeviceMock]]
+        | DeviceMock = False,
         timeout: float = DEFAULT_TIMEOUT,
         force_reconnect: bool = False,
     ) -> None:
@@ -310,10 +340,17 @@ class Device(HasName):
         methods.
 
         :param mock:
-            If True then use [](#MockSignalBackend) for all Signals. If passed a
-            [](#DeviceMock) then pass this down for use within the Signals,
-            otherwise create one using the registered default mock for this device
-            type, or a plain [](#DeviceMock) if no default is registered.
+            If `False` then connect for real. If `True` then use
+            [](#MockSignalBackend) for all Signals, creating this Device's mock
+            from its registered default (or a plain [](#DeviceMock) if none is
+            registered). If passed a [](#DeviceMock) instance then use it as-is.
+            If passed a `DeviceMock` subclass then use that class for this
+            Device instead of its registered default; descendants keep using
+            their own registered defaults. If passed a `dict` mapping Device
+            types to `DeviceMock` subclasses then apply it to every Device in
+            the tree (this one included): for each, use the value of the first
+            key it is an `isinstance` of, falling back to that Device's
+            registered default if none match.
         :param timeout: Time to wait before failing with a TimeoutError.
         :param force_reconnect:
             If True, force a reconnect even if the last connect succeeded.
@@ -323,14 +360,23 @@ class Device(HasName):
             f"{self}: doesn't have attribute `_connector`,"
             f" did you call `super().__init__` in your `__init__` method?",
         )
-        if mock:
+        if mock is not False:
             # Always connect in mock mode serially
             if isinstance(mock, DeviceMock):
                 # Use the user supplied mock
                 self._mock = mock
             elif not self._mock:
-                # Make a new mock of the registered type
-                self._mock = self._mock_class()
+                # Make a new mock, resolving its class (and any override map)
+                if isinstance(mock, dict):
+                    mock_cls = _select_mock_class(self, mock, self._mock_class)
+                elif isinstance(mock, type):
+                    mock_cls = mock
+                else:
+                    mock_cls = self._mock_class
+                new_mock = mock_cls()
+                if isinstance(mock, dict):
+                    new_mock._overrides = mock  # noqa: SLF001
+                self._mock = new_mock
             await connector.connect_mock(self, self._mock)
         else:
             # Try to cache the connect in real mode
@@ -557,7 +603,10 @@ def init_devices(
     set_name: bool = True,
     child_name_separator: str = "-",
     connect: bool = True,
-    mock: bool = False,
+    mock: bool
+    | type[DeviceMock]
+    | dict[type[Device], type[DeviceMock]]
+    | DeviceMock = False,
     timeout: float = 10.0,
 ):
     """Auto initialize top level Device instances: to be used as a context manager.
@@ -569,7 +618,11 @@ def init_devices(
     :param connect:
         If True, call `device.connect(mock, timeout)` in parallel on all Devices
         created within the context manager.
-    :param mock: If True, connect Signals in mock mode.
+    :param mock:
+        Passed straight through to [](#Device.connect) for every Device created
+        within the context manager; see its `mock` parameter for the accepted
+        forms. Note that a `DeviceMock` instance (unlike the other forms) would
+        then be shared across all of them.
     :param timeout: How long to wait for connect before logging an exception.
     :raises RuntimeError: If used inside a plan, use [](#ensure_connected) instead.
     :raises NotConnectedError: If devices could not be connected.
