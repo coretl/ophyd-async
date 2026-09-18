@@ -89,11 +89,12 @@ class DeviceMock(Generic[DeviceT]):
         self.parent = parent
         self._mock: Mock | None = None
         # The per-Device-type mock class overrides in force for this connect, if
-        # any. Inherited from the parent so it reaches descendants constructed
-        # during recursive mock connection without changing `connect_mock`'s
-        # signature.
-        self._overrides: dict[type[Device], type[DeviceMock]] = (
-            parent._overrides if parent is not None else {}  # noqa: SLF001
+        # any (see `Device.connect`'s `mock` param). A public attribute (not
+        # `_overrides`) so it can be read back by `Device.connect` when it builds
+        # a mock for a child, without a private-attribute access; inherited from
+        # `parent` so it reaches arbitrarily deep descendants for free.
+        self.overrides: dict[type[Device], type[DeviceMock]] = (
+            parent.overrides if parent is not None else {}
         )
 
     def __call__(self) -> Mock:
@@ -116,6 +117,14 @@ class DeviceMock(Generic[DeviceT]):
 LazyMock = DeviceMock
 
 
+def get_mock(device: Device | None) -> DeviceMock | None:
+    """Return the `DeviceMock` `device` was last connected with, if any.
+
+    `None` if `device` is `None` or hasn't been connected in mock mode.
+    """
+    return device._mock if device is not None else None  # noqa: SLF001
+
+
 def _select_mock_class(
     device: Device,
     overrides: Mapping[type[Device], type[DeviceMock]],
@@ -130,6 +139,21 @@ def _select_mock_class(
         if isinstance(device, device_cls):
             return mock_cls
     return default
+
+
+def _local_mock_name(device: Device) -> str:
+    """The attribute name `device` is registered under on its parent.
+
+    Used as a `DeviceMock`'s own `name`, so mocks attach under the same key
+    their Device does, e.g. `parent_mock.x` for a device assigned as `self.x`.
+    Root devices (no parent) have no such key, so their mock name is unused.
+    """
+    if device.parent is None:
+        return ""
+    return next(
+        (name for name, child in device.parent.children() if child is device),
+        device.name,
+    )
 
 
 class DeviceConnector:
@@ -159,16 +183,13 @@ class DeviceConnector:
         This is called when there is no cached connect done in `mock=True`
         mode. It connects the Device and all its children in mock mode.
         """
-        # Connect serially, no errors to gather up as in mock mode
+        # Connect serially, no errors to gather up as in mock mode. Pass down
+        # exactly the mock we were given: each child's own `connect()` builds
+        # its own mock from it (see `Device.connect`), so this never changes.
         exceptions: dict[str, Exception] = {}
         for name, child_device in device.children():
             try:
-                child_mock_class = _select_mock_class(
-                    child_device,
-                    mock._overrides,  # noqa: SLF001
-                    child_device._mock_class,  # noqa: SLF001
-                )
-                await child_device.connect(mock=child_mock_class(name, mock))
+                await child_device.connect(mock=mock)
             except Exception as exc:
                 exceptions[name] = exc
         if exceptions:
@@ -361,21 +382,34 @@ class Device(HasName):
             f" did you call `super().__init__` in your `__init__` method?",
         )
         if mock is not False:
-            # Always connect in mock mode serially
-            if isinstance(mock, DeviceMock):
-                # Use the user supplied mock
+            # Always connect in mock mode serially. `connector.connect_mock`
+            # passes each child exactly the `mock` its parent was given (see
+            # `DeviceConnector.connect_mock`), so a `DeviceMock` instance here
+            # is either a mock a caller supplied directly for this device, or
+            # one this device's own parent was just resolved to: only the
+            # former should be adopted as-is, the latter is a signal to build
+            # a fresh mock parented off it instead.
+            parent_mock = get_mock(self.parent)
+            if isinstance(mock, DeviceMock) and mock is not parent_mock:
+                # Use the caller-supplied mock for this device directly
                 self._mock = mock
             elif not self._mock:
-                # Make a new mock, resolving its class (and any override map)
-                if isinstance(mock, dict):
-                    mock_cls = _select_mock_class(self, mock, self._mock_class)
-                elif isinstance(mock, type):
-                    mock_cls = mock
-                else:
-                    mock_cls = self._mock_class
-                new_mock = mock_cls()
-                if isinstance(mock, dict):
-                    new_mock._overrides = mock  # noqa: SLF001
+                # Resolve the override map in force: an explicit dict here, or
+                # else whatever my parent's own mock is carrying (if any)
+                overrides = (
+                    mock
+                    if isinstance(mock, dict)
+                    else parent_mock.overrides
+                    if parent_mock is not None
+                    else {}
+                )
+                mock_cls = (
+                    mock
+                    if isinstance(mock, type)
+                    else _select_mock_class(self, overrides, self._mock_class)
+                )
+                new_mock = mock_cls(_local_mock_name(self), parent_mock)
+                new_mock.overrides = overrides
                 self._mock = new_mock
             await connector.connect_mock(self, self._mock)
         else:
