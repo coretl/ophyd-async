@@ -11,11 +11,13 @@ from ophyd_async.core import (
     Device,
     DeviceFiller,
     DeviceMap,
+    DeviceMock,
     DeviceProcessor,
     DeviceVector,
     NotConnectedError,
     Reference,
     SignalRW,
+    default_mock_class,
     init_devices,
     set_mock_attr,
     soft_signal_rw,
@@ -238,6 +240,141 @@ async def test_device_with_init_devices():
     assert parent.dict_with_children[123].parent == parent.dict_with_children
     assert parent.child1.connected
     assert parent.dict_with_children[123].connected
+
+
+class MarkerMock(DeviceMock):
+    """A distinct DeviceMock subclass, used only to check which one is picked."""
+
+
+class OtherMarkerMock(DeviceMock):
+    """A second, distinct DeviceMock subclass, used only to check which is picked."""
+
+
+class BaseOverrideDevice(Device):
+    """A base Device class used as a dict-override key."""
+
+
+class SubOverrideDevice(BaseOverrideDevice):
+    """A subclass of `BaseOverrideDevice`, also usable as a dict-override key."""
+
+
+class MockableGroup(Device):
+    """A Device tree with no `connect()` override, to exercise mock resolution.
+
+    (`DummyDeviceGroup`'s children are `DummyBaseDevice`, whose `connect()` is
+    stubbed out for name/parent tests elsewhere in this file, so it never
+    reaches the mock-class resolution logic under test here.)
+    """
+
+    def __init__(self, name: str = "") -> None:
+        self.child1 = BaseOverrideDevice()
+        self.vector: DeviceVector[BaseOverrideDevice] = DeviceVector(
+            {123: BaseOverrideDevice()}
+        )
+        super().__init__(name)
+
+
+async def test_connect_mock_with_type_applies_only_to_connected_device():
+    parent = MockableGroup("parent")
+
+    await parent.connect(mock=MarkerMock)
+
+    assert type(parent._mock) is MarkerMock
+    # Descendants are unaffected: they keep using their own registered default
+    assert type(parent.child1._mock) is DeviceMock
+    assert type(parent.vector[123]._mock) is DeviceMock
+
+
+async def test_connect_mock_with_dict_reaches_nested_grandchild():
+    parent = MockableGroup("parent")
+
+    await parent.connect(mock={BaseOverrideDevice: MarkerMock})
+
+    # The root device is a MockableGroup, not a BaseOverrideDevice, so it is
+    # unaffected and keeps its own registered default
+    assert type(parent._mock) is DeviceMock
+    # A direct child that matches the override
+    assert type(parent.child1._mock) is MarkerMock
+    # The DeviceVector itself doesn't match BaseOverrideDevice
+    assert type(parent.vector._mock) is DeviceMock
+    # ...but its BaseOverrideDevice entry, a grandchild of parent, does
+    assert type(parent.vector[123]._mock) is MarkerMock
+
+
+async def test_connect_mock_with_dict_applies_to_root_device():
+    device = BaseOverrideDevice()
+
+    await device.connect(mock={BaseOverrideDevice: MarkerMock})
+
+    assert type(device._mock) is MarkerMock
+
+
+@default_mock_class(OtherMarkerMock)
+class DeviceWithRegisteredDefault(Device):
+    """A Device with its own registered default DeviceMock."""
+
+
+async def test_connect_mock_with_dict_beats_registered_default():
+    device = DeviceWithRegisteredDefault()
+
+    await device.connect(mock={DeviceWithRegisteredDefault: MarkerMock})
+
+    assert type(device._mock) is MarkerMock
+
+
+async def test_connect_mock_with_dict_miss_falls_back_to_registered_default():
+    device = DeviceWithRegisteredDefault()
+
+    # DummyBaseDevice isn't in the ancestry of DeviceWithRegisteredDefault, so this
+    # override never matches, and the registered default is used instead
+    await device.connect(mock={DummyBaseDevice: MarkerMock})
+
+    assert type(device._mock) is OtherMarkerMock
+
+
+@pytest.mark.parametrize(
+    "overrides, expected_mock_cls",
+    [
+        (
+            {BaseOverrideDevice: MarkerMock, SubOverrideDevice: OtherMarkerMock},
+            MarkerMock,
+        ),
+        (
+            {SubOverrideDevice: OtherMarkerMock, BaseOverrideDevice: MarkerMock},
+            OtherMarkerMock,
+        ),
+    ],
+)
+async def test_connect_mock_dict_ties_broken_by_insertion_order(
+    overrides, expected_mock_cls
+):
+    device = SubOverrideDevice()
+
+    await device.connect(mock=overrides)
+
+    assert type(device._mock) is expected_mock_cls
+
+
+@pytest.mark.parametrize(
+    "mock, expected_mock",
+    [
+        (False, None),
+        (True, DeviceMock),
+        (DeviceMock(), DeviceMock),
+    ],
+    ids=["mock=False", "mock=True", "mock=<DeviceMock instance>"],
+)
+async def test_connect_pre_existing_mock_forms_still_work(mock, expected_mock):
+    device = Device()
+
+    await device.connect(mock=mock)
+
+    if expected_mock is None:
+        assert device._mock is None
+    elif isinstance(mock, DeviceMock):
+        assert device._mock is mock
+    else:
+        assert type(device._mock) is expected_mock
 
 
 async def test_wait_for_connection():

@@ -30,7 +30,7 @@ All the above methods are concrete, but `connect()` calls out to a [](#DeviceCon
 
 A `DeviceConnector` provides the ability to:
 - [](#DeviceConnector.create_children_from_annotations) that is called during `__init__` to turn annotations into concrete child Devices
-- [](#DeviceConnector.connect_mock) that is called if `connect(mock=True)` is called, and should connect the child Devices in mock mode for testing without a control system
+- [](#DeviceConnector.connect_mock) that is called if `connect(mock=True)` is called, and should connect the child Devices in mock mode for testing without a control system. `mock` can also be a [](#DeviceMock) subclass or a `dict` mapping Device types to `DeviceMock` subclasses to use for specific Devices in the tree; see [](#Device.connect) for the full set of forms it accepts
 - [](#DeviceConnector.connect_real) that is called if `connect(mock=False)` is called, and should connect the child Devices to the control system in parallel
 
 The base `DeviceConnector` provides suitable methods for use with non-introspected Devices, but there are various control system specific connectors that handle filling annotations in [declarative Devices](./declarative-vs-procedural.md).

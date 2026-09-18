@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 
 from ._command import Command, CommandConnector, MockCommandBackend, MockExecuteCallback
 from ._device import Device, DeviceMock
+from ._device import get_mock as _get_device_mock
 from ._mock_signal_backend import MockPutCallback, MockSignalBackend
 from ._signal import Signal, SignalConnector, SignalR
 from ._signal_backend import SignalDatatypeT
@@ -43,7 +44,7 @@ def get_mock(device: Device | Signal) -> Mock:
 
     The device must have been connected in mock mode.
     """
-    mock = device._mock  # noqa: SLF001
+    mock = _get_device_mock(device)
     if not isinstance(mock, DeviceMock):
         msg = f"Device {device} not connected in mock mode"
         raise RuntimeError(msg)
