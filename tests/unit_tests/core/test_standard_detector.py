@@ -197,6 +197,7 @@ async def test_stream_resource_data_provider_1d_single_collection_is_array():
         }
     }
 
+
 class MockPageableProvider(PageableDataProvider):
     """A finite buffer emitted as event pages, one value per collection."""
 
