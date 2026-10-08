@@ -274,11 +274,7 @@ async def test_settings_round_trip_switches_technique(RE, technique_device, tmp_
         assert (
             technique_device.get_readable_formats().get(energy) is Format.HINTED_SIGNAL
         )
-        # Merge, so temperature keeps the format the previous profile gave it
-        assert (
-            technique_device.get_readable_formats().get(temperature)
-            is Format.CONFIG_SIGNAL
-        )
+        assert technique_device.get_readable_formats().get(temperature) is None
         assert (yield from bps.rd(energy)) == 9.0
 
     RE(my_plan())
@@ -294,7 +290,7 @@ async def test_settings_file_without_formats_leaves_them_alone(
 
     def my_plan():
         settings = yield from retrieve_settings(provider, "old_style", technique_device)
-        assert settings.readable_formats == {}
+        assert settings.readable_formats is None
         yield from apply_settings(settings)
         # Values applied, formats untouched
         assert (yield from bps.rd(energy)) == 3.0
@@ -335,6 +331,61 @@ async def test_formats_only_file_applies_without_touching_values(
             is None
         )
         assert (yield from bps.rd(energy)) == 7.0
+
+    RE(my_plan())
+
+
+class _Mono(StandardReadable):
+    def __init__(self, name=""):
+        with self.add_children_as_readables(Format.CONFIG_SIGNAL):
+            self.energy = soft_signal_rw(float, 7.0)
+            self.temperature = soft_signal_rw(float, 20.0)
+        super().__init__(name=name)
+
+
+async def test_store_settings_writes_only_changes_from_class_defaults(RE, tmp_path):
+    provider = YamlSettingsProvider(tmp_path)
+    mono = _Mono(name="mono")
+
+    def stored_formats(name: str):
+        with open(tmp_path / f"{name}.yaml") as f:
+            return yaml.safe_load(f)["<READABLE_FORMATS>"]
+
+    def my_plan():
+        yield from store_settings(provider, "defaults", mono)
+        mono.set_readable_format(mono.energy, Format.HINTED_SIGNAL)
+        mono.set_readable_format(mono.temperature, None)
+        yield from store_settings(provider, "scan", mono)
+        assert stored_formats("defaults") == {}
+        # A dropped default is written as a null
+        assert stored_formats("scan") == {
+            "<ROOT_DEVICE>": {"energy": "HINTED_SIGNAL", "temperature": None}
+        }
+        # The defaults file undoes changes it does not mention
+        defaults = yield from retrieve_settings(provider, "defaults", mono)
+        yield from apply_settings(defaults)
+        assert mono.get_readable_formats() == {
+            mono.energy: Format.CONFIG_SIGNAL,
+            mono.temperature: Format.CONFIG_SIGNAL,
+        }
+        scan = yield from retrieve_settings(provider, "scan", mono)
+        yield from apply_settings(scan)
+        assert mono.get_readable_formats() == {mono.energy: Format.HINTED_SIGNAL}
+
+    RE(my_plan())
+
+
+async def test_null_formats_key_resets_to_class_defaults(RE, tmp_path):
+    provider = YamlSettingsProvider(tmp_path)
+    mono = _Mono(name="mono")
+    mono.set_readable_format(mono.energy, Format.HINTED_SIGNAL)
+    (tmp_path / "reset.yaml").write_text("<READABLE_FORMATS>:\n")
+
+    def my_plan():
+        settings = yield from retrieve_settings(provider, "reset", mono)
+        assert settings.readable_formats == {}
+        yield from apply_settings(settings)
+        assert mono.get_readable_formats().get(mono.energy) is Format.CONFIG_SIGNAL
 
     RE(my_plan())
 
@@ -383,6 +434,8 @@ async def test_store_settings_walks_nested_devices(RE, tmp_path):
     inner.set_readable_format(inner.sig, Format.HINTED_SIGNAL)
     outer.set_readable_format(outer.top, Format.CONFIG_SIGNAL)
     outer.set_readable_format(inner, Format.CHILD)
+    # The same signal registered on a second owner, from deeper in its tree
+    outer.set_readable_format(inner.sig, Format.CONFIG_SIGNAL)
 
     def my_plan():
         yield from store_settings(provider, "nested", outer)
@@ -391,8 +444,13 @@ async def test_store_settings_walks_nested_devices(RE, tmp_path):
                 "top": 2.0,
                 "inner.sig": 1.0,
                 "<READABLE_FORMATS>": {
-                    "<ROOT_DEVICE>": {"top": "CONFIG_SIGNAL", "inner": "CHILD"},
-                    "inner": {"inner.sig": "HINTED_SIGNAL"},
+                    "<ROOT_DEVICE>": {
+                        "top": "CONFIG_SIGNAL",
+                        "inner": "CHILD",
+                        "inner.sig": "CONFIG_SIGNAL",
+                    },
+                    # Child paths are relative to their owner
+                    "inner": {"sig": "HINTED_SIGNAL"},
                 },
             }
 
@@ -468,7 +526,7 @@ def test_settings_or_rejects_formats_from_a_sub_device(technique_device):
     with pytest.raises(ValueError, match="paths are relative to it"):
         base | sub
     # Without formats it is just a value merge, which is fine
-    assert (base | Settings(technique_device)).readable_formats == {}
+    assert (base | Settings(technique_device)).readable_formats is None
 
 
 def test_settings_partition_carries_formats_to_both_halves(technique_device):
@@ -484,11 +542,12 @@ def test_settings_partition_carries_formats_to_both_halves(technique_device):
     assert b.readable_formats == settings.readable_formats
 
 
-async def test_store_settings_omits_a_readable_that_registers_nothing(RE, tmp_path):
-    """An owner with no registered children is a no-op when applied.
+async def test_store_settings_writes_empty_formats_for_an_unchanged_readable(
+    RE, tmp_path
+):
+    """The key is still written, as applying it resets runtime changes.
 
-    This is the shape of TangoTestDevice, and is why its golden file needs no
-    formats key.
+    This is the shape of TangoTestDevice.
     """
     provider = YamlSettingsProvider(tmp_path)
     device = StandardReadable(name="dev")
@@ -498,7 +557,7 @@ async def test_store_settings_omits_a_readable_that_registers_nothing(RE, tmp_pa
     def my_plan():
         yield from store_settings(provider, "empty", device)
         with open(tmp_path / "empty.yaml") as f:
-            assert yaml.safe_load(f) == {"sig": 1.0}
+            assert yaml.safe_load(f) == {"sig": 1.0, "<READABLE_FORMATS>": {}}
 
     RE(my_plan())
 

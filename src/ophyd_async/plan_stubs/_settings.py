@@ -65,9 +65,12 @@ def store_settings(
     Readable formats are stored in both cases, since they are what *determines*
     which signals are configuration.
 
-    Values are stored flat, keyed by dotted attribute path. Readable formats go
-    under the reserved [](#READABLE_FORMATS_KEY), which is not a valid Python
-    identifier and so cannot collide with a path.
+    Values are stored flat, keyed by dotted attribute path. The changes to
+    readable formats since construction go under the reserved
+    [](#READABLE_FORMATS_KEY), which is not a valid Python identifier and so
+    cannot collide with a path. It is written, even if empty, whenever the tree
+    contains a `StandardReadable`, as applying it resets formats to the class
+    defaults.
 
     :param provider: The provider to store the settings with.
     :param name: The name to store the settings under.
@@ -80,9 +83,7 @@ def store_settings(
         signals = walk_rw_signals(device)
     data: dict[str, Any] = yield from _get_values_of_signals(signals)
     formats = walk_readable_formats(device)
-    if formats:
-        # Omitted entirely when there is nothing to say, so that a settings only
-        # file stays exactly as it was before formats were storable
+    if formats is not None:
         data[READABLE_FORMATS_KEY] = {
             owner: {
                 child: None if format is None else format.value
@@ -101,9 +102,8 @@ def retrieve_settings(
 
     If `only_config` is True, retrieve only configuration settings on `Configurable`.
 
-    A file stored before readable formats existed simply has no
-    [](#READABLE_FORMATS_KEY), which reads correctly as "do not change any
-    formats" -- so no migration or version marker is needed.
+    A file with no [](#READABLE_FORMATS_KEY), such as one stored before
+    readable formats existed, gives Settings that leave formats alone.
 
     :param provider: The provider to retrieve the settings from.
     :param name: The name of the settings to retrieve.
@@ -116,7 +116,11 @@ def retrieve_settings(
     # Reserved keys first, so what is left is signal paths. Any other <RESERVED>
     # key is dropped with a warning: it is either a typo of a reserved key or
     # written by a newer version, and a path can never look like that.
-    stored_formats = data.pop(READABLE_FORMATS_KEY, {})
+    # Present but null, as a hand written "<READABLE_FORMATS>:" would be, still
+    # means reset to the class defaults
+    stored_formats = (
+        data.pop(READABLE_FORMATS_KEY) or {} if READABLE_FORMATS_KEY in data else None
+    )
     unknown_reserved = sorted(k for k in data if k.startswith("<") and k.endswith(">"))
     for key in unknown_reserved:
         del data[key]
@@ -125,14 +129,18 @@ def retrieve_settings(
             f"Ignoring unknown reserved keys {unknown_reserved} in settings {name!r}",
             stacklevel=2,
         )
-    readable_formats: ReadableFormats = {
-        owner: {
-            # A null means "stop this child contributing", so it is not coerced
-            child: None if format is None else StandardReadableFormat(format)
-            for child, format in entries.items()
+    readable_formats: ReadableFormats | None = (
+        None
+        if stored_formats is None
+        else {
+            owner: {
+                # A null means "stop this child contributing", so is not coerced
+                child: None if format is None else StandardReadableFormat(format)
+                for child, format in entries.items()
+            }
+            for owner, entries in stored_formats.items()
         }
-        for owner, entries in stored_formats.items()
-    }
+    )
     if only_config:
         signals = yield from wait_for_awaitable(walk_config_signals(device))
     else:
@@ -148,9 +156,9 @@ def retrieve_settings(
 def apply_settings(settings: Settings) -> MsgGenerator[None]:
     """Set every SignalRW to the given value in Settings. If value is None ignore it.
 
-    Then apply any readable formats the Settings carries. Formats go last
-    because they touch no hardware and cannot fail, so a failed value write
-    leaves the Device's readable registry untouched.
+    Then apply any readable formats the Settings carries with
+    [](#apply_readable_formats). Formats go last because they touch no hardware
+    and cannot fail, so a failed value write leaves them untouched.
     """
     signal_values = {
         signal: value for signal, value in settings.items() if value is not None
@@ -159,7 +167,7 @@ def apply_settings(settings: Settings) -> MsgGenerator[None]:
         for signal, value in signal_values.items():
             yield from bps.abs_set(signal, value, group="apply_settings")
         yield from bps.wait("apply_settings")
-    if settings.readable_formats:
+    if settings.readable_formats is not None:
         apply_readable_formats(settings.device, settings.readable_formats)
 
 

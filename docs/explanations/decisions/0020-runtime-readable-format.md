@@ -172,15 +172,15 @@ collection, while the other simply works.
 
 Values and formats are applied on the same cadence — a technique change wants both — so
 they belong in one file and one `apply_settings` call. `store_settings` keeps values flat
-and adds one reserved key:
+and adds one reserved key holding the format changes since construction:
 
 ```yaml
 energy: 7.0
 temperature: 20.0
 <READABLE_FORMATS>:
   <ROOT_DEVICE>:
-    energy: CONFIG_SIGNAL
-    temperature: CONFIG_SIGNAL
+    energy: HINTED_SIGNAL
+    temperature: null
 ```
 
 `Settings` gains a `readable_formats` attribute, so one `retrieve_settings` returns the
@@ -198,10 +198,10 @@ store-time guard is required. `<` is also not a YAML indicator, so unlike `*FORM
 reason and because an empty-string key makes PyYAML emit its hard-to-read explicit
 `? '' :` form.
 
-Because no path can look like `<...>`, `retrieve_settings` drops *every* such key rather
-than only the one it understands. So a key written by a newer version — device names, say
-— is ignored by an older one instead of being reported as an unknown signal, and adding
-one later needs no migration and no constant reserved up front.
+Because no path can look like `<...>`, `retrieve_settings` drops every such key it does
+not understand with a warning, rather than reporting it as an unknown signal. A key written
+by a newer version is then ignored by an older one, and a typo of a reserved key is still
+noticed.
 
 **The formats section is two levels while values are flat.** A value is intrinsic to one
 path; a format is a fact about an (owner, child) *pair*, and the same child can be
@@ -212,34 +212,43 @@ direct child" rule, so `AreaDetector` can keep registering `driver.acquire_time`
 `DeviceVector` elements keep working, with no dependency on #1395 and no second migration
 later.
 
-### Applying merges, and unregistering is explicit
+The child path is relative to its owner, not to the root, so the owner is not repeated on
+every line. A survey of dodal, haven and the NSLS-II repositories found that every
+registration of something outside its owner's subtree is of an object outside the stored
+Device altogether (an `__init__` argument or a `Reference`), which a root-relative path
+cannot store either.
 
-`apply_readable_formats` **merges** into what is already registered rather than replacing
-it: a child the file does not mention keeps whatever format it has.
+### Only changes are stored, and applying resets to the class defaults first
 
-Replacement was tried first, because it makes technique switching automatic — loading a
-profile drops what the previous one registered. It was rejected because it breaks the case
-that matters more: store a file, add a signal to the Device in a later version, apply the
-old file, and the new signal is silently unregistered. Signal *values* already behave the
-other way round — applying a stored file leaves signals it has never heard of alone — and
-formats living in the same file should not behave differently from the values beside them.
+`walk_readable_formats` records only how each `StandardReadable` differs from what it
+registered during construction, with a dropped child as `None`. `apply_readable_formats`
+resets every `StandardReadable` in the tree to its class defaults, then applies those
+changes. The key is written, even if empty, whenever the tree has a `StandardReadable`, as
+an empty entry means "back to the defaults", where a missing key means "leave alone".
 
-A child is dropped by giving it a format of `None`, a null in the stored file. Nothing
-writes those nulls automatically, because storing a Device records only what it currently
-registers and cannot know what some other profile registered; a profile that needs a child
-dropped has to say so. The cost is that round-tripping A -> B -> A no longer drops
-automatically, which is the price of not silently unregistering signals added since a file
-was written.
+Two alternatives were rejected:
 
-It follows that a `StandardReadable` registering nothing gets no entry at all, since an
-empty entry would be a no-op. `apply_readable_formats` resolves every path before changing
-anything, so a bad path cannot leave the tree half applied.
+- **Store everything, apply by replacing.** Store a file, add a signal to the Device in a
+  later version, apply the old file, and the new signal is silently unregistered. It also
+  pins the class defaults of the day into every file, so a release that changes a default
+  is undone by old files.
+- **Store everything, apply by merging.** Fixes the new-signal problem but cannot return
+  from technique B to technique A: anything B changed that A does not mention stays as B
+  left it, and dropping a child needs a hand-written null.
+
+Storing changes against the class defaults avoids both: a new signal keeps its class
+format, defaults stay current, and a dropped child is written as a null automatically.
+Registrations made in `__init__` are part of the defaults, so one of an object outside the
+stored tree is never written, and does not warn on every store.
+
+`apply_readable_formats` resolves every path before changing anything, so a bad path cannot
+leave the tree half applied.
 
 `Settings.partition` copies the formats to **both** halves. A device-specific apply plan
 normally applies only the halves and never the original `Settings` — `apply_panda_settings`
 partitions and calls `apply_settings` twice — so putting formats on one half would let the
-plan silently decide whether they were restored at all. Applying them more than once is
-harmless: it touches no hardware and is idempotent. `apply_settings` applies formats after
+plan silently decide whether they were restored at all. Applying them twice is harmless: it
+touches no hardware and gives the same result. `apply_settings` applies formats after
 values, so a failed value write leaves the readable registry untouched.
 
 ## Consequences
@@ -256,7 +265,8 @@ values, so a failed value write leaves the readable registry untouched.
   discouraged.
 - Deriving callables per call costs a pass over the registry on every verb. The registries
   are small (tens of entries), and it is what makes the format mutable.
-- Registering a device that is not within the tree still works, but its format cannot be
-  stored, since there is no stable path for it. `walk_readable_formats` warns and skips.
+- Registering a device that is not below its owner still works, but a runtime change to
+  its format cannot be stored, since there is no stable path for it.
+  `walk_readable_formats` warns and skips.
 - This ADR is numbered 21 rather than 20 to leave 20 for the unmerged bounded-data-logic
   ADR in #1367.

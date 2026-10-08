@@ -48,11 +48,9 @@ So a plan that retunes a Device can put it back without having to record what it
 changed. It resets that Device only, not its children — to do a whole tree:
 
 ```python
-from ophyd_async.core import walk_devices
+from ophyd_async.core import apply_readable_formats
 
-for dev in walk_devices(detector).values():
-    if isinstance(dev, StandardReadable):
-        dev.reset_readable_formats()
+apply_readable_formats(detector, {})
 ```
 
 ```{note}
