@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import call, patch
 
 import numpy as np
 import pytest
@@ -380,32 +380,26 @@ async def test_pmac_trajectory_stage(sim_motors: tuple[PmacIO, Motor, Motor]):
     ]
 
 
-async def test_pmac_trajectory_unstage(sim_motors: tuple[PmacIO, Motor, Motor]):
+@pytest.mark.parametrize(
+    "execute_state, aborts",
+    [(PmacExecuteState.DONE, False), (PmacExecuteState.EXECUTING, True)],
+)
+async def test_pmac_trajectory_unstage_aborts_only_if_running(
+    sim_motors: tuple[PmacIO, Motor, Motor],
+    execute_state: PmacExecuteState,
+    aborts: bool,
+):
     pmac_io, _, _ = sim_motors
-    logic = PmacTrajectoryFlyableLogic(pmac_io)
-    logic.stop = AsyncMock()
-    flyer = logic.with_device()
-    await flyer.unstage()
-    logic.stop.assert_called_once()
-
-
-async def test_trajectory_stop_if_running(sim_motors: tuple[PmacIO, Motor, Motor]):
-    pmac_io, _, _ = sim_motors
-    pmac_trajectory = PmacTrajectoryFlyableLogic(pmac_io)
+    flyer = PmacTrajectoryFlyableLogic(pmac_io).with_device()
     execute_mock = get_mock_execute(pmac_io.trajectory.abort_profile)
+    set_mock_value(pmac_io.trajectory.execute_state, execute_state)
 
-    # Method not called as no running trajectory
-    await pmac_trajectory.stop()
-    execute_mock.assert_not_awaited()
+    await flyer.unstage()
 
-    # Mocking that trajectory is executing
-    set_mock_value(
-        pmac_trajectory.pmac.trajectory.execute_state, PmacExecuteState.EXECUTING
-    )
-
-    # Method called as there is now a running trajectory
-    await pmac_trajectory.stop()
-    execute_mock.assert_awaited_once_with()
+    if aborts:
+        execute_mock.assert_awaited_once_with()
+    else:
+        execute_mock.assert_not_awaited()
 
 
 async def test_trajectory_raises_if_profile_status_not_in_good_state(

@@ -1,10 +1,12 @@
 import asyncio
 import logging
+from dataclasses import dataclass
 
 import numpy as np
 
 from ophyd_async.core import (
     DetectorDataLogic,
+    PathInfo,
     PathProvider,
     StreamableDataProvider,
     StreamResourceDataProvider,
@@ -16,7 +18,15 @@ from ._block import DataBlock, PandaCaptureMode
 logger = logging.getLogger("ophyd_async")
 
 
-class PandaHDFDataLogic(DetectorDataLogic):
+@dataclass
+class PandaHDFDataCtx:
+    """What `PandaHDFDataLogic.make_data_provider` worked out for `start`."""
+
+    path_info: PathInfo
+    flush_period: float
+
+
+class PandaHDFDataLogic(DetectorDataLogic[PandaHDFDataCtx]):
     def __init__(
         self,
         path_provider: PathProvider,
@@ -25,31 +35,20 @@ class PandaHDFDataLogic(DetectorDataLogic):
         self.path_provider = path_provider
         self.data_block = data_block
 
-    async def prepare_unbounded(self, datakey_name: str) -> StreamableDataProvider:
+    async def make_data_provider(
+        self,
+        datakey_name: str,
+        num_collections: int,
+        period: float,
+        flush_period: float,
+    ) -> tuple[StreamableDataProvider, PandaHDFDataCtx]:
+        # TODO: size the chunk from `period` once the IOC exposes the chunk-size
+        # signal (see the chunk_shape TODO below). The PandA captures forever, so
+        # the number of collections is not needed.
         # Work out where to write
         path_info = self.path_provider(datakey_name)
-        # Set create dir depth first to guarantee that callback when setting
-        # directory path has correct value
-        await self.data_block.create_directory.set(path_info.create_dir_depth)
-        # Setup the HDF writer
-        await asyncio.gather(
-            self.data_block.flush_period.set(0),
-            self.data_block.hdf_directory.set(str(path_info.directory_path)),
-            self.data_block.hdf_file_name.set(
-                f"{path_info.filename}.h5",
-            ),
-            self.data_block.capture_mode.set(PandaCaptureMode.FOREVER),
-        )
-        # Make sure that directory exists or has been created.
-        if not await self.data_block.directory_exists.get_value() == 1:
-            raise OSError(
-                f"Directory {path_info.directory_path} does not exist or "
-                "is not writable by the PandABlocks-ioc!"
-            )
-        # Start capturing
-        await self.data_block.capture.set(True)
-        # Load data from the datasets PV on the panda, update internal
-        # representation of datasets that the panda will write.
+        # Load data from the datasets PV on the panda, which tells us which
+        # datasets it will write
         capture_table = await self.data_block.datasets.get_value()
         if len(capture_table) == 0:
             logger.warning(
@@ -70,12 +69,38 @@ class PandaHDFDataLogic(DetectorDataLogic):
             )
             for dataset_name in capture_table.name
         ]
-        return StreamResourceDataProvider(
+        provider = StreamResourceDataProvider(
             uri=f"{path_info.directory_uri}{path_info.filename}.h5",
             resources=resources,
             mimetype="application/x-hdf5",
             collections_written_signal=self.data_block.num_captured,
         )
+        return provider, PandaHDFDataCtx(path_info, flush_period)
+
+    async def start(self, ctx: PandaHDFDataCtx) -> None:
+        path_info = ctx.path_info
+        # Set create dir depth first to guarantee that callback when setting
+        # directory path has correct value
+        await self.data_block.create_directory.set(path_info.create_dir_depth)
+        # Setup the HDF writer. The PandA flushes on a timer rather than by
+        # chunk size, so it takes the flush period directly; 0 means it flushes
+        # only when its buffer fills.
+        await asyncio.gather(
+            self.data_block.flush_period.set(ctx.flush_period),
+            self.data_block.hdf_directory.set(str(path_info.directory_path)),
+            self.data_block.hdf_file_name.set(
+                f"{path_info.filename}.h5",
+            ),
+            self.data_block.capture_mode.set(PandaCaptureMode.FOREVER),
+        )
+        # Make sure that directory exists or has been created.
+        if not await self.data_block.directory_exists.get_value() == 1:
+            raise OSError(
+                f"Directory {path_info.directory_path} does not exist or "
+                "is not writable by the PandABlocks-ioc!"
+            )
+        # Start capturing
+        await self.data_block.capture.set(True)
 
     async def stop(self) -> None:
         await self.data_block.capture.set(False)
