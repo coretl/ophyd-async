@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import warnings
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -112,13 +113,18 @@ def retrieve_settings(
     # Copy, as the provider may hand back a dict it holds on to and the reserved
     # keys are popped out of it below
     data = dict((yield from wait_for_awaitable(provider.retrieve(name))))
-    # Reserved keys first, so what is left is signal paths and the unknown name
-    # check below still catches genuine typos. Any <RESERVED> key is dropped,
-    # not just the one understood here: a path can never look like that, so a
-    # key written by a newer version is ignored rather than reported as a typo.
+    # Reserved keys first, so what is left is signal paths. Any other <RESERVED>
+    # key is dropped with a warning: it is either a typo of a reserved key or
+    # written by a newer version, and a path can never look like that.
     stored_formats = data.pop(READABLE_FORMATS_KEY, {})
-    for key in [k for k in data if k.startswith("<") and k.endswith(">")]:
+    unknown_reserved = sorted(k for k in data if k.startswith("<") and k.endswith(">"))
+    for key in unknown_reserved:
         del data[key]
+    if unknown_reserved:
+        warnings.warn(
+            f"Ignoring unknown reserved keys {unknown_reserved} in settings {name!r}",
+            stacklevel=2,
+        )
     readable_formats: ReadableFormats = {
         owner: {
             # A null means "stop this child contributing", so it is not coerced

@@ -339,20 +339,19 @@ async def test_formats_only_file_applies_without_touching_values(
     RE(my_plan())
 
 
-async def test_retrieve_settings_ignores_unknown_reserved_keys(
+async def test_retrieve_settings_warns_on_unknown_reserved_keys(
     RE, technique_device, tmp_path
 ):
-    """A key from a newer version is skipped, not reported as an unknown signal.
-
-    No signal path can look like <...>, so there is nothing to reserve up front.
-    """
+    """A typo'd or newer reserved key is skipped with a warning, not a NameError."""
     provider = YamlSettingsProvider(tmp_path)
     (tmp_path / "newer.yaml").write_text(
-        "energy: 3.0\n<DEVICE_NAMES>:\n  <ROOT_DEVICE>: mono\n<SOMETHING_ELSE>: 1\n"
+        "energy: 3.0\n<READABLE_FORMAT>:\n  <ROOT_DEVICE>: {}\n<SOMETHING_ELSE>: 1\n"
     )
 
     def my_plan():
-        settings = yield from retrieve_settings(provider, "newer", technique_device)
+        match = r"unknown reserved keys \['<READABLE_FORMAT>', '<SOMETHING_ELSE>'\]"
+        with pytest.warns(UserWarning, match=match):
+            settings = yield from retrieve_settings(provider, "newer", technique_device)
         assert dict(settings) == {technique_device.energy: 3.0}
         yield from apply_settings(settings)
         assert (yield from bps.rd(technique_device.energy)) == 3.0
