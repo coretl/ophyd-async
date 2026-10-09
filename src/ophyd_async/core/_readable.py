@@ -60,13 +60,6 @@ class StandardReadableFormat(Enum):
         parent.set_readable_format(child, self)
 
 
-#: The formats whose devices take part in `stage()`/`unstage()`, if they are
-#: `Stageable` at all.
-_STAGED_FORMATS = frozenset(
-    {StandardReadableFormat.HINTED_SIGNAL, StandardReadableFormat.CHILD}
-)
-
-
 class _SealDefaultFormatsMeta(type(_StandardBase)):  # type: ignore[misc]
     """Record the formats a `StandardReadable` was constructed with.
 
@@ -170,8 +163,12 @@ class StandardReadable(
         # HINTED_SIGNAL stages so that caching is set up and read() is fast; a
         # CHILD stages because it may have staging of its own. The uncached and
         # config formats deliberately do not.
+        staged_formats = (
+            StandardReadableFormat.HINTED_SIGNAL,
+            StandardReadableFormat.CHILD,
+        )
         for device, format in self._readables.items():
-            if format in _STAGED_FORMATS and isinstance(device, AsyncStageable):
+            if format in staged_formats and isinstance(device, AsyncStageable):
                 yield device
 
     async def _formatted_read(self) -> dict[str, Reading]:
