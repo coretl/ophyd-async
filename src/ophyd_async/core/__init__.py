@@ -11,8 +11,8 @@ from ._command import (
     soft_command,
 )
 from ._data_providers import (
-    ReadableDataProvider,
-    SignalDataProvider,
+    EventPageDataProvider,
+    PageableDataProvider,
     StreamableDataProvider,
     StreamResourceDataProvider,
     StreamResourceInfo,
@@ -28,6 +28,7 @@ from ._derived_signal_backend import Transform, merge_gathered_dicts
 from ._detector import (
     DetectorAcquireLogic,
     DetectorDataLogic,
+    DetectorLogic,
     DetectorTrigger,
     DetectorTriggerLogic,
     StandardDetector,
@@ -52,7 +53,11 @@ from ._enums import (
     OnOff,
     YesNo,
 )
-from ._flyable import FlyableLogic, FlyMotorInfo, StandardFlyable
+from ._flyable import (
+    FlyableLogic,
+    FlyMotorInfo,
+    StandardFlyable,
+)
 from ._log import config_ophyd_async_logging, logger, set_handler
 from ._mock_signal_backend import MockSignalBackend
 from ._mock_signal_utils import (
@@ -99,10 +104,13 @@ from ._protocol import (
     Watcher,
 )
 from ._readable import (
-    ConfigSignal,
-    HintedSignal,
+    READABLE_FORMATS_KEY,
+    ROOT_DEVICE_KEY,
+    ReadableFormats,
     StandardReadable,
     StandardReadableFormat,
+    apply_readable_formats,
+    walk_readable_formats,
 )
 from ._settings import Settings, SettingsProvider
 from ._signal import (
@@ -154,6 +162,7 @@ from ._utils import (
     SubsetEnum,
     SupersetEnum,
     WatcherUpdate,
+    abstract_cached_property,
     error_if_none,
     gather_dict,
     get_dtype,
@@ -271,12 +280,18 @@ __all__ = [
     # Readable
     "StandardReadable",
     "StandardReadableFormat",
+    "ReadableFormats",
+    "walk_readable_formats",
+    "apply_readable_formats",
+    "READABLE_FORMATS_KEY",
+    "ROOT_DEVICE_KEY",
     # Detector
     "DetectorTrigger",
     "TriggerInfo",
     "DetectorTriggerLogic",
     "DetectorAcquireLogic",
     "DetectorDataLogic",
+    "DetectorLogic",
     "StandardDetector",
     # Path
     "PathInfo",
@@ -290,9 +305,9 @@ __all__ = [
     "AutoMaxIncrementingPathProvider",
     "UUIDFilenameProvider",
     # Data Providers
-    "ReadableDataProvider",
+    "EventPageDataProvider",
+    "PageableDataProvider",
     "StreamableDataProvider",
-    "SignalDataProvider",
     "StreamResourceInfo",
     "StreamResourceDataProvider",
     # Flyer
@@ -323,6 +338,7 @@ __all__ = [
     "make_datakey",
     "wait_for_connection",
     "Ignore",
+    "abstract_cached_property",
     "non_zero",
     "simulate_move",
     # Derived signal
@@ -333,8 +349,6 @@ __all__ = [
     "DerivedSignalFactory",
     "merge_gathered_dicts",
     # Back compat - delete before 1.0
-    "ConfigSignal",
-    "HintedSignal",
     # Standard enums
     "EnabledDisabled",
     "EnableDisable",

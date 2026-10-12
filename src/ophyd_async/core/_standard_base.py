@@ -1,9 +1,9 @@
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from ._device import Device
 from ._protocol import AsyncStageable
-from ._status import AsyncStatus, AsyncStatusBase
+from ._status import AsyncStatus
 
 
 class _StandardBase(Device, AsyncStageable):
@@ -17,13 +17,13 @@ class _StandardBase(Device, AsyncStageable):
     """
 
     # Immutable defaults to avoid accidental sharing between instances
-    _stage_funcs: tuple[Callable[[], AsyncStatusBase], ...] = ()
-    _unstage_funcs: tuple[Callable[[], AsyncStatusBase], ...] = ()
+    _stage_funcs: tuple[Callable[[], Awaitable[None]], ...] = ()
+    _unstage_funcs: tuple[Callable[[], Awaitable[None]], ...] = ()
 
     @AsyncStatus.wrap
     async def stage(self) -> None:
-        await asyncio.gather(*(func().task for func in self._stage_funcs))
+        await asyncio.gather(*(func() for func in self._stage_funcs))
 
     @AsyncStatus.wrap
     async def unstage(self) -> None:
-        await asyncio.gather(*(func().task for func in self._unstage_funcs))
+        await asyncio.gather(*(func() for func in self._unstage_funcs))

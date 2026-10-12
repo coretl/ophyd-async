@@ -43,3 +43,26 @@ def load_panda(panda1: HDFPanda):
     settings = yield from retrieve_settings(provider, "yaml_file_name", panda1)
     yield from apply_settings_if_different(settings, apply_panda_settings)
 ```
+
+## Storing readable formats too
+
+As well as signal values, [](#store_settings) records how each child contributes to the Device's bluesky verbs — which signals are hinted, which are configuration — and [](#apply_settings) restores that alongside the values. The two change on the same cadence, so they live in one file and are applied by one call. This means a stored file can switch a Device between techniques as well as putting its values back; see [](./change-readable-format.md) for changing a format directly.
+
+Values stay flat in the yaml. Formats go under the reserved [](#READABLE_FORMATS_KEY), and only what has changed since the Device was constructed is recorded, so the file stays short and can be edited by hand:
+
+```yaml
+energy: 7.0
+temperature: 20.0
+<READABLE_FORMATS>:
+  <ROOT_DEVICE>:
+    energy: HINTED_SIGNAL
+    temperature: null
+  stats:
+    total: HINTED_UNCACHED_SIGNAL
+```
+
+The outer key of each formats entry is the [](#StandardReadable) the child is registered on, with `<ROOT_DEVICE>` ([](#ROOT_DEVICE_KEY)) standing for the Device you stored. The inner key is the child's path from that owner. The owner is recorded rather than worked out from the child's path, because the same child can be registered on more than one Device with a different format each time. A null means the child has been dropped.
+
+Applying first resets every Device in the tree to the formats its class declares, then applies the changes in the file. So a file stored with nothing changed (`<READABLE_FORMATS>: {}`) puts the class defaults back, and a signal added to a Device class after the file was stored keeps the format the class gives it.
+
+A file with no `<READABLE_FORMATS>` key changes no formats, so settings files saved before formats were storable keep working untouched. A file with *only* that key switches technique without writing a single value to hardware.
