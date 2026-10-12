@@ -28,12 +28,9 @@ from ._data_providers import (
     PageableDataProvider,
     StreamableDataProvider,
 )
+from ._device import Device
 from ._flyable import FlyableLogic, StandardFlyable
-from ._readable import (
-    StandardReadable,
-    StandardReadableFormat,
-    _config_signals,
-)
+from ._readable import StandardReadable, StandardReadableFormat
 from ._settings import Settings
 from ._signal import SignalDict, SignalR, SignalRW, observe_signals_value
 from ._status import AsyncStatus, WatchableAsyncStatus
@@ -885,6 +882,41 @@ class DetectorLogic(FlyableLogic[TriggerInfo, _FlyCtx]):
             await self.acquire_logic.wait_for_idle()
 
 
+def _config_signals(device: Device) -> set[SignalR]:
+    """Return every `Signal` contributing to a Device's `read_configuration()`.
+
+    Recurses into children registered as [](#StandardReadableFormat.CHILD), so
+    a Device that registers a sub-Device whole picks up whatever that
+    sub-Device declares as configuration. A Device that is not a
+    `StandardReadable` contributes nothing.
+
+    Unlike `walk_config_signals` this reads the registry rather than calling
+    `read_configuration()`, so it does no I/O and includes read-only `SignalR`s
+    as well as `SignalRW`s -- `ADBaseIO.model` is a `SignalR`, and it is
+    exactly the signal an areaDetector trigger logic needs for deadtime.
+
+    Deliberately private and unexported: #1367 restructures detector logic, so
+    what the public shape of this should be is not settled yet.
+    """
+    signals: set[SignalR] = set()
+    if not isinstance(device, StandardReadable):
+        return signals
+    for child, format in device.get_readable_formats().items():
+        match format:
+            case StandardReadableFormat.CONFIG_SIGNAL:
+                # set_readable_format only accepts a SignalR for a signal format
+                signals.add(cast(SignalR, child))
+            case StandardReadableFormat.CHILD:
+                signals |= _config_signals(child)
+            case (
+                StandardReadableFormat.HINTED_SIGNAL
+                | StandardReadableFormat.UNCACHED_SIGNAL
+                | StandardReadableFormat.HINTED_UNCACHED_SIGNAL
+            ):
+                pass
+    return signals
+
+
 class StandardDetector(
     StandardReadable,
     StandardFlyable[TriggerInfo, _FlyCtx],
@@ -1132,11 +1164,15 @@ class StandardDetector(
             ):
                 yield doc
 
-    async def _collect_pages(self) -> AsyncIterator[PartialEventPage]:
+    async def _collect_pages(
+        self, index: int | None = None
+    ) -> AsyncIterator[PartialEventPage]:
         # Bound as collect_pages when there is a paging provider
         data = self.logic.prepared_data
         cpe = data.collections_per_event
-        index = await self.get_index()
+        if index is None:
+            # As in _collect_asset_docs, so detectors can collect in step
+            index = await self.get_index()
         for data_provider in data.pageable:
             async for page in data_provider.make_pages(
                 collections_written=index * cpe,

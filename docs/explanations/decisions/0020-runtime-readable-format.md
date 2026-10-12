@@ -59,10 +59,13 @@ a driver, a plugin list and a path provider.
 
 ### The registry is a `{device: format}` dict
 
-`StandardReadable._readables` maps each registered child to its format, in registration
-order, and the callables for each verb are derived on demand. `add_readables` becomes a
-thin wrapper over a new `set_readable_format(device, format)`, and `format=None` removes
-the device. `get_readable_formats()` returns a copy.
+`StandardReadable._readables` is a `MutableMapping[Device, StandardReadableFormat]` that
+maps each registered child to its format, in registration order, and the callables for
+each verb are derived on demand. Its `__setitem__` validates, as `Settings` does for its
+keys: a signal format is only accepted for a `SignalR`, so the verbs can match on
+`(signal, format)` entries already typed. `add_readables` becomes a thin wrapper over a
+new `set_readable_format(device, format)`, and `format=None` removes the device.
+`get_readable_formats()` returns a copy.
 
 Keying by `Device` is identity keying, which is what a registry of children needs: `Device`
 does not override `__eq__`, and while `DeviceVector` and `DeviceMap` inherit a value based

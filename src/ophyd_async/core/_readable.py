@@ -1,10 +1,18 @@
 import asyncio
 import itertools
 import warnings
-from collections.abc import Awaitable, Callable, Generator, Iterator, Sequence
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Generator,
+    Iterator,
+    MutableMapping,
+    Sequence,
+)
 from contextlib import contextmanager
 from enum import Enum
 from functools import cached_property
+from typing import Literal, cast
 
 from bluesky.protocols import HasHints, Hints, Reading
 from event_model import DataKey
@@ -14,12 +22,6 @@ from ._protocol import AsyncConfigurable, AsyncReadable, AsyncStageable
 from ._signal import SignalR, walk_devices
 from ._standard_base import _StandardBase
 from ._utils import merge_gathered_dicts
-
-
-def _as_signal_r(device: Device) -> SignalR:
-    if not isinstance(device, SignalR):
-        raise TypeError(f"{device} is not a SignalR")
-    return device
 
 
 class StandardReadableFormat(Enum):
@@ -58,6 +60,64 @@ class StandardReadableFormat(Enum):
         if not isinstance(parent, StandardReadable):
             raise TypeError(f"Expected parent to be StandardReadable, got {parent}")
         parent.set_readable_format(child, self)
+
+
+# Short alias for the case statements below
+Format = StandardReadableFormat
+
+_SignalFormat = Literal[
+    Format.CONFIG_SIGNAL,
+    Format.HINTED_SIGNAL,
+    Format.UNCACHED_SIGNAL,
+    Format.HINTED_UNCACHED_SIGNAL,
+]
+_ReadableEntry = tuple[Device, Literal[Format.CHILD]] | tuple[SignalR, _SignalFormat]
+
+
+class _Readables(MutableMapping[Device, StandardReadableFormat]):
+    """The registered children and their formats, in registration order.
+
+    Only a `SignalR` may be given a signal format, which is what lets
+    `entries()` hand each one to the verbs already typed.
+    """
+
+    def __init__(self) -> None:
+        self._formats: dict[Device, StandardReadableFormat] = {}
+
+    def __getitem__(self, device: Device) -> StandardReadableFormat:
+        return self._formats[device]
+
+    def __setitem__(self, device: Device, format: StandardReadableFormat) -> None:
+        if not isinstance(format, StandardReadableFormat):
+            raise TypeError(f"{format} is not a StandardReadableFormat")
+        match format:
+            case Format.CHILD:
+                pass
+            case (
+                Format.CONFIG_SIGNAL
+                | Format.HINTED_SIGNAL
+                | Format.UNCACHED_SIGNAL
+                | Format.HINTED_UNCACHED_SIGNAL
+            ):
+                # Fails type checking unless these are exactly _SignalFormat,
+                # which is what makes the cast in entries() true
+                _: _SignalFormat = format
+                if not isinstance(device, SignalR):
+                    raise TypeError(f"{device} is not a SignalR")
+        self._formats[device] = format
+
+    def __delitem__(self, device: Device) -> None:
+        del self._formats[device]
+
+    def __iter__(self) -> Iterator[Device]:
+        return iter(self._formats)
+
+    def __len__(self) -> int:
+        return len(self._formats)
+
+    def entries(self) -> list[_ReadableEntry]:
+        """Each child and its format, typed by what `__setitem__` allowed."""
+        return cast(list[_ReadableEntry], list(self._formats.items()))
 
 
 class _SealDefaultFormatsMeta(type(_StandardBase)):  # type: ignore[misc]
@@ -107,7 +167,7 @@ class StandardReadable(
     """
 
     @cached_property
-    def _readables(self) -> dict[Device, StandardReadableFormat]:
+    def _readables(self) -> _Readables:
         """The registered children and their formats, in registration order.
 
         A `cached_property` rather than an attribute set in `__init__`, because
@@ -122,7 +182,7 @@ class StandardReadable(
         `Mapping`, they hash by `id()`. That is injective over live objects, so
         two distinct devices never share a hash and `__eq__` is never reached.
         """
-        return {}
+        return _Readables()
 
     # The formats declared during construction, sealed by the metaclass once
     # __init__ has fully returned. Only ever replaced, never mutated in place,
@@ -163,84 +223,116 @@ class StandardReadable(
         # HINTED_SIGNAL stages so that caching is set up and read() is fast; a
         # CHILD stages because it may have staging of its own. The uncached and
         # config formats deliberately do not.
-        staged_formats = (
-            StandardReadableFormat.HINTED_SIGNAL,
-            StandardReadableFormat.CHILD,
-        )
-        for device, format in self._readables.items():
-            if format in staged_formats and isinstance(device, AsyncStageable):
-                yield device
+        for entry in self._readables.entries():
+            match entry:
+                case (device, Format.CHILD):
+                    if isinstance(device, AsyncStageable):
+                        yield device
+                case (signal, Format.HINTED_SIGNAL):
+                    yield signal
+                case (
+                    _,
+                    Format.CONFIG_SIGNAL
+                    | Format.UNCACHED_SIGNAL
+                    | Format.HINTED_UNCACHED_SIGNAL,
+                ):
+                    pass
 
     async def _formatted_read(self) -> dict[str, Reading]:
         """What the registered children contribute to `read()`."""
         coros = []
-        for device, format in self._readables.items():
-            match format:
-                case StandardReadableFormat.CHILD if isinstance(device, AsyncReadable):
-                    coros.append(device.read())
-                case StandardReadableFormat.HINTED_SIGNAL:
-                    coros.append(_as_signal_r(device).read())
+        for entry in self._readables.entries():
+            match entry:
+                case (device, Format.CHILD):
+                    if isinstance(device, AsyncReadable):
+                        coros.append(device.read())
+                case (signal, Format.HINTED_SIGNAL):
+                    coros.append(signal.read())
                 case (
-                    StandardReadableFormat.UNCACHED_SIGNAL
-                    | StandardReadableFormat.HINTED_UNCACHED_SIGNAL
+                    signal,
+                    Format.UNCACHED_SIGNAL | Format.HINTED_UNCACHED_SIGNAL,
                 ):
-                    coros.append(_as_signal_r(device).read(cached=False))
+                    coros.append(signal.read(cached=False))
+                case (_, Format.CONFIG_SIGNAL):
+                    pass
         return await merge_gathered_dicts(coros)
 
     async def _formatted_describe(self) -> dict[str, DataKey]:
         """What the registered children contribute to `describe()`."""
         coros = []
-        for device, format in self._readables.items():
-            match format:
-                case StandardReadableFormat.CHILD if isinstance(device, AsyncReadable):
-                    coros.append(device.describe())
+        for entry in self._readables.entries():
+            match entry:
+                case (device, Format.CHILD):
+                    if isinstance(device, AsyncReadable):
+                        coros.append(device.describe())
                 case (
-                    StandardReadableFormat.HINTED_SIGNAL
-                    | StandardReadableFormat.UNCACHED_SIGNAL
-                    | StandardReadableFormat.HINTED_UNCACHED_SIGNAL
+                    signal,
+                    Format.HINTED_SIGNAL
+                    | Format.UNCACHED_SIGNAL
+                    | Format.HINTED_UNCACHED_SIGNAL,
                 ):
-                    coros.append(_as_signal_r(device).describe())
+                    coros.append(signal.describe())
+                case (_, Format.CONFIG_SIGNAL):
+                    pass
         return await merge_gathered_dicts(coros)
 
     async def _formatted_read_configuration(self) -> dict[str, Reading]:
         """What the registered children contribute to `read_configuration()`."""
         coros = []
-        for device, format in self._readables.items():
-            match format:
-                case StandardReadableFormat.CHILD if isinstance(
-                    device, AsyncConfigurable
+        for entry in self._readables.entries():
+            match entry:
+                case (device, Format.CHILD):
+                    if isinstance(device, AsyncConfigurable):
+                        coros.append(device.read_configuration())
+                case (signal, Format.CONFIG_SIGNAL):
+                    coros.append(signal.read())
+                case (
+                    _,
+                    Format.HINTED_SIGNAL
+                    | Format.UNCACHED_SIGNAL
+                    | Format.HINTED_UNCACHED_SIGNAL,
                 ):
-                    coros.append(device.read_configuration())
-                case StandardReadableFormat.CONFIG_SIGNAL:
-                    coros.append(_as_signal_r(device).read())
+                    pass
         return await merge_gathered_dicts(coros)
 
     async def _formatted_describe_configuration(self) -> dict[str, DataKey]:
         """What the registered children contribute to `describe_configuration()`."""
         coros = []
-        for device, format in self._readables.items():
-            match format:
-                case StandardReadableFormat.CHILD if isinstance(
-                    device, AsyncConfigurable
+        for entry in self._readables.entries():
+            match entry:
+                case (device, Format.CHILD):
+                    if isinstance(device, AsyncConfigurable):
+                        coros.append(device.describe_configuration())
+                case (signal, Format.CONFIG_SIGNAL):
+                    coros.append(signal.describe())
+                case (
+                    _,
+                    Format.HINTED_SIGNAL
+                    | Format.UNCACHED_SIGNAL
+                    | Format.HINTED_UNCACHED_SIGNAL,
                 ):
-                    coros.append(device.describe_configuration())
-                case StandardReadableFormat.CONFIG_SIGNAL:
-                    coros.append(_as_signal_r(device).describe())
+                    pass
         return await merge_gathered_dicts(coros)
 
     def _formatted_hints(self) -> Iterator[Hints]:
         """What the registered children contribute to `hints`."""
-        for device, format in self._readables.items():
-            match format:
-                case StandardReadableFormat.CHILD if isinstance(device, HasHints):
-                    yield device.hints
+        for entry in self._readables.entries():
+            match entry:
+                case (device, Format.CHILD):
+                    if isinstance(device, HasHints):
+                        yield device.hints
                 case (
-                    StandardReadableFormat.HINTED_SIGNAL
-                    | StandardReadableFormat.HINTED_UNCACHED_SIGNAL
+                    signal,
+                    Format.HINTED_SIGNAL | Format.HINTED_UNCACHED_SIGNAL,
                 ):
                     # An unnamed signal has nothing to put in `fields`, but is
                     # still hinted, so it contributes the key and no name
-                    yield {"fields": [device.name] if device.name else []}
+                    yield {"fields": [signal.name] if signal.name else []}
+                case (
+                    _,
+                    Format.CONFIG_SIGNAL | Format.UNCACHED_SIGNAL,
+                ):
+                    pass
 
     async def describe_configuration(self) -> dict[str, DataKey]:
         return await merge_gathered_dicts(
@@ -359,11 +451,6 @@ class StandardReadable(
             second contribution.
         :raises TypeError: If a signal-only format is given a non-`SignalR`
         """
-        if format is not None:
-            if not isinstance(format, StandardReadableFormat):
-                raise TypeError(f"{format} is not a StandardReadableFormat")
-            if format is not StandardReadableFormat.CHILD:
-                _as_signal_r(device)
         if format is None:
             self._readables.pop(device, None)
         else:
@@ -425,33 +512,6 @@ class StandardReadable(
         )
         for device in devices:
             self.set_readable_format(device, format)
-
-
-def _config_signals(device: Device) -> set[SignalR]:
-    """Return every `Signal` contributing to a Device's `read_configuration()`.
-
-    Recurses into children registered as [](#StandardReadableFormat.CHILD), so
-    a Device that registers a sub-Device whole picks up whatever that
-    sub-Device declares as configuration. A Device that is not a
-    `StandardReadable` contributes nothing.
-
-    Unlike `walk_config_signals` this reads the registry rather than calling
-    `read_configuration()`, so it does no I/O and includes read-only `SignalR`s
-    as well as `SignalRW`s -- `ADBaseIO.model` is a `SignalR`, and it is
-    exactly the signal an areaDetector trigger logic needs for deadtime.
-
-    Deliberately private and unexported: #1367 restructures detector logic, so
-    what the public shape of this should be is not settled yet.
-    """
-    signals: set[SignalR] = set()
-    if not isinstance(device, StandardReadable):
-        return signals
-    for child, format in device._readables.items():  # noqa: SLF001
-        if format is StandardReadableFormat.CONFIG_SIGNAL:
-            signals.add(_as_signal_r(child))
-        elif format is StandardReadableFormat.CHILD:
-            signals |= _config_signals(child)
-    return signals
 
 
 #: Reserved key under which [](#store_settings) writes readable formats. Chosen
