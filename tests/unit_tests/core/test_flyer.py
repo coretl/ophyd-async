@@ -152,6 +152,25 @@ async def test_flyable_complete_before_kickoff_raises(recording_flyer):
     assert logic.calls == ["stop"]
 
 
+@pytest.mark.parametrize("flyer_type", [RecordingFlyableLogic, MovableFlyer])
+async def test_flyable_prepare_while_kicked_off_raises(flyer_type):
+    # The detector's row is in test_detector_use_cases.test_lifecycle_verb_from_state
+    async with init_devices(mock=True):
+        if flyer_type is MovableFlyer:
+            flyer = MovableFlyer(name="flyer")
+        else:
+            flyer = flyer_type().with_device(name="flyer")
+
+    await flyer.stage()
+    await flyer.prepare(5)
+    await flyer.kickoff()
+    with pytest.raises(RuntimeError, match="prepare.* while kicked off"):
+        await flyer.prepare(5)
+    # complete() still works, and a prepare after it is fine
+    await flyer.complete()
+    await flyer.prepare(5)
+
+
 async def test_flyable_stage_resets_lifecycle(recording_flyer):
     # After prepare+kickoff, staging should reset so a later complete errors again.
     logic, flyer = recording_flyer

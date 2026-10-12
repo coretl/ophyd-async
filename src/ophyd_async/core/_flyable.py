@@ -232,9 +232,18 @@ class StandardFlyable(
     async def prepare(self, value: PrepareT) -> None:
         """Move to the start and set up the fly scan."""
         self._check_staged("prepare")
+        if self._fly_stage is _FlyStage.KICKED_OFF:
+            raise RuntimeError(
+                f"{self.name}: prepare() cannot be called while kicked off, "
+                "wait for complete() first"
+            )
         # A prepare that fails leaves the flyer staged but not prepared
         self._set_fly_state(_FlyStage.STAGED)
-        self._set_fly_state(_FlyStage.PREPARED, await self.logic.on_prepare(value))
+        self._set_fly_state(_FlyStage.PREPARED, await self._prepare_logic(value))
+
+    async def _prepare_logic(self, value: PrepareT) -> CtxT:
+        """Run the logic's prepare and return the context for kickoff."""
+        return await self.logic.on_prepare(value)
 
     @AsyncStatus.wrap
     async def kickoff(self) -> None:

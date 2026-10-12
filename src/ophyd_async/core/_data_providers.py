@@ -19,7 +19,9 @@ class DataProvider:
     differ in how the data is published; what they share is here.
     """
 
-    #: Counts the collections written so far
+    #: Counts the collections written so far. Whatever resets it does so in
+    #: this provider's `start()` or `step_boundary()`, and waits until it reads 0
+    #: before returning, so the detector's starting count is never stale.
     collections_written_signal: SignalR[int]
 
     @abstractmethod

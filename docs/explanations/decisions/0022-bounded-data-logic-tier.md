@@ -148,17 +148,18 @@ control before a frame had arrived.
 `trigger()` reads every provider's starting progress after `step_boundary()`, and `kickoff()`
 reads it too, so a source that keeps counting is measured from where it is. A stats time series
 is erased by the `TSAcquire` write in its `start` and its `step_boundary()`, which wait for
-`TSCurrentPoint` to read 0, so its baseline is 0. Where the erase belongs to the acquire
-control, as with the CTR-08's `EraseStart`, it happens after that read, so the baseline is the
-stale pre-erase value.
+`TSCurrentPoint` to read 0, so its baseline is 0. Whoever resets a provider's
+collections-written counter does it in that provider's `start()` or `step_boundary()`, and
+waits until it reads 0 before returning. A CTR-08-style logic therefore does `EraseStart` in its
+data provider, and its acquire logic does not erase; the baseline is then never stale.
 
-### Erase and start controls belong to the acquire logic
+### Erase controls belong to the data provider
 
-Where one control both starts acquisition and clears the data buffer, it belongs to the
-`DetectorAcquireLogic`, alongside the stop control and the idle status. Nothing needs to
-declare the erase to the framework: a data logic's `start` always runs before
-`start_acquiring()`, so the buffer is sized before the control fires. The live baseline above
-does depend on who erased it.
+Where one control both starts acquisition and clears the data buffer, the data provider fires
+it in `start` and `step_boundary()`, because the erase is what resets the counter the detector
+reads. The `DetectorAcquireLogic` keeps the stop control and the idle status, and does not
+erase. A data logic's `start` runs before `start_acquiring()`, so the buffer is sized before the
+control fires.
 
 The trigger/acquire/data split therefore survives these devices, with the three logics sharing
 one IO device exactly as the areaDetector logics share a `driver`. The split is of concerns,

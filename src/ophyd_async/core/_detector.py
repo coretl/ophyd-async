@@ -545,7 +545,7 @@ class _DetectorDataSet:
         candidates = kept + [s for s in made if s is not None]
         if self._logics and not candidates:
             raise ValueError(
-                "has data logics but none of them can serve this scan "
+                f"{name}: has data logics but none of them can serve this scan "
                 f"({info.number_of_events=})"
             )
         await asyncio.gather(*(self._describe(s, cpe) for s in candidates))
@@ -1061,13 +1061,12 @@ class StandardDetector(
         return self.logic._dataset  # noqa: SLF001
 
     @contextmanager
-    def _named(self) -> Iterator[None]:
-        """Add the detector name to the errors a logic raises."""
+    def _noted(self) -> Iterator[None]:
+        """Note the detector's name on any exception a logic raises."""
         try:
             yield
-        except (ValueError, RuntimeError, TypeError) as e:
-            if type(e) in (ValueError, RuntimeError, TypeError) and self.name:
-                e.args = (f"{self.name}: {e}", *e.args[1:])
+        except Exception as e:
+            e.add_note(f"raised by {self.name}")
             raise
 
     # Back compat - delete before 1.0
@@ -1134,7 +1133,7 @@ class StandardDetector(
         finally:
             self._bind_collect_verbs()
 
-    def _bind_collect_verbs(self) -> None:
+    def _bind_collect_verbs(self, *, prepared: bool | None = None) -> None:
         # Bind the collect verb matching what the data logics will produce, as a
         # real instance attribute so the bundler's isinstance checks
         # (WritesStreamAssets vs EventPageCollectable) see exactly one of them.
@@ -1145,7 +1144,8 @@ class StandardDetector(
         # what a device actually produced rather than from its static type - a
         # change in progress upstream. _collect_asset_docs and _collect_pages then
         # become plain public methods and a detector declares both. See ADR 0023.
-        prepared = self._fly_stage not in (_FlyStage.UNSTAGED, _FlyStage.STAGED)
+        if prepared is None:
+            prepared = self._fly_stage not in (_FlyStage.UNSTAGED, _FlyStage.STAGED)
         dataset = self._dataset
         for verb, method, wanted in (
             ("collect_asset_docs", self._collect_asset_docs, dataset.streamable),
@@ -1156,24 +1156,15 @@ class StandardDetector(
             elif verb in self.__dict__:
                 object.__delattr__(self, verb)
 
-    @AsyncStatus.wrap
-    async def prepare(self, value: TriggerInfo) -> None:
-        """Set the detector up for a scan, as described by the TriggerInfo."""
-        self._check_staged("prepare")
-        if self._fly_stage is _FlyStage.KICKED_OFF:
-            raise RuntimeError(
-                f"{self.name}: prepare() cannot be called while kicked off, "
-                "wait for complete() first"
-            )
-        # A prepare that fails leaves the detector staged but not prepared
-        self._set_fly_state(_FlyStage.STAGED)
+    async def _prepare_logic(self, value: TriggerInfo) -> _FlyCtx:
+        # Called by StandardFlyable.prepare, which checks and sets the fly state
         self._bind_collect_verbs()
         readables, readable_hints = await self._readables_for_shadowing()
-        with self._named():
+        with self._noted():
             ctx = await self.logic.on_prepare(value)
             await self.logic.serve_data(self.name, ctx, readables, readable_hints)
-        self._set_fly_state(_FlyStage.PREPARED, ctx)
-        self._bind_collect_verbs()
+        self._bind_collect_verbs(prepared=True)
+        return ctx
 
     async def _readables_for_shadowing(self) -> tuple[dict[str, DataKey], set[str]]:
         if not self.logic.data:
@@ -1187,7 +1178,7 @@ class StandardDetector(
     async def trigger(self) -> AsyncIterator[WatcherUpdate[int]]:
         """Trigger a single exposure.
 
-        If [`prepare()`](#StandardDetector.prepare) has not been called since the
+        If [`prepare()`](#StandardFlyable.prepare) has not been called since the
         last `stage()`, an implicit prepare is performed. When
         [](#OPHYD_ASYNC_PRESERVE_DETECTOR_STATE) is `YES`
         [](#DetectorTriggerLogic.default_trigger_info) is called to read current
@@ -1196,7 +1187,7 @@ class StandardDetector(
         self._check_staged("trigger")
         match self._fly_stage:
             case _FlyStage.STAGED:
-                with self._named():
+                with self._noted():
                     info = await self.logic.default_trigger_info()
                 await self.prepare(info)
             case _FlyStage.KICKED_OFF:
@@ -1220,7 +1211,7 @@ class StandardDetector(
                     )
             case _FlyStage.UNSTAGED:
                 pass  # already raised
-        with self._named():
+        with self._noted():
             async for update in self.logic.on_trigger(self._fly_ctx):
                 yield update
 
@@ -1338,7 +1329,7 @@ class StandardDetector(
         self._check_collect("collect_pages")
         if index is None:
             index = await self.get_index()
-        with self._named():
+        with self._noted():
             async for page in self._dataset.collect_pages(index):
                 yield page
 

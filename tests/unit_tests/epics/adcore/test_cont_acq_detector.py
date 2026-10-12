@@ -39,7 +39,7 @@ async def test_cont_acq_controller_invalid_trigger_mode(
     with pytest.raises(
         ValueError,
         match=re.escape(
-            "det: Trigger type DetectorTrigger.EXTERNAL_EDGE not supported, "
+            "Trigger type DetectorTrigger.EXTERNAL_EDGE not supported, "
             "supported types are: [INTERNAL]"
         ),
     ):

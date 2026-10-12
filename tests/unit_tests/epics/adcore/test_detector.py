@@ -143,8 +143,7 @@ async def test_get_ndarray_resource_info_undefined_datatype(
     await det.stage()
     with pytest.raises(
         ValueError,
-        match=r"^det: mock\+ca://PREFIX:DRV:DataType_RBV is blank, "
-        r"this is not supported$",
+        match=r"^mock\+ca://PREFIX:DRV:DataType_RBV is blank, this is not supported",
     ):
         await det.prepare(TriggerInfo())
 
@@ -164,6 +163,6 @@ async def test_get_ndarray_resource_info_unsupported_color_mode(
     await det.stage()
     with pytest.raises(
         RuntimeError,
-        match=r"^det: Unsupported ColorMode Bayer! Only Mono and RGB1 are supported\.$",
+        match=r"^Unsupported ColorMode Bayer! Only Mono and RGB1 are supported\.",
     ):
         await det.prepare(TriggerInfo())

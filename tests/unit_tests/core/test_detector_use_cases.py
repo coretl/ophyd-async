@@ -544,26 +544,13 @@ for _verb, _row in {
     for _state, _ok in zip(STATES, _row, strict=True):
         TABLE[(_state, _verb)] = _ok == "T"
 for _state in "PTKC":
-    TABLE[(_state, "collect_asset_docs")] = _state in "KC"
-
-# Rows the code does not honour, with why
-_NOT_TODAY: dict[tuple[str, str], str] = {
-    ("T", "collect_asset_docs"): "§3 U1 says collect_* in a step scan raises, but "
-    "bluesky's read() collects stream assets after each trigger() (use case 2)",
-}
+    # Allowed after a trigger() too: bluesky's read() collects stream assets
+    TABLE[(_state, "collect_asset_docs")] = _state in "TKC"
 
 
 def _rows():
     for (state, verb), ok in TABLE.items():
-        marks = []
-        if (state, verb) in _NOT_TODAY:
-            marks.append(
-                pytest.mark.xfail(
-                    strict=True,
-                    reason=f"detector-core rewrite: {_NOT_TODAY[(state, verb)]}",
-                )
-            )
-        yield pytest.param(state, verb, ok, marks=marks, id=f"{state}-{verb}")
+        yield pytest.param(state, verb, ok, id=f"{state}-{verb}")
 
 
 @pytest.mark.parametrize("state,verb,ok", _rows())

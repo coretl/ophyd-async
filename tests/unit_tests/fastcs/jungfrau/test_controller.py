@@ -41,7 +41,7 @@ def jungfrau(RE: RunEngine, tmp_path):
     [
         (
             TriggerInfo(trigger=DetectorTrigger.EXTERNAL_LEVEL),
-            "jungfrau: Trigger type DetectorTrigger.EXTERNAL_LEVEL not supported, "
+            "Trigger type DetectorTrigger.EXTERNAL_LEVEL not supported, "
             "supported types are: [EXTERNAL_EDGE, INTERNAL]",
         ),
         (

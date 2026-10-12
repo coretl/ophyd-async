@@ -73,7 +73,7 @@ decides which to ask for from the *static* type — `collect_pages()` is called 
 device that is not a `WritesStreamAssets` — so a detector that declared both would have its
 pages silently dropped, and one that declared neither could not fly at all.
 
-So `StandardDetector.prepare()` binds whichever verb applies as a real instance attribute,
+So `StandardDetector`'s prepare binds whichever verb applies as a real instance attribute,
 and removes the other. It is the Device that does this, from the providers the logic is serving
 after preparing; the logic reports what it made and is not told where that goes, so it holds
 no back-reference. Only `prepare()` binds, and `stage()`/`unstage()` unbind: the step-boundary

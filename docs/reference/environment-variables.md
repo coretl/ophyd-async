@@ -15,7 +15,7 @@ hardware state back with
 [`DetectorTriggerLogic.default_trigger_info()`](#ophyd_async.core.DetectorTriggerLogic.default_trigger_info).
 It does so in two places: the implicit prepare performed by
 [`StandardDetector.trigger()`](#ophyd_async.core.StandardDetector.trigger) when
-[`prepare()`](#ophyd_async.core.StandardDetector.prepare) has not been called since
+[`prepare()`](#ophyd_async.core.StandardFlyable.prepare) has not been called since
 the last `stage()`, and `prepare()` with a `livetime` of 0, which reads back the
 current livetime and deadtime to give the data logics the exposure period.
 

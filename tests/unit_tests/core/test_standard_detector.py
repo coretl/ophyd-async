@@ -567,7 +567,7 @@ async def test_preserve_detector_state_requires_default_trigger_info(
 
     with pytest.raises(
         RuntimeError,
-        match="mydet: OPHYD_ASYNC_PRESERVE_DETECTOR_STATE=YES is set but the "
+        match="OPHYD_ASYNC_PRESERVE_DETECTOR_STATE=YES is set but the "
         "trigger logic has no default_trigger_info\\(\\)",
     ):
         await det.trigger()
@@ -898,13 +898,24 @@ async def test_detector_without_trigger_logic_cannot_set_timing_or_exteral_trigg
     """Test that detector without trigger logic cannot set livetime/deadtime/trigger."""
     det = DetectorLogic().with_device("foo")
     await det.stage()
-    msg = "foo: No trigger logic, so "
+    msg = "No trigger logic, so "
 
     with pytest.raises(ValueError, match=msg + "cannot set livetime or deadtime"):
         await det.prepare(TriggerInfo(livetime=0.5))
 
     with pytest.raises(ValueError, match=msg + "cannot set livetime or deadtime"):
         await det.prepare(TriggerInfo(deadtime=0.1))
+
+
+async def test_errors_from_logic_calls_keep_their_message_and_name_the_detector():
+    det = DetectorLogic().with_device("foo")
+    await det.stage()
+    with pytest.raises(ValueError) as exc_info:
+        await det.prepare(TriggerInfo(livetime=0.5))
+    assert exc_info.value.args == (
+        "No trigger logic, so cannot set livetime or deadtime",
+    )
+    assert exc_info.value.__notes__ == ["raised by foo"]
 
 
 async def test_detector_logic_takes_keywords_only():
