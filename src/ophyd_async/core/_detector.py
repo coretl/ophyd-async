@@ -965,6 +965,10 @@ def _config_signals(device: Device) -> set[SignalR]:
     sub-Device declares as configuration. A Device that is not a
     `StandardReadable` contributes nothing.
 
+    A format changed at runtime cannot remove a signal: the formats the class
+    declared count as well as the current ones, so dropping `driver.model` from
+    configuration does not stop a trigger logic reading it for deadtime.
+
     Unlike `walk_config_signals` this reads the registry rather than calling
     `read_configuration()`, so it does no I/O and includes read-only `SignalR`s
     as well as `SignalRW`s -- `ADBaseIO.model` is a `SignalR`, and it is
@@ -976,7 +980,9 @@ def _config_signals(device: Device) -> set[SignalR]:
     signals: set[SignalR] = set()
     if not isinstance(device, StandardReadable):
         return signals
-    for child, format in device.get_readable_formats().items():
+    current = device.get_readable_formats()
+    declared = device._default_readables  # noqa: SLF001
+    for child, format in [*declared.items(), *current.items()]:
         match format:
             case StandardReadableFormat.CONFIG_SIGNAL:
                 # set_readable_format only accepts a SignalR for a signal format

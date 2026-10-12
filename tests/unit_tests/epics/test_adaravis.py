@@ -22,7 +22,7 @@ async def test_adaravis(
 ) -> adaravis.AravisDetector:
     async with init_devices(mock=True):
         detector = adaravis.AravisDetector(
-            "PREFIX:", adcore.ADWriterFactory.hdf(static_path_provider)
+            "PREFIX:", adcore.ADDataFactory.hdf(static_path_provider)
         )
     writer = detector.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
@@ -50,6 +50,16 @@ async def test_deadtime(
     trigger_modes, actual_deadtime = await test_adaravis.get_trigger_deadtime()
     assert trigger_modes == {DetectorTrigger.INTERNAL, DetectorTrigger.EXTERNAL_EDGE}
     assert deadtime == actual_deadtime
+
+
+async def test_deadtime_inputs_survive_dropping_them_from_configuration(
+    test_adaravis: adaravis.AravisDetector,
+):
+    set_mock_value(test_adaravis.driver.model, "Mako G-125")
+    test_adaravis.driver.set_readable_format(test_adaravis.driver.model, None)
+    test_adaravis.set_readable_format(test_adaravis.driver, None)
+    _, deadtime = await test_adaravis.get_trigger_deadtime()
+    assert deadtime == 70e-6
 
 
 async def test_prepare_external_edge(

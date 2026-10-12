@@ -21,7 +21,7 @@ async def test_adandor(
 ) -> adandor.AndorDetector:
     async with init_devices(mock=True):
         detector = adandor.AndorDetector(
-            "PREFIX:", adcore.ADWriterFactory.hdf(static_path_provider)
+            "PREFIX:", adcore.ADDataFactory.hdf(static_path_provider)
         )
     writer = detector.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)

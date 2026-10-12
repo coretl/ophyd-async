@@ -5,6 +5,7 @@ https://github.com/areaDetector/ADCore
 
 from ._acquire_logic import ADAcquireLogic, ADContAcqAcquireLogic
 from ._data_logic import (
+    ADDataFactory,
     ADHDFDataCtx,
     ADHDFDataLogic,
     ADMultipartDataLogic,
@@ -81,6 +82,7 @@ __all__ = [
     "ADHDFDataCtx",
     "ADHDFDataLogic",
     "ADMultipartDataLogic",
+    "ADDataFactory",
     "ADWriterFactory",
     "StatsTimeSeriesDataLogic",
     # Detector

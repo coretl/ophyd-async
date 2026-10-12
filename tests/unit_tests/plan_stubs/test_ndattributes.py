@@ -10,7 +10,7 @@ from ophyd_async.epics.core import epics_signal_r
 def test_setup_ndstats_raises_type_error(RE, static_path_provider: StaticPathProvider):
     with init_devices(mock=True):
         det = adsimdetector.SimDetector(
-            "PREFIX:", adcore.ADWriterFactory.hdf(static_path_provider)
+            "PREFIX:", adcore.ADDataFactory.hdf(static_path_provider)
         )
     with pytest.raises(
         AttributeError,

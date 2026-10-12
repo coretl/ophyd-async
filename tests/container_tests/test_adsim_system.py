@@ -105,7 +105,7 @@ def adsim(RE: RunEngine, shared_tmp_path: Path) -> AreaDetector:
     with init_devices():
         adsim = SimDetector(
             f"{prefix}-DI-CAM-01:",
-            adcore.ADWriterFactory.hdf(provider, writer_suffix="HDF5:"),
+            adcore.ADDataFactory.hdf(provider, writer_suffix="HDF5:"),
             driver_suffix="DET:",
         )
 
@@ -118,12 +118,13 @@ def adsimstat(RE: RunEngine) -> AreaDetector:
 
     It writes no file: the NDPluginStats time series is a fixed-length buffer read
     back as event pages, so this exercises the bounded data-logic tier against a
-    real IOC (the `ADWriterFactory.stats` factory and NDStatsIO's `TS:*` signals).
+    real IOC (the `ADDataFactory.stats_time_series` factory and NDStatsIO's `TS:*`
+    signals).
     """
     with init_devices():
         adsimstat = SimDetector(
             "BL01T-DI-CAM-01:",
-            adcore.ADWriterFactory.stats(writer_suffix="STAT:"),
+            adcore.ADDataFactory.stats_time_series(writer_suffix="STAT:"),
             driver_suffix="DET:",
         )
 

@@ -196,7 +196,7 @@ obj_ignore = [
     "CtxT",
     # event_model publishes no intersphinx entry for this TypedDict
     "event_model.documents.PartialEventPage",
-    # TypeVar for the plugin an ADWriterFactory builds a data logic around
+    # TypeVar for the plugin an ADDataFactory builds a data logic around
     # The context DetectorLogic threads prepare -> kickoff -> complete, private
     # because nothing outside StandardDetector constructs or inspects one
     "ophyd_async.core._detector._FlyCtx",

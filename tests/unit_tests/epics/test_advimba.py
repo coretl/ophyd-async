@@ -22,7 +22,7 @@ async def test_advimba(
 ) -> advimba.VimbaDetector:
     async with init_devices(mock=True):
         detector = advimba.VimbaDetector(
-            "PREFIX:", adcore.ADWriterFactory.hdf(static_path_provider)
+            "PREFIX:", adcore.ADDataFactory.hdf(static_path_provider)
         )
     writer = detector.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)

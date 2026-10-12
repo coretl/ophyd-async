@@ -21,7 +21,7 @@ from ophyd_async.core import (
 from .adcore import (
     ADAcquireLogic,
     ADBaseIO,
-    ADWriterFactory,
+    ADDataFactory,
     AreaDetector,
     NDPluginBaseIO,
     prepare_exposures,
@@ -144,7 +144,7 @@ class PilatusDetector(AreaDetector[PilatusDriverIO]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         readout_time: PilatusReadoutTime = PilatusReadoutTime.PILATUS3,
         edge_trigger_mode: PilatusTriggerMode = PilatusTriggerMode.EXT_TRIGGER,
         driver_suffix="cam1:",

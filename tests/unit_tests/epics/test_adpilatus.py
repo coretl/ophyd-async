@@ -22,7 +22,7 @@ async def test_adpilatus(
 ) -> adpilatus.PilatusDetector:
     async with init_devices(mock=True):
         detector = adpilatus.PilatusDetector(
-            "PREFIX:", adcore.ADWriterFactory.hdf(static_path_provider)
+            "PREFIX:", adcore.ADDataFactory.hdf(static_path_provider)
         )
     set_mock_value(detector.driver.armed, True)
     writer = detector.get_plugin("hdf", adcore.NDPluginFileIO)
@@ -67,7 +67,7 @@ async def test_deadtime(readout_time: adpilatus.PilatusReadoutTime, tmp_path):
     async with init_devices(mock=True):
         pilatus = adpilatus.PilatusDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(path_provider),
+            adcore.ADDataFactory.hdf(path_provider),
             readout_time=readout_time,
         )
     trigger_modes, deadtime = await pilatus.get_trigger_deadtime()
@@ -125,7 +125,7 @@ async def test_prepare_external_edge_with_mult_trigger_mode(
     async with init_devices(mock=True):
         detector = adpilatus.PilatusDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             edge_trigger_mode=adpilatus.PilatusTriggerMode.MULT_TRIGGER,
         )
     set_mock_value(detector.driver.armed, True)
@@ -174,7 +174,7 @@ def test_edge_trigger_mode_rejects_non_edge_modes(
     ):
         adpilatus.PilatusDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(path_provider),
+            adcore.ADDataFactory.hdf(path_provider),
             edge_trigger_mode=invalid_mode,
         )
 

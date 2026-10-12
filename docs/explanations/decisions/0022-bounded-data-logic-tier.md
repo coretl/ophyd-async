@@ -223,7 +223,7 @@ besides. This closes #1248 and #888. Fly scanning an areaDetector that carries a
 plus a finite-buffer data logic starts working, closing #1364.
 
 A data logic may decline a scan for reasons of its own: `ADHDFDataLogic` and
-`StatsTimeSeriesDataLogic` take an `enable_callbacks` flag, defaulting to today's behaviour of
+`StatsTimeSeriesDataLogic` take an `always_enable` flag, defaulting to today's behaviour of
 switching the plugin on, which when `False` makes them follow whatever the plugin is set to
 and produce nothing when it is off.
 

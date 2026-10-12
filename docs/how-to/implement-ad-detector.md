@@ -76,7 +76,7 @@ Now you need to make an [](#adcore.AreaDetector) subclass that uses your IO and 
 
 The constructor parameters should include:
 - `prefix`: The PV prefix for the driver and plugins
-- `*writer_factories`: Zero or more [](#adcore.ADWriterFactory) instances (e.g. `ADWriterFactory.hdf(path_provider)`); omit entirely to skip file writing
+- `*writer_factories`: Zero or more [](#adcore.ADDataFactory) instances (e.g. `ADDataFactory.hdf(path_provider)`); omit entirely to skip file writing
 - `driver_suffix`: A PV suffix for the driver, defaulting to `"cam1:"`
 - `plugins`: An optional mapping of {`name`: [](#adcore.NDPluginBaseIO)} for additional plugins
 - `config_sigs`: Additional signals to report in configuration (beyond the standard acquire_time and acquire_period)
@@ -113,7 +113,7 @@ For example, for ADAravis:
 
 ## Add multiple data streams (optional)
 
-The composition-based architecture makes it possible to give a detector several data outputs:
+The composition-based architecture makes it possible to give a detector several data outputs. Every [](#adcore.ADDataFactory) factory takes `always_enable`: `True` (the default) switches the plugin on at the start of a scan, `False` follows the plugin's `EnableCallbacks` PV, so a data output whose plugin is off sits out and another can serve the scan.
 
 ### Reading stats plugins alongside file writing
 A plugin scalar needs no data logic: a detector is a [](#StandardReadable), so register
@@ -122,7 +122,9 @@ the signal and it appears in `read()` alongside whatever the file writer produce
 ```python
 from ophyd_async.core import StandardReadableFormat as Format
 
-det = adaravis.AravisDetector(prefix, path_provider, plugins={"stats": stats})
+det = adaravis.AravisDetector(
+    prefix, adcore.ADDataFactory.hdf(path_provider), plugins={"stats": stats}
+)
 # Add stats total as a hinted signal in events
 det.set_readable_format(det.stats.total, Format.HINTED_UNCACHED_SIGNAL)
 ```
@@ -133,7 +135,7 @@ roi1 = adcore.NDROIIO("PREFIX:ROI1:")
 roi2 = adcore.NDROIIO("PREFIX:ROI2:")
 det = adaravis.AravisDetector(
     "PREFIX:",
-    adcore.ADWriterFactory.hdf(
+    adcore.ADDataFactory.hdf(
         path_provider,
         writer_suffix="HDF1:",
         writer_name="hdf1",
@@ -144,7 +146,7 @@ det = adaravis.AravisDetector(
             color_mode_signal=driver.color_mode,
         ),
     ),
-    adcore.ADWriterFactory.hdf(
+    adcore.ADDataFactory.hdf(
         path_provider,
         writer_suffix="HDF2:",
         writer_name="hdf2",
@@ -179,10 +181,11 @@ Example implementation:
 driver = adcore.ADBaseIO("PREFIX:DRV:")
 cb_plugin = adcore.NDCircularBuffIO("PREFIX:CB1:")
 det = adcore.AreaDetector(
-    driver=driver,
+    driver,
+    "PREFIX:",
+    adcore.ADDataFactory.hdf(path_provider),
     acquire_logic=adcore.ADContAcqAcquireLogic(driver, cb_plugin),
     trigger_logic=adcore.ADContAcqTriggerLogic(driver, cb_plugin),
-    path_provider=path_provider,
     plugins={"cb1": cb_plugin},
 )
 ```

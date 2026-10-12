@@ -1,4 +1,5 @@
 import asyncio
+import warnings
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import PureWindowsPath
@@ -176,11 +177,9 @@ class ADHDFDataLogic(DetectorDataLogic[ADHDFDataCtx]):
     plugins: Sequence[NDPluginBaseIO] = ()
     datakey_suffix: str = ""
     hinted: bool = True
-    #: Whether to switch the plugin on when starting. Left True, the plugin is
-    #: enabled as part of starting, which is the behaviour beamlines rely on.
-    #: Set False to follow whatever the plugin is set to instead: a disabled
-    #: plugin then makes no provider, so another data logic can serve the scan.
-    enable_callbacks: bool = True
+    #: True switches the plugin on (EnableCallbacks) when starting. False follows
+    #: the plugin's EnableCallbacks PV: if it is off, this logic makes no provider.
+    always_enable: bool = True
 
     async def make_data_provider(
         self,
@@ -191,7 +190,7 @@ class ADHDFDataLogic(DetectorDataLogic[ADHDFDataCtx]):
     ) -> tuple[StreamableDataProvider, ADHDFDataCtx] | None:
         # A file writer captures for as long as it is told to, so it does not
         # need to know how many collections the scan will take.
-        if not self.enable_callbacks and not await plugin_is_enabled(self.writer):
+        if not self.always_enable and not await plugin_is_enabled(self.writer):
             return None
         # Work out where to write
         path_info = self.path_provider(datakey_name)
@@ -252,7 +251,7 @@ class ADHDFDataLogic(DetectorDataLogic[ADHDFDataCtx]):
                 path_info=path_info, file_template="%s%s.h5", writer=self.writer
             ),
         ]
-        if self.enable_callbacks:
+        if self.always_enable:
             coros.append(self.writer.enable_callbacks.set(EnableDisable.ENABLE))
         await asyncio.gather(*coros)
         # Start capturing
@@ -279,6 +278,9 @@ class ADMultipartDataLogic(DetectorDataLogic[PathInfo]):
         Mimetype for the written files (e.g. "multipart/related;type=image/jpeg").
     :param datakey_suffix: Suffix to append to the data key for the main dataset
     :param hinted: Include the image in hints. Set False for BestEffortCallback.
+    :param always_enable:
+        True switches the plugin on when starting. False follows the plugin's
+        EnableCallbacks PV: if it is off, this logic makes no provider.
     """
 
     array_description: NDArrayDescription
@@ -288,6 +290,7 @@ class ADMultipartDataLogic(DetectorDataLogic[PathInfo]):
     mimetype: str
     datakey_suffix: str = ""
     hinted: bool = True
+    always_enable: bool = True
 
     async def make_data_provider(
         self,
@@ -295,9 +298,11 @@ class ADMultipartDataLogic(DetectorDataLogic[PathInfo]):
         num_collections: int,
         period: float,
         flush_period: float,
-    ) -> tuple[StreamableDataProvider, PathInfo]:
+    ) -> tuple[StreamableDataProvider, PathInfo] | None:
         # A multipart writer writes one file per frame, so there is nothing to
         # size from the period, and it writes for as long as it is told to.
+        if not self.always_enable and not await plugin_is_enabled(self.writer):
+            return None
         # Work out where to write
         path_info = self.path_provider(datakey_name)
         # Describe what we would write
@@ -318,14 +323,17 @@ class ADMultipartDataLogic(DetectorDataLogic[PathInfo]):
 
     async def start(self, ctx: PathInfo) -> None:
         # Setup the file writer
-        await asyncio.gather(
+        coros: list[Awaitable] = [
             self.writer.lazy_open.set(True),
             prepare_file_paths(
                 path_info=ctx,
                 file_template="%s%s_%6.6d" + self.extension,
                 writer=self.writer,
             ),
-        )
+        ]
+        if self.always_enable:
+            coros.append(self.writer.enable_callbacks.set(EnableDisable.ENABLE))
+        await asyncio.gather(*coros)
         # Start capturing
         await set_and_wait_for_value(
             self.writer.capture, True, wait_for_set_completion=False
@@ -339,15 +347,15 @@ class ADMultipartDataLogic(DetectorDataLogic[PathInfo]):
 
 
 @dataclass
-class ADWriterFactory(Generic[NDPluginBaseIOT]):
-    """Factory that creates a writer plugin and its matching data logic.
+class ADDataFactory(Generic[NDPluginBaseIOT]):
+    """Factory that creates a plugin and its matching data logic.
 
-    Construct using the classmethods `hdf`, `jpeg`, `tiff` or `stats`, then pass
-    one or more instances to `AreaDetector` as positional `*writer_factories`
-    arguments.  When the detector is initialised `__call__` is invoked with
-    the detector's PV `prefix`, its `driver`, and the flat list of extra
-    `plugins`; it returns the writer device and the corresponding
-    `DetectorDataLogic`.
+    Construct using the static methods `hdf`, `jpeg`, `tiff` or
+    `stats_time_series`, then pass one or more instances to `AreaDetector` as
+    positional `*writer_factories` arguments.  When the detector is initialised
+    `__call__` is invoked with the detector's PV `prefix`, its `driver`, and the
+    flat list of extra `plugins`; it returns the writer device and the
+    corresponding `DetectorDataLogic`.
 
     :param writer_cls: Concrete `NDPluginBaseIO` subclass to instantiate.
     :param writer_suffix: PV suffix appended to *prefix* to form the writer's PV prefix.
@@ -422,8 +430,8 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
         | Callable[[ADBaseIO], NDArrayDescription]
         | None = None,
         hinted: bool = True,
-        enable_callbacks: bool = True,
-    ) -> "ADWriterFactory[NDFileHDF5IO]":
+        always_enable: bool = True,
+    ) -> "ADDataFactory[NDFileHDF5IO]":
         """Create a factory for an HDF5 file writer.
 
         :param path_provider: Provides file path information for each acquisition.
@@ -439,12 +447,11 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
             when the shape/type comes from a plugin rather than the main driver
             (e.g. an ROI plugin).
         :param hinted: Include the image in hints. Set False for BestEffortCallback.
-        :param enable_callbacks: Whether to switch the plugin on when starting,
-            defaults to ``True``. Set ``False`` to follow whatever the plugin is
-            set to instead: a disabled plugin then writes nothing and another
-            data logic can serve the scan.
+        :param always_enable: True (the default) switches the plugin on when
+            starting. False follows the plugin's EnableCallbacks PV: if it is off,
+            this data logic sits out and another can serve the scan.
         """
-        return ADWriterFactory(
+        return ADDataFactory(
             writer_cls=NDFileHDF5IO,
             writer_suffix=writer_suffix,
             writer_name=writer_name,
@@ -458,7 +465,7 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
                 plugins=list(plugins),
                 datakey_suffix=datakey_suffix,
                 hinted=hinted,
-                enable_callbacks=enable_callbacks,
+                always_enable=always_enable,
             ),
         )
 
@@ -472,7 +479,8 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
         | Callable[[ADBaseIO], NDArrayDescription]
         | None = None,
         hinted: bool = True,
-    ) -> "ADWriterFactory[NDPluginFileIO]":
+        always_enable: bool = True,
+    ) -> "ADDataFactory[NDPluginFileIO]":
         """Create a factory for a JPEG file writer.
 
         :param path_provider: Provides file path information for each acquisition.
@@ -487,8 +495,11 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
             Pass an `NDArrayDescription` or a callable ``(driver) → NDArrayDescription``
             when the shape/type comes from a plugin.
         :param hinted: Include the image in hints. Set False for BestEffortCallback.
+        :param always_enable: True (the default) switches the plugin on when
+            starting. False follows the plugin's EnableCallbacks PV: if it is off,
+            this data logic sits out and another can serve the scan.
         """
-        return ADWriterFactory(
+        return ADDataFactory(
             writer_cls=NDPluginFileIO,
             writer_suffix=writer_suffix,
             writer_name=writer_name,
@@ -503,6 +514,7 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
                     mimetype="multipart/related;type=image/jpeg",
                     datakey_suffix=datakey_suffix,
                     hinted=hinted,
+                    always_enable=always_enable,
                 )
             ),
         )
@@ -517,7 +529,8 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
         | Callable[[ADBaseIO], NDArrayDescription]
         | None = None,
         hinted: bool = True,
-    ) -> "ADWriterFactory[NDPluginFileIO]":
+        always_enable: bool = True,
+    ) -> "ADDataFactory[NDPluginFileIO]":
         """Create a factory for a TIFF file writer.
 
         :param path_provider: Provides file path information for each acquisition.
@@ -532,8 +545,11 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
             Pass an `NDArrayDescription` or a callable ``(driver) → NDArrayDescription``
             when the shape/type comes from a plugin.
         :param hinted: Include the image in hints. Set False for BestEffortCallback.
+        :param always_enable: True (the default) switches the plugin on when
+            starting. False follows the plugin's EnableCallbacks PV: if it is off,
+            this data logic sits out and another can serve the scan.
         """
-        return ADWriterFactory(
+        return ADDataFactory(
             writer_cls=NDPluginFileIO,
             writer_suffix=writer_suffix,
             writer_name=writer_name,
@@ -548,12 +564,13 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
                     mimetype="multipart/related;type=image/tiff",
                     datakey_suffix=datakey_suffix,
                     hinted=hinted,
+                    always_enable=always_enable,
                 )
             ),
         )
 
     @staticmethod
-    def stats(
+    def stats_time_series(
         writer_suffix: str = "STAT:",
         writer_name: str = "stats",
         datakey_suffix: str = "",
@@ -561,17 +578,14 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
             [NDStatsIO], Sequence[tuple[str, SignalR[Array1D[np.float64]]]]
         ]
         | None = None,
-        enable_callbacks: bool = True,
-    ) -> "ADWriterFactory[NDStatsIO]":
+        always_enable: bool = True,
+    ) -> "ADDataFactory[NDStatsIO]":
         """Create a factory for an NDPluginStats time series.
 
         Unlike `hdf`, `jpeg` and `tiff`, this writes no file: the stats plugin's
         time series is a fixed-length buffer read back as event pages, for
         detectors that cannot write assets (see `StatsTimeSeriesDataLogic`).
 
-        :param enable_callbacks: Whether to switch the plugin on when starting,
-            defaults to ``True``. Set ``False`` to follow whatever the plugin is
-            set to instead: a disabled plugin then produces nothing.
         :param writer_suffix: PV suffix for the NDPluginStats plugin, defaults to
             ``STAT:``.
         :param writer_name:
@@ -582,8 +596,11 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
             statistics to expose, given the constructed plugin. Left as ``None``
             (the default), only the ``Total`` series is exposed under the bare
             datakey name.
+        :param always_enable: True (the default) switches the plugin on when
+            starting. False follows the plugin's EnableCallbacks PV: if it is off,
+            this data logic sits out and another can serve the scan.
         """
-        return ADWriterFactory(
+        return ADDataFactory(
             writer_cls=NDStatsIO,
             writer_suffix=writer_suffix,
             writer_name=writer_name,
@@ -594,7 +611,61 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
                     stats=writer,
                     stat_signals=list(stat_signals(writer)) if stat_signals else [],
                     datakey_suffix=datakey_suffix,
-                    enable_callbacks=enable_callbacks,
+                    always_enable=always_enable,
                 )
             ),
         )
+
+
+class ADWriterFactory(ADDataFactory[NDPluginBaseIOT]):
+    """Deprecated name of `ADDataFactory`.
+
+    Accepts the old `enable_callbacks` argument (as `always_enable`) and the old
+    `stats` factory name (now `stats_time_series`).
+    """
+
+    def __post_init__(self) -> None:
+        _warn_writer_factory()
+
+    @staticmethod
+    def hdf(  # type: ignore[override]
+        *args, enable_callbacks: bool | None = None, **kwargs
+    ) -> ADDataFactory[NDFileHDF5IO]:
+        _warn_writer_factory()
+        return ADDataFactory.hdf(*args, **_old_enable(enable_callbacks, kwargs))
+
+    @staticmethod
+    def jpeg(*args, **kwargs) -> ADDataFactory[NDPluginFileIO]:
+        _warn_writer_factory()
+        return ADDataFactory.jpeg(*args, **kwargs)
+
+    @staticmethod
+    def tiff(*args, **kwargs) -> ADDataFactory[NDPluginFileIO]:
+        _warn_writer_factory()
+        return ADDataFactory.tiff(*args, **kwargs)
+
+    @staticmethod
+    def stats(
+        *args, enable_callbacks: bool | None = None, **kwargs
+    ) -> ADDataFactory[NDStatsIO]:
+        _warn_writer_factory()
+        return ADDataFactory.stats_time_series(
+            *args, **_old_enable(enable_callbacks, kwargs)
+        )
+
+
+def _warn_writer_factory() -> None:
+    warnings.warn(
+        DeprecationWarning(
+            "'ADWriterFactory' is deprecated, use 'ADDataFactory' instead "
+            "(and 'stats_time_series' for 'stats', 'always_enable' for "
+            "'enable_callbacks')"
+        ),
+        stacklevel=3,
+    )
+
+
+def _old_enable(enable_callbacks: bool | None, kwargs: dict[str, Any]):
+    if enable_callbacks is not None:
+        kwargs["always_enable"] = enable_callbacks
+    return kwargs

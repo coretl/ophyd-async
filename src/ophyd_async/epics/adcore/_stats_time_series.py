@@ -46,10 +46,9 @@ class StatsTimeSeriesDataLogic(DetectorDataLogic[int]):
         default_factory=list
     )
     datakey_suffix: str = ""
-    #: Whether to switch the plugin on when starting. Left True, the plugin is
-    #: enabled as part of starting. Set False to follow whatever the plugin is
-    #: set to instead: a disabled plugin then makes no provider.
-    enable_callbacks: bool = True
+    #: True switches the plugin on (EnableCallbacks) when starting. False follows
+    #: the plugin's EnableCallbacks PV: if it is off, this logic makes no provider.
+    always_enable: bool = True
 
     def _arrays(self, datakey_name: str) -> dict[str, SignalR[Array1D[np.float64]]]:
         signals = self.stat_signals or [("", self.stats.ts_total)]
@@ -66,7 +65,7 @@ class StatsTimeSeriesDataLogic(DetectorDataLogic[int]):
         if num_collections == 0:
             # A finite buffer cannot serve an unbounded scan
             return None
-        if not self.enable_callbacks and not await plugin_is_enabled(self.stats):
+        if not self.always_enable and not await plugin_is_enabled(self.stats):
             return None
         # The datakeys are known from the arrays we were configured with, so
         # nothing has to be armed to describe them
@@ -86,7 +85,7 @@ class StatsTimeSeriesDataLogic(DetectorDataLogic[int]):
             self.stats.ts_num_points.set(ctx),
             self.stats.ts_acquire_mode.set(NDStatsTSAcquireMode.FIXED_LENGTH),
         ]
-        if self.enable_callbacks:
+        if self.always_enable:
             coros.append(self.stats.enable_callbacks.set(EnableDisable.ENABLE))
         await asyncio.gather(*coros)
         await self._arm()

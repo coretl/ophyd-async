@@ -26,7 +26,7 @@ async def hdf_det(
     async with init_devices(mock=True):
         detector = adsimdetector.SimDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             plugins={"stats": adcore.NDStatsIO("PREFIX:STATS:")},
         )
     set_mock_value(detector.driver.array_size_x, 1024)
@@ -66,7 +66,7 @@ async def test_make_data_provider_does_not_write(
 
 
 @pytest.mark.parametrize(
-    "enable_callbacks,plugin_enabled,makes_provider",
+    "always_enable,plugin_enabled,makes_provider",
     [
         # The default switches the plugin on, whatever it was set to
         (True, EnableDisable.DISABLE, True),
@@ -79,7 +79,7 @@ async def test_make_data_provider_does_not_write(
 async def test_hdf_follows_the_plugin_when_not_enabling_it(
     hdf_det: adcore.AreaDetector[adcore.ADBaseIO],
     static_path_provider: StaticPathProvider,
-    enable_callbacks: bool,
+    always_enable: bool,
     plugin_enabled: EnableDisable,
     makes_provider: bool,
 ):
@@ -95,7 +95,7 @@ async def test_hdf_follows_the_plugin_when_not_enabling_it(
         path_provider=static_path_provider,
         driver=hdf_det.driver,
         writer=writer,
-        enable_callbacks=enable_callbacks,
+        always_enable=always_enable,
     )
 
     made = await logic.make_data_provider(
@@ -105,7 +105,7 @@ async def test_hdf_follows_the_plugin_when_not_enabling_it(
 
     if made is not None:
         await logic.start(made[1])
-        expected = EnableDisable.ENABLE if enable_callbacks else plugin_enabled
+        expected = EnableDisable.ENABLE if always_enable else plugin_enabled
         assert await writer.enable_callbacks.get_value() is expected
 
 
@@ -123,7 +123,7 @@ async def test_hdf_writer_passes_parent_name_to_path_provider(tmp_path: Path):
     )
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
-            "PREFIX:", adcore.ADWriterFactory.hdf(pp), name="sim_detector"
+            "PREFIX:", adcore.ADDataFactory.hdf(pp), name="sim_detector"
         )
 
     writer = det.get_plugin("hdf", adcore.NDPluginFileIO)
@@ -175,8 +175,8 @@ async def test_prepare_hdf(
 @pytest.mark.parametrize(
     "factory_cls,extension",
     [
-        (adcore.ADWriterFactory.jpeg, ".jpg"),
-        (adcore.ADWriterFactory.tiff, ".tiff"),
+        (adcore.ADDataFactory.jpeg, ".jpg"),
+        (adcore.ADDataFactory.tiff, ".tiff"),
     ],
 )
 async def test_prepare_multipart(
@@ -195,6 +195,7 @@ async def test_prepare_multipart(
         writer,
         [
             call.lazy_open.put(True),
+            call.enable_callbacks.put(EnableDisable.ENABLE),
             call.create_directory.put(0),
             call.file_path.put(f"{static_path_provider().directory_path}{os.sep}"),
             call.file_name.put("ophyd_async_tests"),
@@ -230,7 +231,7 @@ async def test_hdf_chunk_sized_from_flush_period(
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
         )
     set_mock_value(det.driver.array_size_x, 1024)
     set_mock_value(det.driver.array_size_y, 768)
@@ -259,9 +260,9 @@ async def test_hdf_chunk_sized_from_flush_period(
 @pytest.mark.parametrize(
     "factory_cls,is_hdf",
     [
-        (adcore.ADWriterFactory.hdf, True),
-        (adcore.ADWriterFactory.jpeg, False),
-        (adcore.ADWriterFactory.tiff, False),
+        (adcore.ADDataFactory.hdf, True),
+        (adcore.ADDataFactory.jpeg, False),
+        (adcore.ADDataFactory.tiff, False),
     ],
 )
 async def test_can_specify_different_uri_and_path(
@@ -317,9 +318,9 @@ async def test_can_specify_different_uri_and_path(
 @pytest.mark.parametrize(
     "factory_cls,is_hdf",
     [
-        (adcore.ADWriterFactory.hdf, True),
-        (adcore.ADWriterFactory.jpeg, False),
-        (adcore.ADWriterFactory.tiff, False),
+        (adcore.ADDataFactory.hdf, True),
+        (adcore.ADDataFactory.jpeg, False),
+        (adcore.ADDataFactory.tiff, False),
     ],
 )
 async def test_can_override_uri_with_different_path_semantics(

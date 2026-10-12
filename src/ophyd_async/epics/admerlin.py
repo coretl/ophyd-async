@@ -22,7 +22,7 @@ from .adcore import (
     ADAcquireLogic,
     ADBaseDataType,
     ADBaseIO,
-    ADWriterFactory,
+    ADDataFactory,
     AreaDetector,
     NDPluginBaseIO,
     prepare_exposures,
@@ -123,7 +123,7 @@ class MerlinDetector(AreaDetector[MerlinDriverIO]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         driver_suffix="cam1:",
         plugins: dict[str, NDPluginBaseIO] | None = None,
         config_sigs: Sequence[SignalR] = (),

@@ -130,7 +130,7 @@ async def test_unbounded_scan_makes_no_provider(stats: adcore.NDStatsIO):
 
 
 @pytest.mark.parametrize(
-    "enable_callbacks,plugin_enabled,makes_provider",
+    "always_enable,plugin_enabled,makes_provider",
     [
         # The default switches the plugin on, whatever it was set to
         (True, EnableDisable.DISABLE, True),
@@ -142,12 +142,12 @@ async def test_unbounded_scan_makes_no_provider(stats: adcore.NDStatsIO):
 )
 async def test_follows_the_plugin_when_not_enabling_it(
     stats: adcore.NDStatsIO,
-    enable_callbacks: bool,
+    always_enable: bool,
     plugin_enabled: EnableDisable,
     makes_provider: bool,
 ):
     set_mock_value(stats.enable_callbacks, plugin_enabled)
-    logic = StatsTimeSeriesDataLogic(stats, enable_callbacks=enable_callbacks)
+    logic = StatsTimeSeriesDataLogic(stats, always_enable=always_enable)
 
     made = await logic.make_data_provider(
         "det", num_collections=5, period=0.1, flush_period=0.0
@@ -157,7 +157,7 @@ async def test_follows_the_plugin_when_not_enabling_it(
     if made is not None:
         await logic.start(made[1])
         # Only the default reaches out and switches the plugin on
-        expected = EnableDisable.ENABLE if enable_callbacks else plugin_enabled
+        expected = EnableDisable.ENABLE if always_enable else plugin_enabled
         assert await stats.enable_callbacks.get_value() is expected
 
 

@@ -22,7 +22,7 @@ from ophyd_async.epics.core import PvSuffix
 from .adcore import (
     ADAcquireLogic,
     ADBaseIO,
-    ADWriterFactory,
+    ADDataFactory,
     AreaDetector,
     NDPluginBaseIO,
     prepare_exposures,
@@ -147,7 +147,7 @@ class VimbaDetector(AreaDetector[VimbaDriverIO]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         driver_suffix="cam1:",
         override_deadtime: float | None = None,
         plugins: dict[str, NDPluginBaseIO] | None = None,

@@ -13,7 +13,7 @@ from ophyd_async.core import (
 from ophyd_async.core import StandardReadableFormat as Format
 
 from ._acquire_logic import ADContAcqAcquireLogic
-from ._data_logic import ADWriterFactory
+from ._data_logic import ADDataFactory
 from ._io import ADBaseIO, ADBaseIOT, NDCircularBuffIO, NDPluginBaseIO, NDPluginBaseIOT
 from ._trigger_logic import ADContAcqTriggerLogic
 
@@ -23,7 +23,7 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
         self,
         driver: ADBaseIOT,
         prefix: str | None = None,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         acquire_logic: DetectorAcquireLogic | None = None,
         trigger_logic: DetectorTriggerLogic | None = None,
         plugins: Mapping[str, NDPluginBaseIO] | None = None,
@@ -33,7 +33,7 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
         self.driver = driver
         if plugins is not None:
             for plugin_name, plugin in plugins.items():
-                setattr(self, plugin_name, plugin)
+                self._set_unique(plugin_name, plugin)
         self._trigger_logic = trigger_logic
         self._acquire_logic = acquire_logic
         data_logics: list[DetectorDataLogic] = []
@@ -49,7 +49,7 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
             plugin_list = list(plugins.values()) if plugins else []
             for factory in writer_factories:
                 writer, data_logic = factory(prefix, driver, plugin_list)
-                setattr(self, factory.writer_name, writer)
+                self._set_unique(factory.writer_name, writer)
                 data_logics.append(data_logic)
         self._data_logics = tuple(data_logics)
         # The driver is always wired up, so register it whole and let ADBaseIO
@@ -61,6 +61,14 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
         for signal in config_sigs:
             self.set_readable_format(signal, Format.CONFIG_SIGNAL)
         super().__init__(name=name)
+
+    def _set_unique(self, attr: str, value: NDPluginBaseIO) -> None:
+        if attr in self.__dict__ or hasattr(type(self), attr):
+            raise ValueError(
+                f"Cannot add {type(value).__name__} as attribute '{attr}': "
+                f"{type(self).__name__} already has an attribute with that name"
+            )
+        setattr(self, attr, value)
 
     @cached_property
     def logic(self) -> DetectorLogic:
@@ -98,7 +106,7 @@ class ContAcqDetector(AreaDetector[ADBaseIO]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         driver_suffix: str = "cam1:",
         cb_suffix: str = "CB1:",
         cb_plugin_name: str = "cb",

@@ -200,7 +200,7 @@ This code is to aid understanding rather than for copying. This will be document
 
 ### Fly scan nested within a step scan
 
-After `stage` and `open_run` the detectors are `prepare`d for the entire scan. The inner loop `set`s the slow (software) motors to each point, followed by the hardware driven section of the scan. Just like the [](#pure-fly-scan), this consists of `prepare`, then `kickoff`, then `complete` of the fast (hardware) motors, `collect`ing from the detectors repeatedly until they are finished. Finally `close_run` and `unstage` do the cleanup.
+After `stage` and `open_run` the inner loop `set`s the slow (software) motors to each point, followed by the hardware driven section of the scan. Just like the [](#pure-fly-scan), this consists of `prepare`, then `kickoff`, then `complete` of the detectors and fast (hardware) motors, `collect`ing from the detectors repeatedly until they are finished. A detector accepts one `kickoff` per `prepare`, so it is `prepare`d again for each hardware driven section. Finally `close_run` and `unstage` do the cleanup.
 
 ::::{tab-set}
 :sync-group: diagram-code
@@ -213,9 +213,9 @@ After `stage` and `open_run` the detectors are `prepare`d for the entire scan. T
 :align: center
 flowchart TD
     stage["stage dets, motors"] --> open_run
-    open_run --> prepare_d["prepare dets"]
-    prepare_d --> set["set slow motors"]
-    set --> prepare_m["prepare fast motors"]
+    open_run --> set["set slow motors"]
+    set --> prepare_d["prepare dets"]
+    prepare_d --> prepare_m["prepare fast motors"]
     prepare_m --> kickoff["kickoff dets, fast motors"]
     kickoff --> complete["complete dets, fast motors"]
     complete --> collect["collect dets"]
@@ -240,16 +240,17 @@ def fly_inside_step(
     exposure_time: float,
     readout_time: float,
 ) -> MsgGenerator:
-    yield from bps.prepare(
-        detector,
-        TriggerInfo(
-            livetime=exposure_time,
-            deadtime=readout_time,
-            number_of_events=exposures_per_row * len(columns),
-        ),
-    )
-    for column in columns:    
+    for column in columns:
         yield from bps.abs_set(column_motor, column)
+        # One kickoff per prepare, so the detector is prepared for each row
+        yield from bps.prepare(
+            detector,
+            TriggerInfo(
+                livetime=exposure_time,
+                deadtime=readout_time,
+                number_of_events=exposures_per_row,
+            ),
+        )
         yield from bps.prepare(
             row_motor,
             FlyMotorInfo(

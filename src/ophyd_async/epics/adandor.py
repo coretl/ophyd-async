@@ -17,7 +17,7 @@ from ophyd_async.core import (
 from ophyd_async.epics.adcore import (
     ADAcquireLogic,
     ADBaseIO,
-    ADWriterFactory,
+    ADDataFactory,
     AreaDetector,
     NDPluginBaseIO,
     prepare_exposures,
@@ -96,7 +96,7 @@ class AndorDetector(AreaDetector[Andor2DriverIO]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         driver_suffix="cam1:",
         plugins: dict[str, NDPluginBaseIO] | None = None,
         config_sigs: Sequence[SignalR] = (),
