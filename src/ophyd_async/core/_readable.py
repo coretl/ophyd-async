@@ -490,6 +490,23 @@ class StandardReadable(
         """
         return dict(self._readables)
 
+    def get_readable_format_changes(
+        self,
+    ) -> dict[Device, StandardReadableFormat | None]:
+        """Return the formats that differ from those declared at construction.
+
+        A child registered at construction but since dropped has a format of `None`.
+        """
+        changes: dict[Device, StandardReadableFormat | None] = {
+            child: format
+            for child, format in self._readables.items()
+            if self._default_readables.get(child) is not format
+        }
+        for child in self._default_readables:
+            if child not in self._readables:
+                changes[child] = None
+        return changes
+
     # Back compat - delete before 1.0
     def add_readables(
         self,
@@ -545,20 +562,6 @@ def _paths_to_devices(device: Device) -> dict[str, Device]:
     return {ROOT_DEVICE_KEY: device, **walk_devices(device)}
 
 
-def _changed_formats(
-    device: StandardReadable,
-) -> dict[Device, StandardReadableFormat | None]:
-    current = device.get_readable_formats()
-    default = device._default_readables  # noqa: SLF001
-    changed: dict[Device, StandardReadableFormat | None] = {
-        child: format
-        for child, format in current.items()
-        if default.get(child) is not format
-    }
-    changed.update({child: None for child in default if child not in current})
-    return changed
-
-
 def walk_readable_formats(device: Device) -> ReadableFormats | None:
     """Retrieve how the readable formats in a Device tree differ from construction.
 
@@ -584,7 +587,7 @@ def walk_readable_formats(device: Device) -> ReadableFormats | None:
     for path, dev in readables.items():
         device_to_path = {child: p for p, child in walk_devices(dev).items()}
         entries: dict[str, StandardReadableFormat | None] = {}
-        for child, format in _changed_formats(dev).items():
+        for child, format in dev.get_readable_format_changes().items():
             child_path = device_to_path.get(child)
             if child_path is None:
                 # Not below its owner, so it has no stable path to store it

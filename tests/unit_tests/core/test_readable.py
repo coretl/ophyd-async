@@ -354,9 +354,15 @@ async def test_reset_readable_formats_undoes_runtime_changes():
         dev.energy: Format.HINTED_SIGNAL,
         dev.extra: Format.HINTED_SIGNAL,
     }
+    assert dev.get_readable_format_changes() == {
+        dev.energy: Format.HINTED_SIGNAL,
+        dev.extra: Format.HINTED_SIGNAL,
+        dev.temp: None,
+    }
 
     dev.reset_readable_formats()
     assert dev.get_readable_formats() == declared
+    assert dev.get_readable_format_changes() == {}
     # Repeatable, and the baseline is not consumed
     dev.set_readable_format(dev.energy, None)
     dev.reset_readable_formats()
