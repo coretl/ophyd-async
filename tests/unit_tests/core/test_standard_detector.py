@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import re
 from collections.abc import Sequence
 from unittest.mock import ANY
@@ -136,11 +137,19 @@ class MockAcquireLogic(DetectorAcquireLogic):
 class StreamableOnlyDataLogic(DetectorDataLogic[None]):
     """Produces only streamable (file-based) data."""
 
-    def __init__(self, tmp_path, datakey_suffix: str = ""):
+    def __init__(
+        self,
+        tmp_path,
+        datakey_suffix: str = "",
+        shape: tuple[int, ...] = (10, 15),
+        dtype_numpy: str = "|u1",
+    ):
         self.collections_written = soft_signal_rw(int)
         self.stop_count = 0
         self.tmp_path = tmp_path
         self.datakey_suffix = datakey_suffix
+        self.shape = shape
+        self.dtype_numpy = dtype_numpy
 
     async def make_data_provider(
         self,
@@ -151,9 +160,9 @@ class StreamableOnlyDataLogic(DetectorDataLogic[None]):
     ) -> tuple[StreamableDataProvider, None]:
         resource = StreamResourceInfo(
             data_key=datakey_name,
-            shape=(10, 15),
-            chunk_shape=(1, 10, 15),
-            dtype_numpy="|u1",
+            shape=self.shape,
+            chunk_shape=(1, *self.shape),
+            dtype_numpy=self.dtype_numpy,
             parameters={"dataset": "/data"},
         )
         provider = StreamResourceDataProvider(
@@ -204,7 +213,7 @@ class MockPageableProvider(PageableDataProvider):
     def __init__(self, datakey_name: str, collections_written_signal: SignalR[int]):
         self.datakey_name = datakey_name
         self.collections_written_signal = collections_written_signal
-        self.last_emitted = 0
+        self.rearms = 0
 
     async def make_datakeys(self, collections_per_event: int) -> dict[str, DataKey]:
         return {
@@ -216,17 +225,22 @@ class MockPageableProvider(PageableDataProvider):
             )
         }
 
-    async def make_pages(self, collections_written: int, collections_per_event: int):
-        events = collections_written // collections_per_event
-        if events > self.last_emitted:
-            new = range(self.last_emitted, events)
-            page: PartialEventPage = {
-                "data": {self.datakey_name: [[0] * collections_per_event for _ in new]},
-                "time": [0.0 for _ in new],
-                "timestamps": {self.datakey_name: [0.0 for _ in new]},
-            }
-            self.last_emitted = events
-            yield page
+    async def make_page(
+        self, collections_from: int, collections_to: int, collections_per_event: int
+    ) -> PartialEventPage | None:
+        new = range((collections_to - collections_from) // collections_per_event)
+        if not new:
+            return None
+        return {
+            "data": {self.datakey_name: [[0] * collections_per_event for _ in new]},
+            "time": [0.0 for _ in new],
+            "timestamps": {self.datakey_name: [0.0 for _ in new]},
+        }
+
+    async def step_boundary(self) -> None:
+        # A finite buffer clears its progress counter when re-armed
+        self.rearms += 1
+        await self.collections_written_signal.set(0)  # type: ignore[attr-defined]
 
 
 class BoundedOnlyDataLogic(DetectorDataLogic[tuple[int, float]]):
@@ -237,6 +251,7 @@ class BoundedOnlyDataLogic(DetectorDataLogic[tuple[int, float]]):
         self.collections_written = soft_signal_rw(int)
         self.prepare_calls: list[tuple[int, float]] = []
         self.stop_count = 0
+        self.providers: list[MockPageableProvider] = []
 
     async def make_data_provider(
         self,
@@ -249,6 +264,7 @@ class BoundedOnlyDataLogic(DetectorDataLogic[tuple[int, float]]):
             # A finite buffer cannot serve an unbounded scan
             return None
         provider = MockPageableProvider(datakey_name, self.collections_written)
+        self.providers.append(provider)
         return provider, (num_collections, period)
 
     async def start(self, ctx: tuple[int, float]) -> None:
@@ -291,7 +307,8 @@ async def test_get_trigger_deadtime(
     trigger_logic, expected_triggers, expected_deadtime
 ):
     """Test get_trigger_deadtime with various trigger logic implementations."""
-    det = DetectorLogic(*([trigger_logic] if trigger_logic else [])).with_device()
+    det = DetectorLogic(trigger=trigger_logic).with_device()
+    await det.stage()
     if isinstance(trigger_logic, DeadtimeTriggerLogic):
         # A logic that needs a signal declares it as configuration; the logic
         # no longer nominates signals separately
@@ -307,7 +324,8 @@ async def test_get_trigger_deadtime_with_settings():
     deadtime_signal = soft_signal_rw(float, 0.02)
 
     # Create detector with DeadtimeTriggerLogic
-    det = DetectorLogic(DeadtimeTriggerLogic(deadtime_signal)).with_device()
+    det = DetectorLogic(trigger=DeadtimeTriggerLogic(deadtime_signal)).with_device()
+    await det.stage()
     det.sig = deadtime_signal
     det.set_readable_format(deadtime_signal, Format.CONFIG_SIGNAL)
 
@@ -338,7 +356,8 @@ async def test_get_trigger_deadtime_with_settings():
 async def test_prepare_trigger_types(trigger_type):
     """Test each trigger type is properly delegated to trigger logic."""
     trigger_logic = AllTriggerTypesLogic()
-    det = DetectorLogic(trigger_logic).with_device()
+    det = DetectorLogic(trigger=trigger_logic).with_device()
+    await det.stage()
 
     trigger_info = TriggerInfo(
         trigger=trigger_type, livetime=0.5, deadtime=0.1, number_of_events=10
@@ -352,7 +371,8 @@ async def test_prepare_trigger_types(trigger_type):
 
 async def test_prepare_unsupported_trigger_type():
     """Test that preparing with unsupported trigger type raises error."""
-    det = DetectorLogic(JustInternalTriggerLogic()).with_device()
+    det = DetectorLogic(trigger=JustInternalTriggerLogic()).with_device()
+    await det.stage()
 
     with pytest.raises(ValueError, match="Trigger type.*EXTERNAL_EDGE not supported"):
         await det.prepare(TriggerInfo(trigger=DetectorTrigger.EXTERNAL_EDGE))
@@ -390,7 +410,8 @@ async def test_trigger_info_calculations(
 async def test_exposures_per_collection(exposures_per_collection):
     """Test exposure averaging configuration."""
     tl = AveragingTriggerLogic()
-    det = DetectorLogic(tl).with_device()
+    det = DetectorLogic(trigger=tl).with_device()
+    await det.stage()
 
     await det.prepare(
         TriggerInfo(
@@ -405,7 +426,8 @@ async def test_exposures_per_collection(exposures_per_collection):
 
 async def test_exposures_per_collection_not_supported():
     """Test that exposures_per_collection > 1 fails without supporting logic."""
-    det = DetectorLogic(JustInternalTriggerLogic()).with_device()
+    det = DetectorLogic(trigger=JustInternalTriggerLogic()).with_device()
+    await det.stage()
 
     with pytest.raises(
         ValueError, match="Multiple exposures per collection not supported"
@@ -426,7 +448,8 @@ async def test_arm_timing(trigger_type, arm_timing, tmp_path):
     tl = AllTriggerTypesLogic()
     al = MockAcquireLogic()
     dl = StreamableOnlyDataLogic(tmp_path)
-    det = DetectorLogic(tl, al, dl).with_device()
+    det = DetectorLogic(trigger=tl, acquire=al, data=[dl]).with_device()
+    await det.stage()
 
     # Prepare the detector
     await det.prepare(TriggerInfo(trigger=trigger_type, number_of_events=2))
@@ -471,7 +494,10 @@ async def test_trigger_arms_only_an_internally_triggered_detector(
     """
     al = MockAcquireLogic()
     dl = StreamableOnlyDataLogic(tmp_path)
-    det = DetectorLogic(AllTriggerTypesLogic(), al, dl).with_device()
+    det = DetectorLogic(
+        trigger=AllTriggerTypesLogic(), acquire=al, data=[dl]
+    ).with_device()
+    await det.stage()
 
     await det.prepare(TriggerInfo(trigger=trigger_type))
     assert al.arm_count == (0 if arms_at_trigger else 1)
@@ -492,7 +518,7 @@ async def test_trigger_arms_only_an_internally_triggered_detector(
 async def test_arm_logic_called_on_stage():
     """Test that acquire logic is stopped on stage."""
     al = MockAcquireLogic()
-    det = DetectorLogic(al).with_device()
+    det = DetectorLogic(acquire=al).with_device()
 
     al.armed = True  # Simulate being armed
     await det.stage()
@@ -503,7 +529,8 @@ async def test_arm_logic_called_on_stage():
 
 async def test_describe_before_prepare_raises(tmp_path):
     """Test that describe() fails before prepare()."""
-    det = DetectorLogic(StreamableOnlyDataLogic(tmp_path)).with_device()
+    det = DetectorLogic(data=[StreamableOnlyDataLogic(tmp_path)]).with_device()
+    await det.stage()
 
     with pytest.raises(RuntimeError, match="prepare.. must be called first"):
         await det.describe()
@@ -511,7 +538,8 @@ async def test_describe_before_prepare_raises(tmp_path):
 
 async def test_describe_collect_before_prepare_raises(tmp_path):
     """Test that describe_collect() fails before prepare()."""
-    det = DetectorLogic(StreamableOnlyDataLogic(tmp_path)).with_device()
+    det = DetectorLogic(data=[StreamableOnlyDataLogic(tmp_path)]).with_device()
+    await det.stage()
 
     with pytest.raises(RuntimeError, match="prepare.. must be called first"):
         await det.describe_collect()
@@ -519,7 +547,8 @@ async def test_describe_collect_before_prepare_raises(tmp_path):
 
 async def test_trigger_after_multi_event_prepare_raises():
     """Test that trigger() after prepare with multiple events fails."""
-    det = DetectorLogic(JustInternalTriggerLogic()).with_device()
+    det = DetectorLogic(trigger=JustInternalTriggerLogic()).with_device()
+    await det.stage()
 
     await det.prepare(TriggerInfo(number_of_events=5))
 
@@ -532,14 +561,14 @@ async def test_preserve_detector_state_requires_default_trigger_info(
 ):
     """Test PRESERVE_DETECTOR_STATE=YES errors without default_trigger_info."""
     monkeypatch.setenv("OPHYD_ASYNC_PRESERVE_DETECTOR_STATE", "YES")
-    det = DetectorLogic(AllTriggerTypesLogic()).with_device("mydet")
+    det = DetectorLogic(trigger=AllTriggerTypesLogic()).with_device("mydet")
     # AllTriggerTypesLogic intentionally does not implement default_trigger_info
     await det.stage()
 
     with pytest.raises(
         RuntimeError,
-        match="OPHYD_ASYNC_PRESERVE_DETECTOR_STATE=YES is set but 'mydet' has no "
-        "default_trigger_info\\(\\)",
+        match="mydet: OPHYD_ASYNC_PRESERVE_DETECTOR_STATE=YES is set but the "
+        "trigger logic has no default_trigger_info\\(\\)",
     ):
         await det.trigger()
 
@@ -555,8 +584,8 @@ async def test_preserve_detector_state_no_trigger_logic_falls_back(
     await det.stage()
     # Should not raise — no trigger logic means nothing to preserve
     await det.trigger()
-    assert det.logic.data is not None
-    assert det.logic.data is not None
+    # ...and it was prepared, implicitly
+    assert await det.describe() == {}
 
 
 async def test_preserve_detector_state_multi_collection_watcher_and_assets(
@@ -576,7 +605,9 @@ async def test_preserve_detector_state_multi_collection_watcher_and_assets(
 
     monkeypatch.setenv("OPHYD_ASYNC_PRESERVE_DETECTOR_STATE", "YES")
     dl = StreamableOnlyDataLogic(tmp_path)
-    det = DetectorLogic(MultiCollectionTriggerLogic(), dl).with_device("multidet")
+    det = DetectorLogic(trigger=MultiCollectionTriggerLogic(), data=[dl]).with_device(
+        "multidet"
+    )
     await det.stage()
 
     # Collect watcher updates via watch() callback
@@ -617,7 +648,10 @@ async def test_collect_asset_docs_uses_trigger_observed_event(
     dl.collections_written, set_collections_written = soft_signal_r_and_setter(
         int, getter=lambda: 0
     )
-    det = DetectorLogic(JustInternalTriggerLogic(), dl).with_device("det")
+    det = DetectorLogic(trigger=JustInternalTriggerLogic(), data=[dl]).with_device(
+        "det"
+    )
+    await det.stage()
     await det.prepare(TriggerInfo(collections_per_event=5, exposure_timeout=0.1))
 
     status = det.trigger()
@@ -633,7 +667,10 @@ async def test_collect_asset_docs_uses_trigger_observed_event(
 async def test_one_kickoff_per_prepare(tmp_path):
     """A prepare serves one kickoff/complete cycle; the next needs a new prepare."""
     dl = StreamableOnlyDataLogic(tmp_path)
-    det = DetectorLogic(JustInternalTriggerLogic(), dl).with_device("foo")
+    det = DetectorLogic(trigger=JustInternalTriggerLogic(), data=[dl]).with_device(
+        "foo"
+    )
+    await det.stage()
 
     await det.prepare(TriggerInfo(number_of_events=5))
     await det.kickoff()
@@ -653,14 +690,14 @@ async def test_one_kickoff_per_prepare(tmp_path):
 
 async def test_stage_resets_state():
     """Test that stage() resets detector state."""
-    det = DetectorLogic(JustInternalTriggerLogic()).with_device()
+    det = DetectorLogic(trigger=JustInternalTriggerLogic()).with_device()
+    await det.stage()
 
     await det.prepare(TriggerInfo(number_of_events=5))
 
     # Stage should reset everything
     await det.stage()
 
-    assert det.logic.data is None
     with pytest.raises(RuntimeError, match="prepare.* must be called first"):
         await det.describe()
     with pytest.raises(RuntimeError, match="prepare.* before kickoff"):
@@ -669,7 +706,8 @@ async def test_stage_resets_state():
 
 async def test_hints_from_single_data_logic(tmp_path):
     """Test that hints come from data logic."""
-    det = DetectorLogic(StreamableOnlyDataLogic(tmp_path)).with_device("bar")
+    det = DetectorLogic(data=[StreamableOnlyDataLogic(tmp_path)]).with_device("bar")
+    await det.stage()
 
     await det.prepare(TriggerInfo())
 
@@ -680,7 +718,8 @@ async def test_hints_from_multiple_data_logics(tmp_path):
     """Test that hints are aggregated from multiple data logics."""
     dl1 = StreamableOnlyDataLogic(tmp_path)
     dl2 = StreamableOnlyDataLogic(tmp_path, datakey_suffix="-extra")
-    det = DetectorLogic(dl1, dl2).with_device("bar")
+    det = DetectorLogic(data=[dl1, dl2]).with_device("bar")
+    await det.stage()
 
     await det.prepare(TriggerInfo())
 
@@ -703,6 +742,7 @@ async def test_config_signals_in_describe_configuration(
 ):
     """Test that added config signals appear in describe_configuration."""
     det = DetectorLogic().with_device()
+    await det.stage()
     signal = soft_signal_rw(
         signal_type, initial_value=initial_value, name="test-config"
     )
@@ -732,7 +772,8 @@ async def test_config_signals_in_describe_configuration(
 
 async def test_kickoff_without_streamable_data_raises():
     """Test that kickoff() without streamable data fails."""
-    det = DetectorLogic(JustInternalTriggerLogic()).with_device("foo")
+    det = DetectorLogic(trigger=JustInternalTriggerLogic()).with_device("foo")
+    await det.stage()
 
     # A detector with no data logic can still be triggered for a step scan
     await det.prepare(TriggerInfo())
@@ -750,7 +791,8 @@ async def test_streamable_supports_both_step_and_fly(tmp_path):
     """Test that streamable data logic supports both step and fly scanning."""
     tl = JustInternalTriggerLogic()
     dl = StreamableOnlyDataLogic(tmp_path)
-    det = DetectorLogic(tl, dl).with_device("foo")
+    det = DetectorLogic(trigger=tl, data=[dl]).with_device("foo")
+    await det.stage()
 
     # Step scan should work
     status = det.trigger()
@@ -827,6 +869,7 @@ async def test_streamable_supports_both_step_and_fly(tmp_path):
 async def test_read_returns_correct_values():
     """Test that read() returns the values of registered signals."""
     det = DetectorLogic().with_device("det")
+    await det.stage()
     det.counts, _ = soft_signal_r_and_setter(int, 42, name="det-counts")
     det.set_readable_format(det.counts, Format.HINTED_SIGNAL)
 
@@ -837,6 +880,7 @@ async def test_read_returns_correct_values():
 async def test_detector_with_no_logics():
     """Test that detector works with no logics for basic internal triggering."""
     det = DetectorLogic().with_device()
+    await det.stage()
 
     # Should support only INTERNAL triggering
     triggers, deadtime = await det.get_trigger_deadtime()
@@ -853,7 +897,8 @@ async def test_detector_with_no_logics():
 async def test_detector_without_trigger_logic_cannot_set_timing_or_exteral_triggering():
     """Test that detector without trigger logic cannot set livetime/deadtime/trigger."""
     det = DetectorLogic().with_device("foo")
-    msg = "Detector foo has no trigger logic, so "
+    await det.stage()
+    msg = "foo: No trigger logic, so "
 
     with pytest.raises(ValueError, match=msg + "cannot set livetime or deadtime"):
         await det.prepare(TriggerInfo(livetime=0.5))
@@ -862,41 +907,27 @@ async def test_detector_without_trigger_logic_cannot_set_timing_or_exteral_trigg
         await det.prepare(TriggerInfo(deadtime=0.1))
 
 
-async def test_cannot_have_two_trigger_logics():
-    """Test that two trigger logics raises an error."""
-    with pytest.raises(RuntimeError, match="Detector already has trigger logic"):
-        DetectorLogic(JustInternalTriggerLogic(), AllTriggerTypesLogic()).with_device()
+async def test_detector_logic_takes_keywords_only():
+    """Each logic's role is named, so none can be given positionally."""
+    with pytest.raises(TypeError, match="positional"):
+        DetectorLogic(JustInternalTriggerLogic())  # type: ignore[misc]
 
 
-async def test_cannot_have_two_arm_logics():
-    """Test that two acquire logics raises an error."""
-    with pytest.raises(RuntimeError, match="Detector already has acquire logic"):
-        DetectorLogic(MockAcquireLogic(), MockAcquireLogic()).with_device()
+async def test_replaced_detector_logic_does_not_share_prepared_data(tmp_path):
+    """A copy made with dataclasses.replace has its own prepared state."""
+    logic = DetectorLogic(
+        trigger=JustInternalTriggerLogic(), data=[StreamableOnlyDataLogic(tmp_path)]
+    )
+    det = logic.with_device("det")
+    copy = dataclasses.replace(logic).with_device("copy")
+    await det.stage()
+    await copy.stage()
 
+    await det.prepare(TriggerInfo())
 
-async def test_unknown_logic_type_raises():
-    """Test that an unknown logic type raises TypeError."""
-
-    class UnknownLogic:
-        pass
-
-    with pytest.raises(TypeError, match="Unknown logic type"):
-        DetectorLogic(UnknownLogic()).with_device()  # type: ignore[arg-type]
-
-
-async def test_logic_filling_two_roles_raises():
-    """An object satisfying two logic protocols must not be silently half-registered."""
-
-    class BothAcquireAndData(DetectorAcquireLogic, DetectorDataLogic):
-        async def start_acquiring(self): ...
-        async def wait_for_idle(self): ...
-        async def ensure_stopped(self): ...
-
-    with pytest.raises(
-        TypeError,
-        match="is both DetectorAcquireLogic, DetectorDataLogic",
-    ):
-        DetectorLogic(BothAcquireAndData()).with_device()
+    assert list(await det.describe()) == ["det"]
+    with pytest.raises(RuntimeError, match="prepare.. must be called first"):
+        await copy.describe()
 
 
 @pytest.mark.parametrize("initial_shutter_closed", [True, False])
@@ -927,7 +958,7 @@ async def test_ensure_ready_vs_ensure_stopped_hooks(initial_shutter_closed: bool
             self.shutter_closed = True  # close shutter at end of scan
 
     al = ShutterAcquireLogic(initial_shutter_closed)
-    det = DetectorLogic(al).with_device()
+    det = DetectorLogic(acquire=al).with_device()
 
     await det.stage()
     assert (
@@ -944,7 +975,10 @@ async def test_ensure_ready_vs_ensure_stopped_hooks(initial_shutter_closed: bool
 async def test_bounded_step_scan_reads_derived_from_page():
     """A bounded buffer describes as an array and read() derives one reading."""
     dl = BoundedOnlyDataLogic()
-    det = DetectorLogic(JustInternalTriggerLogic(), dl).with_device("foo")
+    det = DetectorLogic(trigger=JustInternalTriggerLogic(), data=[dl]).with_device(
+        "foo"
+    )
+    await det.stage()
 
     ti = TriggerInfo(
         number_of_events=1, collections_per_event=5, livetime=0.1, deadtime=0.0
@@ -961,25 +995,32 @@ async def test_bounded_step_scan_reads_derived_from_page():
     assert status.done
     assert status.success
     # prepare() armed the buffer for this point, so trigger() does not re-arm it
-    assert dl.prepare_calls == [(5, pytest.approx(0.1))]
-    assert dl.stop_count == 0
+    (provider,) = dl.providers
+    assert provider.rearms == 0
     reading = await det.read()
     assert reading["foo"]["value"] == [0, 0, 0, 0, 0]
 
-    # The next point does re-arm, as the buffer holds the last point's data
+    # The next point re-arms, as the buffer holds the last point's data, and
+    # counts from the re-armed buffer's 0
     status = det.trigger()
     await wait_for_pending_wakeups(raise_if_exceeded=False)
+    assert provider.rearms == 1
+    assert not status.done
     await dl.collections_written.set(5)
     assert status.done
     assert status.success
-    assert dl.prepare_calls == [(5, pytest.approx(0.1)), (5, pytest.approx(0.1))]
+    # The provider re-armed itself: nothing was re-made, or stopped since stage()
+    assert dl.prepare_calls == [(5, pytest.approx(0.1))]
     assert dl.stop_count == 1
 
 
 async def test_bounded_fly_scan_accumulates_across_kickoffs():
     """A bounded buffer is armed once at prepare and not re-armed per kickoff."""
     dl = BoundedOnlyDataLogic()
-    det = DetectorLogic(JustInternalTriggerLogic(), dl).with_device("foo")
+    det = DetectorLogic(trigger=JustInternalTriggerLogic(), data=[dl]).with_device(
+        "foo"
+    )
+    await det.stage()
 
     await det.prepare(
         TriggerInfo(number_of_events=10, collections_per_event=1, livetime=0.1)
@@ -990,12 +1031,12 @@ async def test_bounded_fly_scan_accumulates_across_kickoffs():
     status = det.complete()
     # The buffer fills as the scan runs, and pages come out as it goes
     await dl.collections_written.set(5)
-    pages = [page async for page in det._collect_pages()]
+    pages = [page async for page in det.collect_pages()]  # type: ignore[attr-defined]
     assert pages[0]["data"]["foo"] == [[0]] * 5
     assert not status.done
 
     await dl.collections_written.set(10)
-    pages = [page async for page in det._collect_pages()]
+    pages = [page async for page in det.collect_pages()]  # type: ignore[attr-defined]
     assert pages[0]["data"]["foo"] == [[0]] * 5
     await status
     # kickoff() never re-arms: the buffer was only ever armed once
@@ -1014,9 +1055,14 @@ async def test_bounded_fly_scan_accumulates_across_kickoffs():
     ],
 )
 async def test_prepare_resolves_zero_livetime_for_bounded_period(
-    requested_livetime, default, expected_period
+    requested_livetime, default, expected_period, monkeypatch: pytest.MonkeyPatch
 ):
-    """A livetime of 0 is filled in from the trigger logic before sizing a buffer."""
+    """A livetime of 0 is filled in from the trigger logic before sizing a buffer.
+
+    Only when hardware state is preserved: test_u12 in test_detector_use_cases
+    covers the variable being unset.
+    """
+    monkeypatch.setenv("OPHYD_ASYNC_PRESERVE_DETECTOR_STATE", "YES")
 
     class PeriodTriggerLogic(DetectorTriggerLogic):
         async def prepare_internal(self, num: int, livetime: float, deadtime: float):
@@ -1026,7 +1072,8 @@ async def test_prepare_resolves_zero_livetime_for_bounded_period(
             return default
 
     dl = BoundedOnlyDataLogic()
-    det = DetectorLogic(PeriodTriggerLogic(), dl).with_device("foo")
+    det = DetectorLogic(trigger=PeriodTriggerLogic(), data=[dl]).with_device("foo")
+    await det.stage()
 
     await det.prepare(
         TriggerInfo(
@@ -1036,17 +1083,17 @@ async def test_prepare_resolves_zero_livetime_for_bounded_period(
     assert dl.prepare_calls == [(3, pytest.approx(expected_period))]
 
 
-async def test_bounded_dropped_for_infinite_events():
-    """A bounded buffer cannot serve an infinite scan, so it makes no provider."""
+async def test_bounded_only_detector_cannot_serve_infinite_events():
+    """A finite buffer sits an infinite scan out, leaving nothing to serve it."""
     dl = BoundedOnlyDataLogic()
-    det = DetectorLogic(JustInternalTriggerLogic(), dl).with_device("foo")
+    det = DetectorLogic(trigger=JustInternalTriggerLogic(), data=[dl]).with_device(
+        "foo"
+    )
+    await det.stage()
 
-    await det.prepare(TriggerInfo(number_of_events=0))
-
-    ctx = det.logic.data
-    assert ctx is not None
-    assert ctx.pageable == []
-    # Sitting the scan out is not an error, and nothing was armed
+    with pytest.raises(ValueError, match="foo: has data logics but none of them"):
+        await det.prepare(TriggerInfo(number_of_events=0))
+    # Nothing was armed
     assert dl.prepare_calls == []
 
 
@@ -1056,7 +1103,8 @@ async def test_data_logic_with_no_make_data_provider_raises():
     class EmptyDataLogic(DetectorDataLogic):
         pass
 
-    det = DetectorLogic(EmptyDataLogic()).with_device()
+    det = DetectorLogic(data=[EmptyDataLogic()]).with_device()
+    await det.stage()
 
     with pytest.raises(NotImplementedError):
         await det.prepare(TriggerInfo())
@@ -1065,34 +1113,50 @@ async def test_data_logic_with_no_make_data_provider_raises():
 async def test_unstage_disarms_detector():
     """Test that unstage() calls disarm on the detector."""
     al = MockAcquireLogic()
-    det = DetectorLogic(al).with_device()
+    det = DetectorLogic(acquire=al).with_device()
+    await det.stage()
 
     al.armed = True
     await det.unstage()
 
-    assert al.disarm_count == 1
+    # Once on stage(), once on unstage()
+    assert al.disarm_count == 2
     assert al.armed is False
 
 
-async def test_prepare_stops_data_logic_when_recreating_providers(tmp_path):
-    """Test that prepare() calls stop() on data logic when recreating providers."""
+@pytest.mark.parametrize(
+    "second_collections_per_event,stops", [(2, 0), (3, 1)], ids=["kept", "remade"]
+)
+async def test_prepare_stops_data_logic_when_recreating_providers(
+    tmp_path, second_collections_per_event: int, stops: int
+):
+    """A streamable provider is kept while it would be made the same, else remade."""
     dl = StreamableOnlyDataLogic(tmp_path)
-    det = DetectorLogic(JustInternalTriggerLogic(), dl).with_device("det")
+    det = DetectorLogic(trigger=JustInternalTriggerLogic(), data=[dl]).with_device(
+        "det"
+    )
+    await det.stage()
+    staged_stops = dl.stop_count
 
-    # First prepare with collections_per_event=2
     await det.prepare(TriggerInfo(number_of_events=3, collections_per_event=2))
-    assert dl.stop_count == 0  # No stop on first prepare
+    assert dl.stop_count == staged_stops  # No stop on first prepare
 
-    # Second prepare with different collections_per_event triggers recreation
-    await det.prepare(TriggerInfo(number_of_events=3, collections_per_event=3))
-    assert dl.stop_count == 1  # stop() should have been called
+    await det.prepare(
+        TriggerInfo(
+            number_of_events=3, collections_per_event=second_collections_per_event
+        )
+    )
+    assert dl.stop_count == staged_stops + stops
 
 
 async def test_different_collections_written_raises(tmp_path):
     """Test that different collections_written values from providers raises error."""
     dl1 = StreamableOnlyDataLogic(tmp_path)
-    dl2 = StreamableOnlyDataLogic(tmp_path)
-    det = DetectorLogic(JustInternalTriggerLogic(), dl1, dl2).with_device("det")
+    dl2 = StreamableOnlyDataLogic(tmp_path, datakey_suffix="-2")
+    det = DetectorLogic(
+        trigger=JustInternalTriggerLogic(), data=[dl1, dl2]
+    ).with_device("det")
+    await det.stage()
 
     await det.prepare(TriggerInfo(number_of_events=5))
 
@@ -1113,8 +1177,9 @@ async def test_different_collections_written_raises(tmp_path):
 async def test_data_logic_and_registered_signal(tmp_path):
     """A registered signal and a data logic both describe(), only one collects."""
     det = DetectorLogic(
-        JustInternalTriggerLogic(), StreamableOnlyDataLogic(tmp_path)
+        trigger=JustInternalTriggerLogic(), data=[StreamableOnlyDataLogic(tmp_path)]
     ).with_device("det")
+    await det.stage()
     det.counts, _ = soft_signal_r_and_setter(int, 42, name="det-counts")
     det.set_readable_format(det.counts, Format.HINTED_SIGNAL)
 
@@ -1156,9 +1221,13 @@ async def test_data_logic_and_registered_signal(tmp_path):
 async def test_collect_asset_docs_with_explicit_index(tmp_path):
     """Test collect_asset_docs() with explicitly provided index."""
     dl = StreamableOnlyDataLogic(tmp_path)
-    det = DetectorLogic(JustInternalTriggerLogic(), dl).with_device("det")
+    det = DetectorLogic(trigger=JustInternalTriggerLogic(), data=[dl]).with_device(
+        "det"
+    )
+    await det.stage()
 
     await det.prepare(TriggerInfo(number_of_events=5, collections_per_event=2))
+    await det.kickoff()
 
     # Collect with explicit index (not relying on get_index)
     docs = [doc async for doc in det.collect_asset_docs(index=3)]
@@ -1198,6 +1267,7 @@ async def test_child_readable_config_signals_in_describe_configuration():
     child.set_readable_format(config_sig, Format.CONFIG_SIGNAL)
 
     det = DetectorLogic().with_device("det")
+    await det.stage()
     det.set_readable_format(child, Format.CHILD)
     await det.prepare(TriggerInfo())
 
@@ -1214,9 +1284,15 @@ async def test_child_readable_read_signals_in_read(tmp_path):
     read_sig = soft_signal_rw(int, initial_value=99, name="child-counts")
     child.set_readable_format(read_sig, Format.HINTED_SIGNAL)
 
-    det = DetectorLogic(StreamableOnlyDataLogic(tmp_path)).with_device("det")
+    dl = StreamableOnlyDataLogic(tmp_path)
+    det = DetectorLogic(data=[dl]).with_device("det")
+    await det.stage()
     det.set_readable_format(child, Format.CHILD)
     await det.prepare(TriggerInfo())
+    status = det.trigger()
+    await wait_for_pending_wakeups(raise_if_exceeded=False)
+    await dl.collections_written.set(1)
+    await status
 
     # The data logic describes its stream, the child describes its signal
     desc = await det.describe()
@@ -1234,7 +1310,8 @@ async def test_child_readable_hints_merged(tmp_path):
     hinted_sig = soft_signal_rw(float, name="child-intensity")
     child.set_readable_format(hinted_sig, Format.HINTED_SIGNAL)
 
-    det = DetectorLogic(StreamableOnlyDataLogic(tmp_path)).with_device("det")
+    det = DetectorLogic(data=[StreamableOnlyDataLogic(tmp_path)]).with_device("det")
+    await det.stage()
     det.set_readable_format(child, Format.CHILD)
 
     assert "fields" in det.hints
@@ -1278,6 +1355,7 @@ async def test_detector_readable_format_changes_at_runtime():
     # A StandardDetector is a StandardReadable, so a plugin signal can be moved
     # between configuration and hinted reads without redefining the Device.
     det = DetectorLogic().with_device("det")
+    await det.stage()
     det.temperature, _ = soft_signal_r_and_setter(float, 20.0, name="temperature")
 
     name = det.temperature.name
@@ -1297,6 +1375,7 @@ async def test_detector_readable_format_changes_at_runtime():
 
 async def test_detector_add_config_signals_is_deprecated():
     det = DetectorLogic().with_device("det")
+    await det.stage()
     signal, _ = soft_signal_r_and_setter(float, 1.0, name="sig")
     with pytest.deprecated_call():
         det.add_config_signals(signal)
@@ -1311,7 +1390,8 @@ async def test_streamable_logic_looks_like_writes_stream_assets(tmp_path):
     detector must look like exactly one of WritesStreamAssets /
     EventPageCollectable so the bundler routes it down a single path.
     """
-    det = DetectorLogic(StreamableOnlyDataLogic(tmp_path)).with_device()
+    det = DetectorLogic(data=[StreamableOnlyDataLogic(tmp_path)]).with_device()
+    await det.stage()
 
     # Which verb applies follows what the logics will produce, so it is not
     # known until they have been asked
@@ -1323,10 +1403,15 @@ async def test_streamable_logic_looks_like_writes_stream_assets(tmp_path):
     assert hasattr(det, "collect_asset_docs")
     assert not hasattr(det, "collect_pages")
 
+    # stage() drops what was prepared, and the verb with it
+    await det.stage()
+    assert not isinstance(det, WritesStreamAssets)
+
 
 async def test_bounded_logic_looks_like_event_page_collectable():
     """A bounded logic exposes collect_pages, and only that."""
-    det = DetectorLogic(BoundedOnlyDataLogic()).with_device()
+    det = DetectorLogic(data=[BoundedOnlyDataLogic()]).with_device()
+    await det.stage()
     await det.prepare(TriggerInfo())
 
     assert isinstance(det, EventPageCollectable)
@@ -1334,15 +1419,17 @@ async def test_bounded_logic_looks_like_event_page_collectable():
     assert hasattr(det, "collect_pages")
     assert not hasattr(det, "collect_asset_docs")
 
-    # An unbounded scan drops the finite buffer, so the verb goes with it
-    await det.prepare(TriggerInfo(number_of_events=0))
+    # An unbounded scan leaves nothing to serve it, so the verb goes with it
+    with pytest.raises(ValueError, match="none of them can serve"):
+        await det.prepare(TriggerInfo(number_of_events=0))
     assert not isinstance(det, EventPageCollectable)
     assert not hasattr(det, "collect_pages")
 
 
 async def test_no_data_logic_looks_like_neither():
     """A detector with no data logic emits neither stream assets nor event pages."""
-    det = DetectorLogic(JustInternalTriggerLogic()).with_device()
+    det = DetectorLogic(trigger=JustInternalTriggerLogic()).with_device()
+    await det.stage()
 
     assert not isinstance(det, WritesStreamAssets)
     assert not isinstance(det, EventPageCollectable)
@@ -1353,6 +1440,7 @@ async def test_no_data_logic_looks_like_neither():
 async def test_missing_attribute_raises_standard_attribute_error():
     """__getattr__ falls through to a normal AttributeError for other names."""
     det = DetectorLogic().with_device()
+    await det.stage()
     with pytest.raises(
         AttributeError,
         match=r"object has no attribute 'does_not_exist'",
@@ -1363,8 +1451,12 @@ async def test_missing_attribute_raises_standard_attribute_error():
 async def test_unshadowed_bounded_keys_raise(tmp_path):
     """A finite buffer the stream assets do not cover cannot be combined with them."""
     det = DetectorLogic(
-        BoundedOnlyDataLogic(datakey_suffix="-stats"), StreamableOnlyDataLogic(tmp_path)
+        data=[
+            BoundedOnlyDataLogic(datakey_suffix="-stats"),
+            StreamableOnlyDataLogic(tmp_path),
+        ]
     ).with_device("det")
+    await det.stage()
 
     # Only knowable once the logics have said what they would make
     with pytest.raises(
@@ -1380,14 +1472,15 @@ async def test_unshadowed_bounded_keys_raise(tmp_path):
 async def test_shadowed_bounded_logic_sits_the_scan_out(tmp_path):
     """A finite buffer whose keys are all written durably gives way to the file."""
     bounded = BoundedOnlyDataLogic()
-    det = DetectorLogic(bounded, StreamableOnlyDataLogic(tmp_path)).with_device("det")
+    # The same quantity as the buffer: one integer per collection
+    streamable = StreamableOnlyDataLogic(tmp_path, shape=(), dtype_numpy="<i8")
+    det = DetectorLogic(data=[bounded, streamable]).with_device("det")
+    await det.stage()
 
     await det.prepare(TriggerInfo())
 
     # Both would produce "det", so the durable copy wins and nothing was armed
     assert bounded.prepare_calls == []
-    assert det.logic.data is not None
-    assert det.logic.data.pageable == []
     assert isinstance(det, WritesStreamAssets)
     assert not isinstance(det, EventPageCollectable)
     # ...and it stops hinting at data nobody will produce

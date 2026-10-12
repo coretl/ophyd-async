@@ -7,6 +7,7 @@ from ophyd_async.core import (
     StaticFilenameProvider,
     StaticPathProvider,
     TriggerInfo,
+    get_mock,
     init_devices,
     set_mock_value,
 )
@@ -29,6 +30,9 @@ def detector(RE, tmp_path):
 async def test_prepare_internal_calls_correct_parameters(
     detector: EigerDetector, tmp_path
 ):
+    await detector.stage()
+    # Only the calls after stage() are of interest
+    get_mock(detector).reset_mock()
     await detector.prepare(
         TriggerInfo(
             number_of_events=10,

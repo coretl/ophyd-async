@@ -45,6 +45,7 @@ async def test_pmac_prepare(sim_motors: tuple[PmacIO, Motor, Motor]):
     spec = Fly(2.0 @ Line(sim_x_motor, 1, 5, 2))
     value = PmacScanInfo(spec=spec, ramp_time=None, turnaround_time=None)
     flyer = PmacTrajectoryFlyableLogic(pmac_io).with_device()
+    await flyer.stage()
     await flyer.prepare(value)
 
     assert await pmac_io.coord[1].cs_axis_setpoint[7].get_value() == -1.2
@@ -71,6 +72,7 @@ async def test_pmac_prepare_with_configured_ramp(
     spec = Fly(2.0 @ Line(sim_x_motor, 1, 5, 2))
     value = PmacScanInfo(spec=spec, ramp_time=2, turnaround_time=None)
     flyer = PmacTrajectoryFlyableLogic(pmac_io).with_device()
+    await flyer.stage()
     await flyer.prepare(value)
 
     assert await pmac_io.coord[1].cs_axis_setpoint[7].get_value() == -3.0
@@ -97,6 +99,7 @@ async def test_pmac_prepare_with_configured_ramp_and_turnaround(
     spec = Fly(2.0 @ (2 * ~Line(sim_x_motor, 1, 5, 2)))
     value = PmacScanInfo(spec=spec, ramp_time=2, turnaround_time=3)
     flyer = PmacTrajectoryFlyableLogic(pmac_io).with_device()
+    await flyer.stage()
     await flyer.prepare(value)
 
     assert await pmac_io.coord[1].cs_axis_setpoint[7].get_value() == -3.0
@@ -230,6 +233,7 @@ async def test_pmac_trajectory_kickoff(
     value = PmacScanInfo(spec=spec, ramp_time=None, turnaround_time=None)
     with patch("ophyd_async.epics.pmac._pmac_trajectory.SLICE_SIZE", 2):
         # This will prepare the buffer with 2 frames of info
+        await flyer.stage()
         await flyer.prepare(value)
         # This will consume another 2 frames
         set_mock_value(
@@ -344,6 +348,7 @@ async def test_pmac_trajectory_kickoff_trajectory_raises_exception_if_no_prepare
     # Ordering is enforced by StandardFlyable, so drive through the device.
     pmac_io, _, _ = sim_motors
     flyer = PmacTrajectoryFlyableLogic(pmac_io).with_device()
+    await flyer.stage()
     with pytest.raises(RuntimeError, match="prepare.* before kickoff"):
         await flyer.kickoff()
 
@@ -351,6 +356,7 @@ async def test_pmac_trajectory_kickoff_trajectory_raises_exception_if_no_prepare
 async def test_pmac_trajectory_complete(sim_motors: tuple[PmacIO, Motor, Motor]):
     pmac_io, _, _ = sim_motors
     flyer = PmacTrajectoryFlyableLogic(pmac_io).with_device()
+    await flyer.stage()
     with pytest.raises(RuntimeError, match="kickoff.* before complete"):
         await flyer.complete()
 
@@ -392,6 +398,7 @@ async def test_pmac_trajectory_unstage_aborts_only_if_running(
     pmac_io, _, _ = sim_motors
     flyer = PmacTrajectoryFlyableLogic(pmac_io).with_device()
     execute_mock = get_mock_execute(pmac_io.trajectory.abort_profile)
+    await flyer.stage()
     set_mock_value(pmac_io.trajectory.execute_state, execute_state)
 
     await flyer.unstage()

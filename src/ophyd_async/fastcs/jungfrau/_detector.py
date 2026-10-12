@@ -36,17 +36,19 @@ class JungfrauDetector(StandardDetector):
         self.acquisition_type = soft_signal_rw(
             AcquisitionType, AcquisitionType.STANDARD
         )
-        self._logic = DetectorLogic(
-            JungfrauTriggerLogic(self.detector, self.acquisition_type),
-            JungfrauAcquireLogic(self.detector),
-            odin.OdinDataLogic(
-                path_provider=path_provider,
-                odin=self.odin,
-                detector_bit_depth=self.detector.bit_depth,
-            ),
-        )
+        self._path_provider = path_provider
         super().__init__(name=name)
 
     @cached_property
     def logic(self) -> DetectorLogic:
-        return self._logic
+        return DetectorLogic(
+            trigger=JungfrauTriggerLogic(self.detector, self.acquisition_type),
+            acquire=JungfrauAcquireLogic(self.detector),
+            data=[
+                odin.OdinDataLogic(
+                    path_provider=self._path_provider,
+                    odin=self.odin,
+                    detector_bit_depth=self.detector.bit_depth,
+                )
+            ],
+        )

@@ -1,4 +1,7 @@
+import asyncio
 from collections import defaultdict
+from typing import get_type_hints
+from unittest.mock import call
 
 import bluesky.plan_stubs as bps
 import bluesky.preprocessors as bpp
@@ -14,7 +17,10 @@ from ophyd_async.core import (
     EventPageDataProvider,
     StandardDetector,
     TriggerInfo,
+    callback_on_mock_put,
     init_devices,
+    non_zero,
+    set_mock_put_proceeds,
     set_mock_value,
 )
 from ophyd_async.epics import adcore
@@ -22,6 +28,8 @@ from ophyd_async.epics.adcore import (
     NDStatsTSAcquireMode,
     StatsTimeSeriesDataLogic,
 )
+from ophyd_async.epics.core import EpicsOptions
+from ophyd_async.testing import assert_has_calls
 
 
 @pytest.fixture
@@ -52,6 +60,62 @@ async def test_start_sizes_and_arms_the_buffer(stats: adcore.NDStatsIO):
     assert list(datakeys) == ["det-stats"]
     assert datakeys["det-stats"]["shape"] == [5]
     assert logic.get_hinted_fields("det-stats") == ["det-stats"]
+
+
+async def test_start_leaves_the_progress_counter_at_zero(stats: adcore.NDStatsIO):
+    """The count a step point is measured from is 0 once start() returns.
+
+    A buffer that still holds a previous scan's points reports them until it is
+    armed; the IOC resets TSCurrentPoint inside the TSAcquire write (ADCore
+    NDPluginTimeSeries::writeInt32 -> acquireReset), which is what the fake does.
+    """
+    set_mock_value(stats.ts_current_point, 5)
+    callback_on_mock_put(
+        stats.ts_acquire,
+        lambda value: set_mock_value(stats.ts_current_point, 0) if value else None,
+    )
+    logic = StatsTimeSeriesDataLogic(stats)
+    made = await logic.make_data_provider(
+        "det", num_collections=5, period=0.1, flush_period=0.0
+    )
+    assert made is not None
+    # Describing the buffer does not touch it
+    assert await stats.ts_current_point.get_value() == 5
+
+    await logic.start(made[1])
+
+    assert await stats.ts_current_point.get_value() == 0
+
+
+def test_ts_acquire_is_declared_as_a_busy_record():
+    """TSAcquire completes its put only when the buffer is full, so only a put
+    of 1 may wait for completion, as for the other areaDetector busy records."""
+    (options,) = [
+        meta
+        for meta in get_type_hints(adcore.NDStatsIO, include_extras=True)[
+            "ts_acquire"
+        ].__metadata__
+        if isinstance(meta, EpicsOptions)
+    ]
+    assert options.wait is non_zero
+
+
+async def test_start_does_not_wait_for_the_buffer_to_fill(stats: adcore.NDStatsIO):
+    logic = StatsTimeSeriesDataLogic(stats)
+    made = await logic.make_data_provider(
+        "det", num_collections=5, period=0.1, flush_period=0.0
+    )
+    assert made is not None
+    # The put of 1 to TSAcquire does not complete until the buffer is full
+    set_mock_put_proceeds(stats.ts_acquire, False)
+
+    await asyncio.wait_for(logic.start(made[1]), timeout=1)
+
+    assert await stats.ts_acquire.get_value() is True
+    set_mock_put_proceeds(stats.ts_acquire, True)
+    await logic.stop()
+    assert_has_calls(stats.ts_acquire, [call.put(True), call.put(False)])
+    assert await stats.ts_acquire.get_value() is False
 
 
 async def test_unbounded_scan_makes_no_provider(stats: adcore.NDStatsIO):
@@ -135,9 +199,9 @@ def stats_detector(stats: adcore.NDStatsIO) -> StandardDetector:
     values = np.array([5.0, 6.0, 7.0, 8.0])
     times = np.array([200.0, 201.0, 202.0, 203.0])
     return DetectorLogic(
-        _JustInternal(),
-        _FillStatsAcquireLogic(stats, values, times),
-        StatsTimeSeriesDataLogic(stats),
+        trigger=_JustInternal(),
+        acquire=_FillStatsAcquireLogic(stats, values, times),
+        data=[StatsTimeSeriesDataLogic(stats)],
     ).with_device("det")
 
 

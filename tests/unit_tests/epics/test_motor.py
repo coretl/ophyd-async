@@ -223,6 +223,7 @@ async def test_set(motor: Motor, setpoint, velocity, timeout) -> None:
 
 async def test_prepare_velocity_limit_error(motor: Motor):
     set_mock_value(motor.max_velocity, 10)
+    await motor.stage()
     with pytest.raises(MotorLimitsError):
         fly_info = FlyMotorInfo(start_position=-10, end_position=0, time_for_move=0.9)
         await motor.prepare(fly_info)
@@ -234,6 +235,7 @@ async def test_valid_prepare_velocity(motor: Motor):
     set_mock_value(motor.high_limit_travel, 21)
     set_mock_value(motor.max_velocity, 10)
     fly_info = FlyMotorInfo(start_position=-10, end_position=0, time_for_move=1)
+    await motor.stage()
     await motor.prepare(fly_info)
     assert await motor.velocity.get_value() == await motor.max_velocity.get_value()
 
@@ -266,6 +268,7 @@ async def test_prepare_motor_limits_error(
         end_position=end_position,
         time_for_move=time_for_move,
     )
+    await motor.stage()
     with pytest.raises(MotorLimitsError):
         await motor.prepare(fly_info)
 
@@ -280,6 +283,7 @@ async def test_prepare_valid_limits(motor: Motor):
         end_position=10,
         time_for_move=1,
     )
+    await motor.stage()
     await motor.prepare(fly_info)
     assert await motor.user_setpoint.get_value() == -5
 
@@ -321,6 +325,7 @@ async def test_fly_scan(
     # prepare only resolves once the run-up move has completed, so the setpoint
     # has reached the run-up start position and the fly-scan speed (not the max
     # velocity) has been applied
+    await motor.stage()
     await motor.prepare(fly_info)
     assert await motor.user_setpoint.get_value() == pytest.approx(expected_run_up)
     assert await motor.velocity.get_value() == expected_speed
@@ -333,11 +338,13 @@ async def test_fly_scan(
 
 
 async def test_kickoff_before_prepare_raises(motor: Motor):
+    await motor.stage()
     with pytest.raises(RuntimeError, match="prepare.* before kickoff"):
         await motor.kickoff()
 
 
 async def test_complete_before_kickoff_raises(motor: Motor):
+    await motor.stage()
     with pytest.raises(RuntimeError, match="kickoff.* before complete"):
         await motor.complete()
 

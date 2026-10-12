@@ -10,6 +10,7 @@ from ophyd_async.core import (
     StaticFilenameProvider,
     StaticPathProvider,
     TriggerInfo,
+    get_mock,
     init_devices,
     set_mock_value,
 )
@@ -109,6 +110,7 @@ async def test_hdf_follows_the_plugin_when_not_enabling_it(
 
 
 async def test_hdf_writer_file_not_found(hdf_det: adcore.AreaDetector[adcore.ADBaseIO]):
+    await hdf_det.stage()
     with pytest.raises(
         FileNotFoundError, match=r"Path .* doesn't exist or not writable!"
     ):
@@ -140,6 +142,9 @@ async def test_prepare_hdf(
 ):
     writer = hdf_det.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
+    await hdf_det.stage()
+    # Only the calls after stage() are of interest
+    get_mock(hdf_det).reset_mock()
     await hdf_det.prepare(TriggerInfo(number_of_events=3))
     assert_has_calls(
         hdf_det,
@@ -182,6 +187,9 @@ async def test_prepare_multipart(
     name = factory_cls.__name__
     writer = det.get_plugin(name, adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
+    await det.stage()
+    # Only the calls after stage() are of interest
+    get_mock(det).reset_mock()
     await det.prepare(TriggerInfo(number_of_events=3))
     assert_has_calls(
         writer,
@@ -229,6 +237,7 @@ async def test_hdf_chunk_sized_from_flush_period(
     set_mock_value(det.driver.data_type, adcore.ADBaseDataType.UINT16)
     writer = det.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
+    await det.stage()
     await det.prepare(
         TriggerInfo(
             livetime=livetime,
@@ -238,6 +247,7 @@ async def test_hdf_chunk_sized_from_flush_period(
         )
     )
     assert await writer.num_frames_chunks.get_value() == expected_frames_per_chunk
+    await det.kickoff()
     (sr, *_) = [doc async for doc in det.collect_asset_docs(3)]
     assert sr[1]["parameters"]["chunk_shape"] == (
         expected_frames_per_chunk,
@@ -272,6 +282,7 @@ async def test_can_specify_different_uri_and_path(
     set_mock_value(writer.file_path_exists, True)
     await det.stage()
     await det.prepare(TriggerInfo())
+    await det.kickoff()
     docs = [doc async for doc in det.collect_asset_docs(1)]
 
     # Make sure we set the write path to the directory_path attr from our path info
@@ -329,6 +340,7 @@ async def test_can_override_uri_with_different_path_semantics(
     set_mock_value(writer.file_path_exists, True)
     await det.stage()
     await det.prepare(TriggerInfo())
+    await det.kickoff()
     docs = [doc async for doc in det.collect_asset_docs(1)]
 
     assert await writer.file_path.get_value() == f"{write_path}{expected_separator}"
@@ -362,6 +374,7 @@ async def test_stats_describe_raises_error_with_dbr_native(
 </Attributes>
 """,
     )
+    await hdf_det.stage()
     with pytest.raises(
         RuntimeError,
         match="NDAttribute mydetector-Temperature has dbrtype DBR_NATIVE,"
@@ -391,6 +404,7 @@ async def test_describe_different_color_modes(
     writer = hdf_det.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
     set_mock_value(hdf_det.driver.color_mode, color_mode)
+    await hdf_det.stage()
     if shape is RuntimeError:
         # Expected to fail for this mode
         with pytest.raises(
@@ -416,6 +430,7 @@ async def test_3d_dataset_shape(hdf_det: adcore.AreaDetector[adcore.ADBaseIO]):
     writer = hdf_det.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
     set_mock_value(hdf_det.driver.array_size_z, 10)
+    await hdf_det.stage()
     await hdf_det.prepare(TriggerInfo())
     describe = await hdf_det.describe()
     assert describe["detector"] == {

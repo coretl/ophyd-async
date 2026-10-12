@@ -7,6 +7,7 @@ from ophyd_async.core import (
     StaticPathProvider,
     TriggerInfo,
     callback_on_mock_put,
+    get_mock,
     init_devices,
     set_mock_value,
 )
@@ -46,6 +47,9 @@ async def test_deadtime(
 async def test_prepare_external_edge(
     test_adandor: adandor.AndorDetector,
 ):
+    await test_adandor.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_adandor).reset_mock()
     await test_adandor.prepare(
         TriggerInfo(
             trigger=DetectorTrigger.EXTERNAL_EDGE,
@@ -68,6 +72,9 @@ async def test_prepare_external_edge(
 async def test_prepare_forever(
     test_adandor: adandor.AndorDetector,
 ):
+    await test_adandor.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_adandor).reset_mock()
     await test_adandor.prepare(TriggerInfo(number_of_events=0))
     assert_has_calls(
         test_adandor.driver,

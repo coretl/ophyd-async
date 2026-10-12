@@ -13,6 +13,8 @@ three phases in order and threads a context object between them:
 - `complete()` → `FlyableLogic.on_complete(ctx)` blocks until the scan is done.
 
 `stage()`/`unstage()` run the logic's `on_stage`/`on_unstage`, which default to `stop`.
+Before `stage()`, and after `unstage()`, every verb but `stage()` raises; `unstage()`
+of a flyer that is not staged does nothing.
 
 ## Implementing FlyableLogic
 

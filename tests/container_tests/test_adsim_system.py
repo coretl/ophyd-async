@@ -162,15 +162,18 @@ def apply_baseline_settings(adsim: SimDetector) -> MsgGenerator[None]:
 def test_prepare_is_idempotent_and_sets_exposure_time(
     RE: RunEngine, adsim: SimDetector, bl01t_di_cam_01: None
 ) -> None:
-    def prepare_then_count() -> MsgGenerator[None]:
+    @bpp.stage_decorator([adsim])
+    @bpp.run_decorator()
+    def prepare_then_trigger() -> MsgGenerator[None]:
+        # prepare() must come after stage()
         yield from bps.prepare(
             adsim,
             TriggerInfo(livetime=0.2),
             wait=True,
         )
-        yield from bp.count([adsim])
+        yield from bps.trigger_and_read([adsim])
 
-    RE(prepare_then_count())
+    RE(prepare_then_trigger())
 
     actual_exposure_time: float = RE(bps.rd(adsim.driver.acquire_time)).plan_result
     assert actual_exposure_time == 0.2

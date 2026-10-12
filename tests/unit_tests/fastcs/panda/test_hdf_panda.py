@@ -11,6 +11,7 @@ from ophyd_async.core import (
     StaticPathProvider,
     TriggerInfo,
     callback_on_mock_put,
+    get_mock,
     init_devices,
     set_mock_value,
 )
@@ -20,7 +21,11 @@ from ophyd_async.fastcs.panda import (
     PandaCaptureMode,
     PandaHdf5DatasetType,
 )
-from ophyd_async.testing import assert_configuration, assert_has_calls
+from ophyd_async.testing import (
+    assert_configuration,
+    assert_has_calls,
+    wait_for_pending_wakeups,
+)
 
 PANDA_DETECTOR_NAME = "mock_panda"
 
@@ -78,6 +83,7 @@ async def test_open_returns_correct_descriptors_and_resources(
     hdf_panda: HDFPanda, table: DatasetTable, caplog, tmp_path
 ):
     set_mock_value(hdf_panda.data.datasets, table)
+    await hdf_panda.stage()
     with caplog.at_level(logging.WARNING):
         await hdf_panda.prepare(TriggerInfo(trigger=DetectorTrigger.EXTERNAL_LEVEL))
         description = await hdf_panda.describe()
@@ -99,6 +105,7 @@ async def test_open_returns_correct_descriptors_and_resources(
             "external": "STREAM:",
         }
 
+    await hdf_panda.kickoff()
     set_mock_value(hdf_panda.data.num_captured, 7)
     docs = [doc async for doc in hdf_panda.collect_asset_docs()]
     sr = docs[: len(table)]
@@ -134,6 +141,9 @@ async def test_open_returns_correct_descriptors_and_resources(
 
 
 async def test_open_sets_correct_signals(hdf_panda: HDFPanda, tmp_path):
+    await hdf_panda.stage()
+    # Only the calls after stage() are of interest
+    get_mock(hdf_panda).reset_mock()
     await hdf_panda.prepare(TriggerInfo(trigger=DetectorTrigger.EXTERNAL_LEVEL))
     assert_has_calls(
         hdf_panda,
@@ -150,6 +160,8 @@ async def test_open_sets_correct_signals(hdf_panda: HDFPanda, tmp_path):
 
 
 async def test_close_sets_correct_signals(hdf_panda: HDFPanda):
+    await hdf_panda.stage()
+    get_mock(hdf_panda).reset_mock()
     await hdf_panda.unstage()
     assert_has_calls(hdf_panda.pcap, [call.arm.put(False)])
     assert_has_calls(hdf_panda.data, [call.capture.put(False)])
@@ -161,6 +173,7 @@ async def test_flyscan_documents(hdf_panda: HDFPanda, tmp_path):
     assert config_description == {}
     await assert_configuration(hdf_panda, {})
     # Prepare for N frames
+    await hdf_panda.stage()
     await hdf_panda.prepare(
         TriggerInfo(
             trigger=DetectorTrigger.EXTERNAL_LEVEL,
@@ -319,6 +332,7 @@ async def test_flyscan_documents(hdf_panda: HDFPanda, tmp_path):
 
 
 async def test_get_indices_written(hdf_panda: HDFPanda):
+    await hdf_panda.stage()
     await hdf_panda.prepare(
         TriggerInfo(
             trigger=DetectorTrigger.EXTERNAL_LEVEL,
@@ -334,6 +348,7 @@ async def test_get_indices_written(hdf_panda: HDFPanda):
 
 async def test_oserror_when_hdf_dir_does_not_exist(hdf_panda: HDFPanda):
     set_mock_value(hdf_panda.data.directory_exists, False)
+    await hdf_panda.stage()
     with pytest.raises(OSError):
         await hdf_panda.prepare(TriggerInfo(trigger=DetectorTrigger.EXTERNAL_LEVEL))
 
@@ -342,3 +357,64 @@ async def test_deadtime(hdf_panda: HDFPanda):
     supported_triggers, deadtime = await hdf_panda.get_trigger_deadtime()
     assert deadtime == 8e-9
     assert supported_triggers == {DetectorTrigger.EXTERNAL_LEVEL}
+
+
+async def test_uc8_step_scan_stages_first_and_emits_stream_assets(
+    hdf_panda: HDFPanda, tmp_path
+):
+    """Use case 8, step: a trigger() gives one StreamDatum per dataset.
+
+    Written for the rewrite's lifecycle: stage() comes first. The PandA is
+    externally triggered, so prepare() arms it and trigger() waits for the point.
+    """
+    await hdf_panda.stage()
+
+    await hdf_panda.prepare(TriggerInfo(trigger=DetectorTrigger.EXTERNAL_LEVEL))
+    status = hdf_panda.trigger()
+    await wait_for_pending_wakeups(raise_if_exceeded=False)
+    assert not status.done
+    # The external trigger fires and the PandA captures the point
+    set_mock_value(hdf_panda.data.num_captured, 1)
+    await status
+    docs = [doc async for doc in hdf_panda.collect_asset_docs()]  # pyright: ignore[reportAttributeAccessIssue]
+    assert [(n, d.get("data_key")) for n, d in docs[:2]] == [
+        ("stream_resource", "x"),
+        ("stream_resource", "y"),
+    ]
+    assert [d["indices"] for n, d in docs[2:]] == [{"start": 0, "stop": 1}] * 2
+    assert await hdf_panda.read() == {}
+    await hdf_panda.unstage()
+
+
+def test_uc8_fly_scan_through_the_run_engine(RE, hdf_panda: HDFPanda):
+    """Use case 8, fly: stream assets covering N events, no Events."""
+    import bluesky.plan_stubs as bps  # noqa: PLC0415
+    import bluesky.preprocessors as bpp  # noqa: PLC0415
+
+    @bpp.stage_decorator([hdf_panda])
+    @bpp.run_decorator()
+    def plan():
+        yield from bps.prepare(
+            hdf_panda,
+            TriggerInfo(
+                trigger=DetectorTrigger.EXTERNAL_LEVEL,
+                collections_per_event=3,
+                number_of_events=2,
+            ),
+            wait=True,
+        )
+        yield from bps.declare_stream(hdf_panda, name="primary", collect=True)
+        yield from bps.kickoff(hdf_panda, wait=True)
+        # The external triggers fire and the PandA captures everything
+        set_mock_value(hdf_panda.data.num_captured, 6)
+        set_mock_value(hdf_panda.pcap.active, False)
+        yield from bps.collect_while_completing(
+            flyers=[hdf_panda], dets=[hdf_panda], flush_period=0.05
+        )
+
+    docs: dict[str, list] = {}
+    RE(plan(), lambda n, d: docs.setdefault(n, []).append(d))
+
+    assert [r["data_key"] for r in docs["stream_resource"]] == ["x", "y"]
+    assert "event" not in docs
+    assert [d["indices"]["stop"] for d in docs["stream_datum"]][-2:] == [2, 2]

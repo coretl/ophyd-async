@@ -1,15 +1,21 @@
+from collections import defaultdict
 from unittest.mock import ANY
 
+import bluesky.plan_stubs as bps
+import bluesky.preprocessors as bpp
+import numpy as np
 import pytest
+from bluesky import RunEngine
 
-from ophyd_async.core import StandardReadableFormat as Format
 from ophyd_async.core import (
+    EnableDisable,
     StaticPathProvider,
     TriggerInfo,
     callback_on_mock_put,
     init_devices,
     set_mock_value,
 )
+from ophyd_async.core import StandardReadableFormat as Format
 from ophyd_async.epics import adaravis, adcore, adsimdetector
 from ophyd_async.epics.core import epics_signal_r
 
@@ -71,6 +77,7 @@ async def test_step_scan_hdf_detector_with_stats_and_temp(
     assert config["det-driver-acquire_period"]["value"] == 0.1
     assert config["det-driver-acquire_time"]["value"] == 0.05
     # Check we need to call prepare or trigger before we can describe
+    await det.stage()
     with pytest.raises(RuntimeError, match="prepare.. must be called first"):
         await det.describe()
     # Need to tell it the path is valid
@@ -606,6 +613,7 @@ async def test_step_scan_keep_numimages(
     assert config["det-driver-acquire_period"]["value"] == 0.1
     assert config["det-driver-acquire_time"]["value"] == 0.05
     # Check we need to call prepare or trigger before we can describe
+    await det.stage()
     with pytest.raises(RuntimeError, match="prepare.. must be called first"):
         await det.describe()
     # Need to tell it the path is valid
@@ -694,3 +702,185 @@ async def test_step_scan_keep_numimages(
         TimeoutError, match="Timeout Error while waiting 0.1s to update"
     ):
         await det.trigger()
+
+
+# Use cases 6 and 7: several data logics on one detector, whichever one serves
+# the scan chosen by the HDF plugin's EnableCallbacks (spec section 2)
+
+
+def _fill_time_series(det, plugins: list[adcore.NDStatsIO], points: int):
+    """Behave like the IOC: arming a time series erases it, acquiring fills it."""
+
+    def erase(value):
+        if value:
+            for plugin in plugins:
+                set_mock_value(plugin.ts_current_point, 0)
+
+    def fill(value):
+        if value:
+            for plugin in plugins:
+                set_mock_value(
+                    plugin.ts_total,  # pyright: ignore[reportArgumentType]
+                    np.arange(points, dtype=np.float64),
+                )
+                set_mock_value(
+                    plugin.ts_timestamp,  # pyright: ignore[reportArgumentType]
+                    100.0 + np.arange(points),
+                )
+                set_mock_value(plugin.ts_current_point, points)
+
+    for plugin in plugins:
+        callback_on_mock_put(plugin.ts_acquire, erase)
+    callback_on_mock_put(det.driver.acquire, fill)
+
+
+def _fly_plan(det, info: TriggerInfo):
+    @bpp.stage_decorator([det])
+    @bpp.run_decorator()
+    def plan():
+        yield from bps.prepare(det, info, wait=True)
+        yield from bps.declare_stream(det, name="primary", collect=True)
+        yield from bps.kickoff(det, wait=True)
+        yield from bps.collect_while_completing(
+            flyers=[det], dets=[det], flush_period=0.05
+        )
+
+    return plan()
+
+
+@pytest.fixture
+async def superset_detector(static_path_provider: StaticPathProvider):
+    """Stats readables + stats time series + HDF; HDF's plugin picks the mode."""
+    stat = adcore.NDStatsIO("PREFIX:STAT:")
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector(
+            "PREFIX:",
+            adcore.ADWriterFactory.hdf(static_path_provider, enable_callbacks=False),
+            adcore.ADWriterFactory.stats(writer_suffix="TS:", writer_name="ts"),
+            plugins={"stats": stat},
+        )
+    det.set_readable_format(stat, Format.CHILD)
+    set_mock_value(det.driver.array_size_x, 1024)
+    set_mock_value(det.driver.array_size_y, 768)
+    set_mock_value(det.get_plugin("hdf", adcore.NDFileHDF5IO).file_path_exists, True)
+    return det
+
+
+def _uc6_fly_docs(RE: RunEngine, det) -> dict[str, list]:
+    hdf = det.get_plugin("hdf", adcore.NDFileHDF5IO)
+    set_mock_value(hdf.enable_callbacks, EnableDisable.DISABLE)
+    _fill_time_series(det, [det.get_plugin("ts", adcore.NDStatsIO)], points=3)
+    docs: dict[str, list] = defaultdict(list)
+    RE(_fly_plan(det, TriggerInfo(number_of_events=3)), lambda n, d: docs[n].append(d))
+    return docs
+
+
+def test_uc6_hdf_disabled_the_time_series_serves_a_fly_scan(
+    RE: RunEngine, superset_detector
+):
+    """Use case 6, HDF off: event pages from the time series, no stream assets."""
+    docs = _uc6_fly_docs(RE, superset_detector)
+
+    assert docs["stream_resource"] == []
+    (page,) = docs["event_page"]
+    (series,) = page["data"].values()
+    assert series == [[0.0], [1.0], [2.0]]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="detector-core rewrite: section 2 Naming: one name per quantity, the "
+    "time series is named after the readable det-stats-total",
+)
+def test_uc6_time_series_is_named_after_the_stats_readable(
+    RE: RunEngine, superset_detector
+):
+    docs = _uc6_fly_docs(RE, superset_detector)
+
+    (page,) = docs["event_page"]
+    assert set(page["data"]) == {"det-stats-total"}
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="detector-core rewrite: section 5.3/2 Naming: HDF enabled, the stats "
+    "readables and time series are shadowed by the file's NDAttributes",
+)
+async def test_uc6_hdf_enabled_the_file_serves_every_stats_quantity(superset_detector):
+    det = superset_detector
+    hdf = det.get_plugin("hdf", adcore.NDFileHDF5IO)
+    set_mock_value(hdf.enable_callbacks, EnableDisable.ENABLE)
+    await det.stage()
+    callback_on_mock_put(
+        det.driver.acquire, lambda v: set_mock_value(hdf.num_captured, 1)
+    )
+    await det.trigger()
+
+    description = await det.describe()
+
+    assert description["det-stats-total"]["external"] == "STREAM:"
+    assert "det-stats-total" not in await det.read()
+    assert list(description).count("det-stats-total") == 1
+
+
+@pytest.fixture
+async def two_roi_detector(tmp_path):
+    """Use case 7: two HDF writers and two time series, one per ROI."""
+    path_provider = StaticPathProvider(
+        lambda datakey_name=None: str(datakey_name), tmp_path
+    )
+    async with init_devices(mock=True):
+        det = adaravis.AravisDetector(
+            "PREFIX:",
+            adcore.ADWriterFactory.hdf(
+                path_provider,
+                writer_suffix="HDF1:",
+                writer_name="hdf1",
+                datakey_suffix="-roi1",
+                enable_callbacks=False,
+            ),
+            adcore.ADWriterFactory.hdf(
+                path_provider,
+                writer_suffix="HDF2:",
+                writer_name="hdf2",
+                datakey_suffix="-roi2",
+                enable_callbacks=False,
+            ),
+            adcore.ADWriterFactory.stats(
+                writer_suffix="TS1:", writer_name="ts1", datakey_suffix="-roi1"
+            ),
+            adcore.ADWriterFactory.stats(
+                writer_suffix="TS2:", writer_name="ts2", datakey_suffix="-roi2"
+            ),
+        )
+    set_mock_value(det.driver.array_size_x, 1024)
+    set_mock_value(det.driver.array_size_y, 768)
+    for name in ("hdf1", "hdf2"):
+        plugin = det.get_plugin(name, adcore.NDFileHDF5IO)
+        set_mock_value(plugin.enable_callbacks, EnableDisable.DISABLE)
+        set_mock_value(plugin.file_path_exists, True)
+    _fill_time_series(
+        det,
+        [
+            det.get_plugin("ts1", adcore.NDStatsIO),
+            det.get_plugin("ts2", adcore.NDStatsIO),
+        ],
+        points=2,
+    )
+    return det
+
+
+def test_uc7_hdf_disabled_both_time_series_serve_in_one_merged_page(
+    RE: RunEngine, two_roi_detector
+):
+    docs: dict[str, list] = defaultdict(list)
+    RE(
+        _fly_plan(two_roi_detector, TriggerInfo(number_of_events=2)),
+        lambda n, d: docs[n].append(d),
+    )
+
+    assert docs["stream_resource"] == []
+    (page,) = docs["event_page"]
+    roi1, roi2 = sorted(page["data"])
+    assert "roi1" in roi1 and "roi2" in roi2
+    assert page["data"][roi1] == page["data"][roi2] == [[0.0], [1.0]]

@@ -37,21 +37,22 @@ class EigerDetector(StandardDetector):
 
         # Need to do this first so the type hints are filled in
         connector = fastcs_connector(prefix, self)
-        self._logic = DetectorLogic(
-            EigerTriggerLogic(self.detector),
-            EigerAcquireLogic(self.detector, self.arm_when_ready),
-            odin.OdinDataLogic(
-                path_provider=path_provider,
-                odin=self.od,
-                detector_bit_depth=self.detector.bit_depth_image,
-                pixel_mask=self.pixel_mask,
-            ),
-        )
-
+        self._path_provider = path_provider
         self.set_readable_format(self.pixel_mask, StandardReadableFormat.CONFIG_SIGNAL)
 
         super().__init__(name=name, connector=connector)
 
     @cached_property
     def logic(self) -> DetectorLogic:
-        return self._logic
+        return DetectorLogic(
+            trigger=EigerTriggerLogic(self.detector),
+            acquire=EigerAcquireLogic(self.detector, self.arm_when_ready),
+            data=[
+                odin.OdinDataLogic(
+                    path_provider=self._path_provider,
+                    odin=self.od,
+                    detector_bit_depth=self.detector.bit_depth_image,
+                    pixel_mask=self.pixel_mask,
+                )
+            ],
+        )

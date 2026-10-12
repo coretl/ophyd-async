@@ -7,6 +7,7 @@ from ophyd_async.core import (
     StaticPathProvider,
     TriggerInfo,
     callback_on_mock_put,
+    get_mock,
     init_devices,
     set_mock_value,
 )
@@ -50,6 +51,9 @@ async def test_deadtime(
 async def test_prepare_external_edge(
     test_adkinetix: adkinetix.KinetixDetector,
 ):
+    await test_adkinetix.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_adkinetix).reset_mock()
     await test_adkinetix.prepare(
         TriggerInfo(
             trigger=DetectorTrigger.EXTERNAL_EDGE,
@@ -72,6 +76,9 @@ async def test_prepare_external_edge(
 async def test_prepare_external_level(
     test_adkinetix: adkinetix.KinetixDetector,
 ):
+    await test_adkinetix.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_adkinetix).reset_mock()
     await test_adkinetix.prepare(
         TriggerInfo(
             trigger=DetectorTrigger.EXTERNAL_LEVEL,
@@ -92,6 +99,9 @@ async def test_prepare_external_level(
 async def test_prepare_internal(
     test_adkinetix: adkinetix.KinetixDetector,
 ):
+    await test_adkinetix.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_adkinetix).reset_mock()
     await test_adkinetix.prepare(TriggerInfo(number_of_events=2, livetime=0.3))
     assert_has_calls(
         test_adkinetix.driver,

@@ -8,6 +8,7 @@ from ophyd_async.core import (
     StaticPathProvider,
     TriggerInfo,
     callback_on_mock_put,
+    get_mock,
     init_devices,
     set_mock_value,
 )
@@ -54,6 +55,9 @@ async def test_deadtime(
 async def test_prepare_external_edge(
     test_adaravis: adaravis.AravisDetector,
 ):
+    await test_adaravis.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_adaravis).reset_mock()
     await test_adaravis.prepare(
         TriggerInfo(
             trigger=DetectorTrigger.EXTERNAL_EDGE,
@@ -77,6 +81,9 @@ async def test_prepare_external_edge(
 async def test_prepare_internal(
     test_adaravis: adaravis.AravisDetector,
 ):
+    await test_adaravis.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_adaravis).reset_mock()
     await test_adaravis.prepare(TriggerInfo(number_of_events=11))
     assert_has_calls(
         test_adaravis.driver,

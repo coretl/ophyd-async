@@ -28,15 +28,18 @@ class SimBlobDetector(StandardDetector):
         self.pattern_generator = pattern_generator or PatternGenerator()
         for signal in config_sigs:
             self.set_readable_format(signal, Format.CONFIG_SIGNAL)
-        self._logic = DetectorLogic(
-            BlobTriggerLogic(pattern_generator=self.pattern_generator),
-            BlobAcquireLogic(pattern_generator=self.pattern_generator),
-            BlobDataLogic(
-                path_provider=path_provider, pattern_generator=self.pattern_generator
-            ),
-        )
+        self._path_provider = path_provider
         super().__init__(name=name)
 
     @cached_property
     def logic(self) -> DetectorLogic:
-        return self._logic
+        return DetectorLogic(
+            trigger=BlobTriggerLogic(pattern_generator=self.pattern_generator),
+            acquire=BlobAcquireLogic(pattern_generator=self.pattern_generator),
+            data=[
+                BlobDataLogic(
+                    path_provider=self._path_provider,
+                    pattern_generator=self.pattern_generator,
+                )
+            ],
+        )

@@ -142,9 +142,11 @@ class FlyMotorInfo(ConfinedModel):
 class _FlyStage(Enum):
     """Lifecycle stage of a `StandardFlyable`, used to enforce call ordering."""
 
-    IDLE = "IDLE"
+    UNSTAGED = "UNSTAGED"
+    STAGED = "STAGED"
     PREPARED = "PREPARED"
     KICKED_OFF = "KICKED_OFF"
+    COMPLETED = "COMPLETED"
 
 
 class StandardFlyable(
@@ -158,9 +160,10 @@ class StandardFlyable(
     This class must be inherited and have a `logic` @cached_property.
     For an ephemeral flyer in a plan, call `FlyableLogic.with_device` instead of
     inheriting. It owns the context threaded between the logic's stages and
-    enforces prepare -> kickoff -> complete ordering. `stage()`/`unstage()` run
-    the logic's `on_stage`/`on_unstage` (which default to `stop`) and reset the
-    context.
+    enforces stage -> prepare -> kickoff -> complete ordering: before `stage()`,
+    and after `unstage()`, every verb but `stage()` raises. `stage()`/`unstage()`
+    run the logic's `on_stage`/`on_unstage` (which default to `stop`) and reset
+    the context; `unstage()` of an unstaged flyer does nothing.
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -172,7 +175,7 @@ class StandardFlyable(
         # Context threaded prepare -> kickoff -> complete. Only meaningful once
         # prepared; access is guarded by _fly_stage.
         self._fly_ctx: CtxT = cast(CtxT, None)
-        self._fly_stage = _FlyStage.IDLE
+        self._fly_stage = _FlyStage.UNSTAGED
 
     @abstract_cached_property
     def logic(self) -> FlyableLogic[PrepareT, CtxT]:
@@ -189,6 +192,10 @@ class StandardFlyable(
         """
         raise NotImplementedError
 
+    def _check_staged(self, verb: str) -> None:
+        if self._fly_stage is _FlyStage.UNSTAGED:
+            raise RuntimeError(f"{self.name}: stage() must be called before {verb}()")
+
     @property
     def _prepared_fly_ctx(self) -> CtxT:
         """The prepare context, for callers outside prepare -> kickoff -> complete.
@@ -198,31 +205,41 @@ class StandardFlyable(
         -- would fail with an `AttributeError` on `None` rather than saying what
         was wrong.
         """
-        if self._fly_stage is _FlyStage.IDLE:
+        if self._fly_stage is _FlyStage.UNSTAGED:
+            raise RuntimeError(f"{self.name}: stage() must be called first")
+        if self._fly_stage is _FlyStage.STAGED:
             raise RuntimeError(f"{self.name}: prepare() must be called first")
         return self._fly_ctx
 
-    def _reset_fly_state(self) -> None:
-        self._fly_ctx = cast(CtxT, None)
-        self._fly_stage = _FlyStage.IDLE
+    def _set_fly_state(self, stage: _FlyStage, ctx: CtxT | None = None) -> None:
+        self._fly_ctx = cast(CtxT, ctx)
+        self._fly_stage = stage
 
     async def _on_stage(self) -> None:
+        # Staged before the logic runs, so a failed stage() is still unstaged
+        self._set_fly_state(_FlyStage.STAGED)
         await self.logic.on_stage()
-        self._reset_fly_state()
 
     async def _on_unstage(self) -> None:
-        await self.logic.on_unstage()
-        self._reset_fly_state()
+        if self._fly_stage is _FlyStage.UNSTAGED:
+            return
+        try:
+            await self.logic.on_unstage()
+        finally:
+            self._set_fly_state(_FlyStage.UNSTAGED)
 
     @AsyncStatus.wrap
     async def prepare(self, value: PrepareT) -> None:
         """Move to the start and set up the fly scan."""
-        self._fly_ctx = await self.logic.on_prepare(value)
-        self._fly_stage = _FlyStage.PREPARED
+        self._check_staged("prepare")
+        # A prepare that fails leaves the flyer staged but not prepared
+        self._set_fly_state(_FlyStage.STAGED)
+        self._set_fly_state(_FlyStage.PREPARED, await self.logic.on_prepare(value))
 
     @AsyncStatus.wrap
     async def kickoff(self) -> None:
         """Start the fly scan."""
+        self._check_staged("kickoff")
         if self._fly_stage is not _FlyStage.PREPARED:
             raise RuntimeError(
                 f"{self.name}: prepare() must be called before kickoff()"
@@ -241,6 +258,7 @@ class StandardFlyable(
         reusing the same watcher-update stream as `StandardMovable.set`. Any
         other flyer simply blocks with no progress updates.
         """
+        self._check_staged("complete")
         if self._fly_stage is not _FlyStage.KICKED_OFF:
             raise RuntimeError(
                 f"{self.name}: kickoff() must be called before complete()"
@@ -273,7 +291,7 @@ class StandardFlyable(
                     )
         else:
             await completing
-        self._fly_stage = _FlyStage.IDLE
+        self._fly_stage = _FlyStage.COMPLETED
 
 
 class _EphemeralFlyable(StandardFlyable[PrepareT, CtxT]):

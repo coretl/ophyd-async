@@ -66,6 +66,7 @@ async def test_seq_table_trigger_logic(mock_panda):
         set_mock_value(mock_panda.seq[1].active, value)
 
     flyer = trigger_logic.with_device()
+    await flyer.stage()
     await flyer.prepare(seq_table_info)
     await asyncio.gather(flyer.kickoff(), set_active(True))
     await asyncio.gather(flyer.complete(), set_active(False))
@@ -261,6 +262,7 @@ async def test_pcomp_trigger_logic(mock_panda):
         set_mock_value(mock_panda.pcomp[1].active, value)
 
     flyer = trigger_logic.with_device()
+    await flyer.stage()
     await flyer.prepare(pcomp_info)
     await asyncio.gather(flyer.kickoff(), set_active(True))
     await asyncio.gather(flyer.complete(), set_active(False))

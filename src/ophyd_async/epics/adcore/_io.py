@@ -255,7 +255,7 @@ class NDStatsIO(StandardReadable, NDPluginBaseIO):
     # ts_timestamp holds the per-point acquisition times. These are not
     # registered as readables: the scalars above serve read(), and the arrays
     # are consumed by StatsTimeSeriesDataLogic as event pages.
-    ts_acquire: A[SignalRW[bool], PvSuffix("TS:TSAcquire")]
+    ts_acquire: A[SignalRW[bool], PvSuffix("TS:TSAcquire"), EpicsOptions(wait=non_zero)]
     ts_num_points: A[SignalRW[int], PvSuffix("TS:TSNumPoints")]
     ts_current_point: A[SignalR[int], PvSuffix("TS:TSCurrentPoint")]
     ts_acquiring: A[SignalR[bool], PvSuffix("TS:TSAcquiring")]

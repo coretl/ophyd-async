@@ -41,7 +41,7 @@ def jungfrau(RE: RunEngine, tmp_path):
     [
         (
             TriggerInfo(trigger=DetectorTrigger.EXTERNAL_LEVEL),
-            "Trigger type DetectorTrigger.EXTERNAL_LEVEL not supported by 'jungfrau', "
+            "jungfrau: Trigger type DetectorTrigger.EXTERNAL_LEVEL not supported, "
             "supported types are: [EXTERNAL_EDGE, INTERNAL]",
         ),
         (
@@ -54,6 +54,7 @@ def jungfrau(RE: RunEngine, tmp_path):
 async def test_prepare_val_error_on_bad_trigger_info(
     trigger_info: TriggerInfo, match: str, jungfrau: JungfrauDetector
 ):
+    await jungfrau.stage()
     with pytest.raises(
         ValueError,
         match=re.escape(match),
@@ -63,6 +64,7 @@ async def test_prepare_val_error_on_bad_trigger_info(
 
 async def test_prepare_warn_on_small_exposure(jungfrau: JungfrauDetector, caplog):
     bad_trigger_info = TriggerInfo(livetime=1e-6)
+    await jungfrau.stage()
     with caplog.at_level(logging.WARNING):
         await jungfrau.prepare(bad_trigger_info)
     assert "Exposure time shorter than 2μs is not recommended" in caplog.messages
@@ -70,6 +72,7 @@ async def test_prepare_warn_on_small_exposure(jungfrau: JungfrauDetector, caplog
 
 async def test_arm(jungfrau: JungfrauDetector):
     mock = get_mock(jungfrau.detector)
+    await jungfrau.stage()
     await jungfrau.prepare(TriggerInfo())
     mock.reset_mock()
     callback_on_mock_execute(
@@ -81,6 +84,8 @@ async def test_arm(jungfrau: JungfrauDetector):
 
 
 async def test_disarm(jungfrau: JungfrauDetector):
+    await jungfrau.stage()
+    get_mock(jungfrau).reset_mock()
     await jungfrau.unstage()
     assert_has_calls(
         jungfrau.detector,
@@ -103,6 +108,9 @@ async def test_signals_set_in_pedestal_mode(jungfrau: JungfrauDetector):
     )
     mock = get_mock(jungfrau.detector)
     mock.reset_mock()
+    await jungfrau.stage()
+    # Only the calls after stage() are of interest
+    get_mock(jungfrau).reset_mock()
     await jungfrau.prepare(good_trigger_info)
     assert_has_calls(
         jungfrau.detector,
@@ -121,6 +129,9 @@ async def test_signals_set_in_standard_internal_mode(jungfrau: JungfrauDetector)
         collections_per_event=10,
         trigger=DetectorTrigger.INTERNAL,
     )
+    await jungfrau.stage()
+    # Only the calls after stage() are of interest
+    get_mock(jungfrau).reset_mock()
     await jungfrau.prepare(good_trigger_info)
     assert_has_calls(
         jungfrau.detector,
@@ -140,6 +151,9 @@ async def test_signals_set_in_standard_external_mode(jungfrau: JungfrauDetector)
         trigger=DetectorTrigger.EXTERNAL_EDGE,
         deadtime=1,
     )
+    await jungfrau.stage()
+    # Only the calls after stage() are of interest
+    get_mock(jungfrau).reset_mock()
     await jungfrau.prepare(good_trigger_info)
     assert_has_calls(
         jungfrau.detector,
@@ -155,6 +169,7 @@ async def test_signals_set_in_standard_external_mode(jungfrau: JungfrauDetector)
 
 async def test_error_in_pedestal_and_external_modes(jungfrau: JungfrauDetector):
     await jungfrau.acquisition_type.set(AcquisitionType.PEDESTAL)
+    await jungfrau.stage()
     with pytest.raises(
         ValueError,
         match="Jungfrau must be triggered internally while in pedestal mode.",
@@ -176,6 +191,7 @@ async def test_prepare_val_error_if_pedestal_mode_and_odd_number_of_events(
 
     trigger_info = TriggerInfo(livetime=1e-3, deadtime=1, collections_per_event=15)
 
+    await jungfrau.stage()
     with pytest.raises(
         ValueError,
         match=re.escape(

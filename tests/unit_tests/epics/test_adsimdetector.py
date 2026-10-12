@@ -6,6 +6,7 @@ from ophyd_async.core import (
     DetectorTrigger,
     StaticPathProvider,
     TriggerInfo,
+    get_mock,
     init_devices,
     set_mock_value,
 )
@@ -43,6 +44,9 @@ async def test_deadtime(
 async def test_prepare_internal(
     test_adsimdetector: adsimdetector.SimDetector,
 ):
+    await test_adsimdetector.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_adsimdetector).reset_mock()
     await test_adsimdetector.prepare(TriggerInfo(number_of_events=11))
     assert_has_calls(
         test_adsimdetector.driver,

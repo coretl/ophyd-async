@@ -73,7 +73,7 @@ class DetectorDataLogic(Generic[DataCtxT]):
     async def make_data_provider(
         self, datakey_name: str, num_collections: int,
         period: float, flush_period: float,
-    ) -> tuple[StreamableDataProvider | PageableDataProvider, DataCtxT] | None: ...
+    ) -> tuple[DataProvider, DataCtxT] | None: ...
     async def start(self, ctx: DataCtxT) -> None: ...
 ```
 
@@ -97,17 +97,20 @@ both tiers are told the period, so either can size a chunk or a buffer against i
 ### The tier is the type of the provider returned
 
 There is no declaration of which tier a logic implements and no override detection: a logic
-returning a [](#StreamableDataProvider) is unbounded for this scan, one returning a
-[](#PageableDataProvider) is bounded, and one may return either depending on what it is asked
-for. Returning `None` means "not this scan" — how a finite buffer declines an unbounded one,
+returning a [](#StreamableDataProvider) publishes stream assets for this scan, one returning a
+[](#PageableDataProvider) publishes event pages, and one may return either depending on what it
+is asked for. Whether a logic needs a fixed number of collections is its own behaviour, not a
+tier. Returning `None` means "not this scan" — how a finite buffer declines an unbounded one,
 or a plugin that is switched off declines any. It is neither an error nor warned about, as
 agreed in #1364: the point is that a detector may carry more logics than one scan uses.
 
 ### `PageableDataProvider`, with readings derived from pages
 
-The bounded tier returns one provider type, which emits pages. Readings are derived from those
-pages rather than being a separate code path: a step-scan prepare has `number_of_events == 1`,
-so its page holds exactly one event, which extracts to a single reading.
+The pageable tier returns one provider type, which emits pages. Its
+`make_page(collections_from, collections_to, collections_per_event)` is stateless: the detector
+tracks what it has published. Readings are derived from pages rather than being a separate
+code path: `read()` asks each provider for the current step point's event only, which extracts
+to a single reading, so a second `read()` gives the same answer.
 `collections_per_event` appears in the datakey shape exactly as for a
 `StreamableDataProvider`.
 
@@ -118,10 +121,12 @@ cannot simply be forwarded: an explicit `prepare(TriggerInfo(number_of_events=10
 the data logic a period of 0. Instead `DetectorTriggerLogic.default_trigger_info()` is extended
 to return the current `livetime` and `deadtime`, and `prepare()` fills a zero `livetime` in
 from it *after* preparing the trigger logic, which [](./0012-detector-rewrite.md) already
-requires to come first, so the hardware holds the real values by then. Data logics therefore
-never see a period of 0.
+requires to come first, so the hardware holds the real values by then. This reads hardware
+state, so like the implicit prepare in `trigger()` it happens only when
+`OPHYD_ASYNC_PRESERVE_DETECTOR_STATE=YES`; otherwise a zero `livetime` stays 0 and data logics
+get a period of 0, meaning "use what is on the hardware".
 
-### Streaming providers are reused, finite buffers are re-made
+### Streaming providers are reused, pageable providers are re-made
 
 Providers are reused while the scan they were made for is unchanged, so a step scan does not
 reopen its file on every point. The reuse key is `collections_per_event` *and* the period,
@@ -129,34 +134,31 @@ because both are baked into a `StreamResource` when it is made — the shape fro
 chunking from the second — and areaDetector's `num_frames_chunks` can only be set before
 `capture` starts. A period change therefore starts a new file.
 
-A finite buffer is re-made on every `prepare()` regardless, and on every `trigger()` after the
-first one since that `prepare()`, because re-making it is what re-arms it; `kickoff()` never
-re-makes one. That is exactly the set of places a buffer should and should not be re-armed: the
-first point of a step scan is already armed by the `prepare()` in front of it, and re-arming it
-again would erase an empty buffer, putting a spurious stop/start on the arming control before a
-frame had arrived. A re-armed buffer sitting at 0 alongside a monotonic HDF writer at 15 would
-trip the `_all_the_same` reducer, so the two kinds are tracked separately.
+A pageable provider is re-made on every `prepare()` regardless, and every data logic is asked
+again, so one that sat the last scan out can serve the next. On every `trigger()` after the
+first one since that `prepare()`, `DataProvider.step_boundary()` is called on every serving
+provider: a finite buffer re-arms itself there, and a source that keeps counting does nothing.
+`kickoff()` never calls it. That is exactly the set of places a buffer should and should not be
+re-armed: the first point of a step scan is already armed by the `prepare()` in front of it,
+and re-arming it again would erase an empty buffer, putting a spurious stop/start on the arming
+control before a frame had arrived.
 
-### A bounded provider's progress baseline is zero in `trigger()`
+### The progress baseline is read live
 
-`trigger()` takes a bounded provider's starting progress to be 0 rather than reading it back,
-while `kickoff()` reads it live.
-
-It is tempting to derive this instead of stating it, since re-arming refreshes
-`collections_written`, and a stats time series is erased by the `TSAcquire` write in its
-`start` — so the refreshed read already returns zero. That only holds when the data logic
-performs the erase. Where the erase belongs to the acquire control, as with the CTR-08's
-`EraseStart`, it happens after that read, so the baseline would be the stale pre-erase value
-and the detector would wait for twice the buffer's length and hang. Stating the rule keeps the
-framework agnostic about which component erases.
+`trigger()` reads every provider's starting progress after `step_boundary()`, and `kickoff()`
+reads it too, so a source that keeps counting is measured from where it is. A stats time series
+is erased by the `TSAcquire` write in its `start` and its `step_boundary()`, which wait for
+`TSCurrentPoint` to read 0, so its baseline is 0. Where the erase belongs to the acquire
+control, as with the CTR-08's `EraseStart`, it happens after that read, so the baseline is the
+stale pre-erase value.
 
 ### Erase and start controls belong to the acquire logic
 
 Where one control both starts acquisition and clears the data buffer, it belongs to the
 `DetectorAcquireLogic`, alongside the stop control and the idle status. Nothing needs to
 declare the erase to the framework: a data logic's `start` always runs before
-`start_acquiring()`, so the buffer is sized before the control fires, and the baseline rule
-above means the detector does not care who erased it.
+`start_acquiring()`, so the buffer is sized before the control fires. The live baseline above
+does depend on who erased it.
 
 The trigger/acquire/data split therefore survives these devices, with the three logics sharing
 one IO device exactly as the areaDetector logics share a `driver`. The split is of concerns,
@@ -164,16 +166,13 @@ not of hardware.
 
 ### Logic objects fill exactly one role
 
-Building a `DetectorLogic` raises if an object satisfies more than one of the three logic
-roles, directing the author to pass separate objects. A device whose concerns all live on one
-control is a natural candidate for a single combined object, and registration is a chain of
-`isinstance` tests, so such an object would silently register as the first role it matched and
-have the others dropped without a word.
+`DetectorLogic(trigger=..., acquire=..., data=(...))` takes each role by keyword, so an object
+fills the role it is passed as and no other.
 
 ### A detector produces stream assets or event pages, never both
 
-The two bluesky protocols are mutually exclusive by design, to avoid a device producing blocks
-of two different sizes, so a detector whose logics would produce both raises. How the
+The bundler collects stream assets or event pages from a device, not both, so a detector
+whose logics would produce both raises. How the
 applicable verb is exposed, and the one case where the two may be carried together, are in
 [](./0023-detector-is-a-flyable.md).
 

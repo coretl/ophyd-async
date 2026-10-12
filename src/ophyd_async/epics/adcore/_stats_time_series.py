@@ -5,31 +5,36 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ophyd_async.core import (
+    DEFAULT_TIMEOUT,
     Array1D,
     DetectorDataLogic,
     EnableDisable,
     EventPageDataProvider,
     SignalR,
+    set_and_wait_for_value,
+    wait_for_value,
 )
+from ophyd_async.epics.core import stop_busy_record
 
 from ._io import NDStatsIO, NDStatsTSAcquireMode, plugin_is_enabled
 
 
 @dataclass
 class StatsTimeSeriesDataLogic(DetectorDataLogic[int]):
-    """Bounded data logic for an `NDPluginStats` time series.
+    """Data logic publishing an `NDPluginStats` time series as event pages.
 
     For detectors that write no file: the stats plugin holds each statistic in a
-    fixed-length buffer that must be sized before acquisition, so this is a
-    data logic that emits event pages. One plugin has
+    fixed-length buffer that must be sized before acquisition, so this logic
+    sits out a scan with no fixed number of collections. One plugin has
     one time-series control (`ts_acquire`, `ts_num_points`) shared across many
     arrays, so one logic covers many arrays with the control embedded.
 
-    The buffer is sized and armed in `start` by writing 1 to
-    ``ts_acquire``, which erases the arrays and resets the current point before
-    the detector's acquire logic drives the camera; its frames then feed the time
-    series via NDArray callbacks. A detector that writes a file should pull stats
-    into the file as NDAttributes instead (see `ADHDFDataLogic`).
+    The buffer is sized and armed in `start`, and re-armed at each step point
+    after the first, by writing 1 to ``ts_acquire``, which erases the arrays and
+    resets the current point before the detector's acquire logic drives the
+    camera; its frames then feed the time series via NDArray callbacks. A
+    detector that writes a file should pull stats into the file as NDAttributes
+    instead (see `ADHDFDataLogic`).
 
     :param stats: the stats plugin whose time series to read
     :param stat_signals: datakey suffix to the array signal for each statistic to
@@ -69,6 +74,7 @@ class StatsTimeSeriesDataLogic(DetectorDataLogic[int]):
             self._arrays(datakey_name),
             self.stats.ts_current_point,
             self.stats.ts_timestamp,
+            rearm=self._arm,
         )
         return provider, num_collections
 
@@ -83,14 +89,20 @@ class StatsTimeSeriesDataLogic(DetectorDataLogic[int]):
         if self.enable_callbacks:
             coros.append(self.stats.enable_callbacks.set(EnableDisable.ENABLE))
         await asyncio.gather(*coros)
+        await self._arm()
+
+    async def _arm(self) -> None:
         # Writing 1 to ts_acquire clears the arrays and resets ts_current_point to
-        # 0, so the buffer is armed and empty before the detector's frames arrive.
-        # This is the data logic performing the erase itself, which is why
-        # trigger()'s zero baseline is correct (see ADR 0022).
-        await self.stats.ts_acquire.set(True)
+        # 0. The put completes when the buffer is full, so do not wait for it.
+        await set_and_wait_for_value(
+            self.stats.ts_acquire, True, wait_for_set_completion=False
+        )
+        # The IOC resets the count within the put, but its monitor may arrive
+        # after the put's readback, and the detector reads the count next
+        await wait_for_value(self.stats.ts_current_point, 0, timeout=DEFAULT_TIMEOUT)
 
     async def stop(self) -> None:
-        await self.stats.ts_acquire.set(False)
+        await stop_busy_record(self.stats.ts_acquire)
 
     def get_hinted_fields(self, datakey_name: str) -> Sequence[str]:
         return list(self._arrays(datakey_name))

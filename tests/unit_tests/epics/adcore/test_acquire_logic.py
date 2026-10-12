@@ -6,6 +6,7 @@ import pytest
 
 from ophyd_async.core import (
     callback_on_mock_put,
+    get_mock,
     init_devices,
     set_mock_value,
 )
@@ -26,6 +27,9 @@ async def adbase_detector() -> adcore.AreaDetector[adcore.ADBaseIO]:
 async def test_acquire_logic_trigger_internal_calls_acquire(
     adbase_detector: adcore.AreaDetector[adcore.ADBaseIO],
 ):
+    await adbase_detector.stage()
+    # Only the calls after stage() are of interest
+    get_mock(adbase_detector).reset_mock()
     await adbase_detector.trigger()
     assert_has_calls(
         adbase_detector.driver,
@@ -58,6 +62,7 @@ async def test_acquire_logic_when_arming_times_out(
     callback_on_mock_put(adbase_detector.driver.acquire, sleep_for_a_bit)
 
     with patch("ophyd_async.epics.adcore._acquire_logic.DEFAULT_TIMEOUT", 0.05):
+        await adbase_detector.stage()
         with pytest.raises(
             TimeoutError,
             match=re.escape(
@@ -84,6 +89,7 @@ async def test_acquire_logic_wait_for_idle_in_bad_state(
         adbase_detector.driver.detector_state,
         adcore.ADState.ERROR,
     )
+    await adbase_detector.stage()
     with patch("ophyd_async.epics.adcore._acquire_logic.DEFAULT_TIMEOUT", 0.05):
         with pytest.raises(ValueError) as exc_info:
             await adbase_detector.trigger()
@@ -118,12 +124,15 @@ async def test_start_acquiring_driver_and_ensure_status_timing(
             adcore.ADState.IDLE,
         )
 
+    await adbase_detector.stage()
     await asyncio.gather(adbase_detector.trigger(), complete_acquire())
 
 
 async def test_acquire_logic_disarm(
     adbase_detector: adcore.AreaDetector[adcore.ADBaseIO],
 ):
+    await adbase_detector.stage()
+    get_mock(adbase_detector).reset_mock()
     await adbase_detector.unstage()
     assert_has_calls(
         adbase_detector.driver,
@@ -148,6 +157,7 @@ async def test_start_acquiring_driver_and_ensure_status_disconnected(
     states are available.
 
     """
+    await adbase_detector.stage()
     with pytest.raises(asyncio.TimeoutError) as exc:
         await adbase_detector.trigger()
     assert (

@@ -140,9 +140,11 @@ async def test_get_ndarray_resource_info_undefined_datatype(
         )
     set_mock_value(det.driver.data_type, adcore.ADBaseDataType.UNDEFINED)
     set_mock_value(det.get_plugin("hdf", adcore.NDFileHDF5IO).file_path_exists, True)
+    await det.stage()
     with pytest.raises(
         ValueError,
-        match=r"^mock\+ca://PREFIX:DRV:DataType_RBV is blank, this is not supported$",
+        match=r"^det: mock\+ca://PREFIX:DRV:DataType_RBV is blank, "
+        r"this is not supported$",
     ):
         await det.prepare(TriggerInfo())
 
@@ -159,8 +161,9 @@ async def test_get_ndarray_resource_info_unsupported_color_mode(
         )
     set_mock_value(det.driver.color_mode, adcore.ADBaseColorMode.BAYER)
     set_mock_value(det.get_plugin("hdf", adcore.NDFileHDF5IO).file_path_exists, True)
+    await det.stage()
     with pytest.raises(
         RuntimeError,
-        match=r"^Unsupported ColorMode Bayer! Only Mono and RGB1 are supported\.$",
+        match=r"^det: Unsupported ColorMode Bayer! Only Mono and RGB1 are supported\.$",
     ):
         await det.prepare(TriggerInfo())

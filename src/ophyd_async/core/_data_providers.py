@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -12,17 +12,37 @@ from ._signal import SignalR, SignalW
 from ._utils import ConfinedModel, error_if_none, gather_dict, get_dtype
 
 
-class StreamableDataProvider:
+class DataProvider:
+    """What a [](#DetectorDataLogic) makes to publish one scan's data.
+
+    The two kinds, [](#StreamableDataProvider) and [](#PageableDataProvider),
+    differ in how the data is published; what they share is here.
+    """
+
+    #: Counts the collections written so far
     collections_written_signal: SignalR[int]
 
     @abstractmethod
     async def make_datakeys(self, collections_per_event: int) -> dict[str, DataKey]:
-        """Return a DataKey for each Signal that produces a Reading.
+        """Return a DataKey for each field this provider produces.
 
         Called before the first exposure is taken.
 
         :param collections_per_event: this should appear in the shape of each DataKey
         """
+
+    async def step_boundary(self) -> None:
+        """Get ready for the next point of a step scan.
+
+        Called at each step point after the first, before the detector reads
+        `collections_written_signal` as that point's starting count. A finite
+        buffer re-arms itself here; a source that keeps counting does nothing,
+        which is the default.
+        """
+
+
+class StreamableDataProvider(DataProvider):
+    """Publishes its data as stream assets: a StreamResource and StreamDatums."""
 
     async def make_stream_docs(
         self, collections_written: int, collections_per_event: int
@@ -36,40 +56,26 @@ class StreamableDataProvider:
             yield
 
 
-class PageableDataProvider:
-    """For bounded data held in a finite buffer, emitted as event pages.
+class PageableDataProvider(DataProvider):
+    """Publishes its data as event pages.
 
-    Used by data logics whose device must be told how many collections to
-    expect before it starts acquiring, because it holds a finite buffer that
-    has to be sized upfront: an areaDetector stats time series (`TSNumPoints`),
-    or a scaler whose MCA array length is the frame count. Such a device
-    produces its data as event pages at the end of an event rather than as
-    stream datums as it goes.
-
-    A step-scan event has a single collection window, so `make_pages` yields
-    one page of one event, which `StandardDetector.read` extracts to a single
-    reading; the same `make_pages` serves fly-scan collection.
+    For a source read back as arrays rather than written to a file: an
+    areaDetector stats time series, or a scaler's MCA arrays. The detector
+    keeps track of what it has already published, so `make_page` is asked for
+    a range of collections and holds no state of its own.
     """
 
-    collections_written_signal: SignalR[int]
-
     @abstractmethod
-    async def make_datakeys(self, collections_per_event: int) -> dict[str, DataKey]:
-        """Return a DataKey for each field this provider produces.
+    async def make_page(
+        self, collections_from: int, collections_to: int, collections_per_event: int
+    ) -> PartialEventPage | None:
+        """Return one page of the events in a range of collections.
 
-        Called before the first exposure is taken.
-
-        :param collections_per_event: this should appear in the shape of each DataKey
-        """
-
-    @abstractmethod
-    def make_pages(
-        self, collections_written: int, collections_per_event: int
-    ) -> AsyncIterator[PartialEventPage]:
-        """Emit event pages for collections written since the last call.
-
-        :param collections_written: how many collections have been written so far
+        :param collections_from: the first collection of the first event
+        :param collections_to: the collection after the last one to include
         :param collections_per_event: how many collections make up one event
+        :return: a page of `(collections_to - collections_from) //
+            collections_per_event` events, or `None` if that is 0
         """
 
 
@@ -86,6 +92,8 @@ class EventPageDataProvider(PageableDataProvider):
     :param data: datakey (already suffixed) to the array signal that backs it
     :param collections_written_signal: counts the collections filled so far
     :param timestamps: the acquisition time of each collection
+    :param rearm: clears the arrays and restarts filling them, called at each
+        step point after the first; `None` for arrays that keep filling
     """
 
     def __init__(
@@ -93,11 +101,12 @@ class EventPageDataProvider(PageableDataProvider):
         data: Mapping[str, SignalR[Array1D[Any]]],
         collections_written_signal: SignalR[int],
         timestamps: SignalR[Array1D[np.float64]],
+        rearm: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.data = dict(data)
         self.collections_written_signal = collections_written_signal
         self.timestamps = timestamps
-        self.last_emitted = 0
+        self.rearm = rearm
 
     async def make_datakeys(self, collections_per_event: int) -> dict[str, DataKey]:
         return {
@@ -112,13 +121,16 @@ class EventPageDataProvider(PageableDataProvider):
             for datakey, signal in self.data.items()
         }
 
-    async def make_pages(
-        self, collections_written: int, collections_per_event: int
-    ) -> AsyncIterator[PartialEventPage]:
-        events = collections_written // collections_per_event
-        if events <= self.last_emitted:
-            return
-        new = range(self.last_emitted, events)
+    async def step_boundary(self) -> None:
+        if self.rearm:
+            await self.rearm()
+
+    async def make_page(
+        self, collections_from: int, collections_to: int, collections_per_event: int
+    ) -> PartialEventPage | None:
+        events = range((collections_to - collections_from) // collections_per_event)
+        if not events:
+            return None
         # Read every array and the per-collection timestamps in one parallel batch
         read: dict[SignalR[Array1D[Any]], Array1D[Any]] = await gather_dict(
             {
@@ -126,31 +138,26 @@ class EventPageDataProvider(PageableDataProvider):
                 for signal in (*self.data.values(), self.timestamps)
             }
         )
+        starts = [collections_from + e * collections_per_event for e in events]
         stamps = read[self.timestamps]
-        # One timestamp per event: the acquisition time of that event's last
-        # collection.
+        # One timestamp per event: the acquisition time of its last collection
         event_times = [
-            float(stamps[(event + 1) * collections_per_event - 1]) for event in new
+            float(stamps[start + collections_per_event - 1]) for start in starts
         ]
-        page: PartialEventPage = {
+        return {
             # TODO: numpy arrays are not in PartialEventPage's value type, but
             # they round trip through the bundler fine; fix upstream in
             # event-model rather than converting to lists here
             "data": {  # type: ignore[typeddict-item]
                 datakey: [
-                    read[signal][
-                        event * collections_per_event : (event + 1)
-                        * collections_per_event
-                    ]
-                    for event in new
+                    read[signal][start : start + collections_per_event]
+                    for start in starts
                 ]
                 for datakey, signal in self.data.items()
             },
             "time": event_times,
             "timestamps": dict.fromkeys(self.data, event_times),
         }
-        self.last_emitted = events
-        yield page
 
 
 class StreamResourceInfo(ConfinedModel):

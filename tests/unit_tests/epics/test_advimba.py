@@ -8,6 +8,7 @@ from ophyd_async.core import (
     StaticPathProvider,
     TriggerInfo,
     callback_on_mock_put,
+    get_mock,
     init_devices,
     set_mock_value,
 )
@@ -58,6 +59,9 @@ async def test_deadtime(
 async def test_prepare_external_level(
     test_advimba: advimba.VimbaDetector,
 ):
+    await test_advimba.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_advimba).reset_mock()
     await test_advimba.prepare(
         TriggerInfo(
             trigger=DetectorTrigger.EXTERNAL_LEVEL,
@@ -80,6 +84,9 @@ async def test_prepare_external_level(
 async def test_prepare_external_edge(
     test_advimba: advimba.VimbaDetector,
 ):
+    await test_advimba.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_advimba).reset_mock()
     await test_advimba.prepare(
         TriggerInfo(
             trigger=DetectorTrigger.EXTERNAL_EDGE,
@@ -104,6 +111,9 @@ async def test_prepare_external_edge(
 async def test_prepare_internal(
     test_advimba: advimba.VimbaDetector,
 ):
+    await test_advimba.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_advimba).reset_mock()
     await test_advimba.prepare(TriggerInfo(number_of_events=11))
     assert_has_calls(
         test_advimba.driver,

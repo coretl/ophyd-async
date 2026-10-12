@@ -28,21 +28,20 @@ The orchestration moves with them: preparing the trigger logic, making the data 
 arming, and waiting for collections are all its methods now. It holds **no** back-reference
 to its Device, so [](./0017-standard-movable.md) continues to hold unqualified.
 
-A detector builds it in `__init__` and returns it from `logic`:
+A detector builds it in `logic`:
 
 ```python
 class MyDetector(StandardDetector):
     def __init__(self, prefix: str, name: str = "") -> None:
         self.driver = MyDriverIO(prefix)
-        self._logic = DetectorLogic(
-            MyTriggerLogic(self.driver),
-            MyAcquireLogic(self.driver),
-        )
         super().__init__(name=name)
 
     @cached_property
     def logic(self) -> DetectorLogic:
-        return self._logic
+        return DetectorLogic(
+            trigger=MyTriggerLogic(self.driver),
+            acquire=MyAcquireLogic(self.driver),
+        )
 ```
 
 `add_detector_logics()` is removed rather than kept as a forwarder: a detector's logics are
@@ -61,9 +60,10 @@ property to be concrete. For an ad-hoc detector in a plan or a test,
 ### One thing the logic cannot get from its own fields
 
 Data logics name their datakeys after the Device, whose name does not exist until
-`init_devices` calls `set_name` on context exit. `StandardDetector.set_name` pushes it into
-`DetectorLogic.datakey_prefix` — one string, set at the moment it exists, rather than a
-reference to the whole Device.
+`init_devices` calls `set_name` on context exit. `StandardDetector` passes its name into the
+two `DetectorLogic` calls that make datakeys, `serve_data()` at prepare and
+`get_hinted_fields()`, and adds it to the errors the logic raises, rather than the logic
+holding a reference to the Device.
 
 ### Which collect verb to expose is the Device's business
 
@@ -74,11 +74,11 @@ device that is not a `WritesStreamAssets` — so a detector that declared both w
 pages silently dropped, and one that declared neither could not fly at all.
 
 So `StandardDetector.prepare()` binds whichever verb applies as a real instance attribute,
-and removes the other. It is the Device that does this, from what `DetectorLogic.data` holds
+and removes the other. It is the Device that does this, from the providers the logic is serving
 after preparing; the logic reports what it made and is not told where that goes, so it holds
-no back-reference. Only `prepare()` does it: re-arming a bounded provider on each point of a
-step scan cannot change which verb applies, because the providers are re-made from the same
-`TriggerInfo` that `prepare()` used.
+no back-reference. Only `prepare()` binds, and `stage()`/`unstage()` unbind: the step-boundary
+re-arm on each point of a step scan cannot change which verb applies, because it changes no
+provider.
 
 Choosing from the static type is a bundler limitation rather than a fact about detectors: a
 device knows what it produced, and the bundler could decide from *that*, erroring only if
@@ -86,7 +86,7 @@ one device reported both ways in the same run. That change is a few lines in
 `RunBundler.collect`, and with it both verbs become plain methods and the binding here goes
 away. Until it is released, binding per prepare is what works against a released bluesky.
 
-### Mixing bounded and unbounded is an error unless the bounded keys are shadowed
+### Mixing pageable and streamable is an error unless the pageable keys are shadowed
 
 [](./0022-bounded-data-logic-tier.md) made carrying both kinds of data logic an error, because
 the bundler treats stream assets and event pages as mutually exclusive. Carrying both is still
@@ -94,7 +94,9 @@ useful, though: the same quantity can be written durably into a file *and* read 
 buffer — an areaDetector stats total, which the HDF writer pulls in as an NDAttribute.
 
 So the rule relaxes. Where **every** datakey a finite buffer would produce is also produced
-by the stream assets, the durable copy wins and the buffer sits the scan out, unarmed.
+by the stream assets, with the same shape and dtype, the durable copy wins and the buffer sits
+the scan out, unarmed. A registered signal is shadowed the same way by a provider key, and is
+dropped from `read()`, `describe()` and `hints`.
 Anything a buffer would produce that the file does not cover is still an error, naming the
 uncovered keys. Nothing has been started when that is decided, because
 `make_data_provider` describes without acquiring (same ADR).
@@ -130,14 +132,14 @@ because they outlive a single prepare → kickoff → complete cycle in two ways
 reuses an open file across its points, and `collect_while_completing` collects *after*
 `complete()` has returned the flyer to IDLE. So the data verbs — `read`, `describe`,
 `describe_collect`, `collect_asset_docs`, `collect_pages`, `get_index` — go through
-`DetectorLogic.data`, which is cleared by `stage()`/`unstage()`, while the fly context
+the logic's data set, which is cleared by `stage()`/`unstage()`, while the fly context
 enforces the ordering of the fly verbs.
 
-`trigger()` therefore needs no context of its own, beyond a `needs_rearm` flag on the fly
-context. It prepares implicitly if nothing has been, then asks the data state to re-arm what
-needs re-arming: a finite buffer holds one event at a time so it is re-made per point, while a
-streaming provider carries on. The flag is what keeps the first point from being re-armed on
-top of the `prepare()` that just armed it. The trigger logic is not re-prepared per point, so
+`trigger()` therefore needs no context of its own, beyond a count of triggers on the fly
+context. It prepares implicitly if nothing has been, then from the second point on calls each
+serving provider's `step_boundary()`: a finite buffer holding one event at a time re-arms
+itself, while a streaming provider carries on. The count is what keeps the first point from
+being re-armed on top of the `prepare()` that just armed it. The trigger logic is not re-prepared per point, so
 a step scan does not repeat its puts.
 
 ### One context type, not one per stage
@@ -159,16 +161,17 @@ kickoff*, which is exactly what a reader needs to know.
 
 ## Consequences
 
-- `StandardDetector` subclasses build a `DetectorLogic` in `__init__` and return it from
-  `logic`; `det.add_detector_logics(*logics)` is gone, and a logic conflict is reported when
-  the detector is constructed rather than at the `add` call.
+- `StandardDetector` subclasses build a `DetectorLogic` in `logic`;
+  `det.add_detector_logics(*logics)` is gone.
 - `kickoff()` → `kickoff()` without an intervening `complete()` is rejected, and so is a
   second `kickoff()` after one. The old detector allowed both, because it only checked that
   a prepare context existed.
 - `events_to_kickoff` is removed from the public API.
 - Calling a verb before `prepare()` says `<name>: prepare() must be called first` instead of
-  `Prepare not run`.
+  `Prepare not run`. Before `stage()`, and after `unstage()`, every verb but `stage()` raises,
+  for every `StandardFlyable`.
 - A detector satisfies neither `WritesStreamAssets` nor `EventPageCollectable` until it has
   been prepared. Everything in the RunEngine that dispatches on them runs after prepare.
-- `prepare`, `kickoff`, `complete`, `stage` and `unstage` are no longer implemented on
-  `StandardDetector` at all, so a change to the flyer lifecycle reaches detectors too.
+- `complete`, `stage` and `unstage` are no longer implemented on `StandardDetector`, and
+  `prepare` and `kickoff` add the detector's own checks around the flyer's, so a change to the
+  flyer lifecycle reaches detectors too.

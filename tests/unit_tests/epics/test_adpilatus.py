@@ -8,6 +8,7 @@ from ophyd_async.core import (
     StaticPathProvider,
     TriggerInfo,
     callback_on_mock_put,
+    get_mock,
     init_devices,
     set_mock_value,
 )
@@ -82,6 +83,7 @@ async def test_times_out_if_not_armed(
     test_adpilatus: adpilatus.PilatusDetector,
 ):
     set_mock_value(test_adpilatus.driver.armed, False)
+    await test_adpilatus.stage()
     with patch(
         "ophyd_async.epics.adcore._acquire_logic.DEFAULT_TIMEOUT",
         0.01,
@@ -95,6 +97,9 @@ async def test_times_out_if_not_armed(
 async def test_prepare_external_edge(
     test_adpilatus: adpilatus.PilatusDetector,
 ):
+    await test_adpilatus.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_adpilatus).reset_mock()
     await test_adpilatus.prepare(
         TriggerInfo(
             trigger=DetectorTrigger.EXTERNAL_EDGE,
@@ -126,6 +131,9 @@ async def test_prepare_external_edge_with_mult_trigger_mode(
     set_mock_value(detector.driver.armed, True)
     writer = detector.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
+    await detector.stage()
+    # Only the calls after stage() are of interest
+    get_mock(detector).reset_mock()
     await detector.prepare(
         TriggerInfo(
             trigger=DetectorTrigger.EXTERNAL_EDGE,
@@ -174,6 +182,9 @@ def test_edge_trigger_mode_rejects_non_edge_modes(
 async def test_prepare_external_level(
     test_adpilatus: adpilatus.PilatusDetector,
 ):
+    await test_adpilatus.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_adpilatus).reset_mock()
     await test_adpilatus.prepare(
         TriggerInfo(
             trigger=DetectorTrigger.EXTERNAL_LEVEL,
@@ -194,6 +205,9 @@ async def test_prepare_external_level(
 async def test_prepare_forever(
     test_adpilatus: adpilatus.PilatusDetector,
 ):
+    await test_adpilatus.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_adpilatus).reset_mock()
     await test_adpilatus.prepare(TriggerInfo(number_of_events=0))
     assert_has_calls(
         test_adpilatus.driver,

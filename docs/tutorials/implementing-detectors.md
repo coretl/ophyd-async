@@ -179,7 +179,7 @@ It derives from [](#StandardDetector) which is a utility baseclass that implemen
 - [](#DetectorAcquireLogic) to start and stop acquisition and wait for it to complete
 - [](#DetectorDataLogic) to tell the detector to open a file, describe the datasets it will write, and emit StreamAsset documents as frames are written
 
-In this case, we have three logic classes written just for this simulation, all taking a reference to the pattern generator that provides methods for both detector control and file writing. In other cases the detector control and filewriting may be handled by different sub-devices that talk to different parts of the control system. The job of the top level detector class is to take the arguments that the logic classes need, create the logic instances, and wire them into a [](#DetectorLogic), which it returns from `logic`.
+In this case, we have three logic classes written just for this simulation, all taking a reference to the pattern generator that provides methods for both detector control and file writing. In other cases the detector control and filewriting may be handled by different sub-devices that talk to different parts of the control system. The job of the top level detector class is to take the arguments that the logic classes need and, in `logic`, create the logic instances and wire them into a [](#DetectorLogic) by role: `DetectorLogic(trigger=..., acquire=..., data=[...])`.
 
 Now let's look at the underlying classes that define the detector behavior:
 
@@ -242,15 +242,17 @@ The [](#StreamableDataProvider) returned from `make_data_provider()` contains:
 
 A [](#DetectorDataLogic) is not declared as one kind or another: the detector asks each of its logics what it would make for this scan, and the type of provider that comes back says which kind it is.
 
-- a [](#StreamableDataProvider) is for a source that works for any number of collections, like a file writer. The detector exposes `collect_asset_docs`, and `BlobDataLogic` is an example.
-- a [](#PageableDataProvider) is for a source holding a *finite buffer* that must be sized before acquisition, like an areaDetector stats time series or a scaler whose array length is the frame count. It emits event pages, so the detector exposes `collect_pages` instead. See [](#StatsTimeSeriesDataLogic).
-- `None` means "not this scan", for instance a finite buffer asked for an unbounded number of collections, or a plugin that is switched off. This is not an error: a detector may carry more data logics than any one scan uses.
+- a [](#StreamableDataProvider) publishes stream assets, like a file writer. The detector exposes `collect_asset_docs`, and `BlobDataLogic` is an example.
+- a [](#PageableDataProvider) publishes event pages, like an areaDetector stats time series or a scaler's arrays, so the detector exposes `collect_pages` instead. Its `make_page()` is asked for a range of collections, and holds no state: the detector tracks what it has published. See [](#StatsTimeSeriesDataLogic).
+- `None` means "not this scan", for instance a finite buffer asked for an unbounded number of collections, or a plugin that is switched off. This is not an error: a detector may carry more data logics than any one scan uses, but if it has some and none of them serve, `prepare()` raises.
+
+Both kinds of provider have a `step_boundary()` hook, called at each point of a step scan after the first. A finite buffer re-arms itself there, the way [](#EventPageDataProvider) does when given a `rearm` callable; a source that keeps counting leaves it as the default, which does nothing.
 
 A source that produces one value per event, like a plugin scalar, needs no data logic at all: a detector is a [](#StandardReadable), so register the signal with [](#StandardReadable.set_readable_format).
 
-`make_data_provider` is given the total `num_collections` for the scan, 0 meaning unbounded; the frame `period` (livetime + deadtime), resolved by `prepare()` from the trigger logic even when the [](#TriggerInfo) leaves `livetime` at 0; and the `flush_period` the [](#TriggerInfo) asked for. It must not start anything: only the providers the detector settles on get their `start()` called. Whatever it worked out that `start()` will need comes back alongside the provider, and the detector hands it straight back — a logic keeps no state of its own between the two.
+`make_data_provider` is given the total `num_collections` for the scan, 0 meaning unbounded; the frame `period` (livetime + deadtime), which `prepare()` reads back from the trigger logic when the [](#TriggerInfo) leaves `livetime` at 0 and [](#OPHYD_ASYNC_PRESERVE_DETECTOR_STATE) is `YES`, and is otherwise 0 for "use what is on the hardware"; and the `flush_period` the [](#TriggerInfo) asked for. It must not start anything: only the providers the detector settles on get their `start()` called. Whatever it worked out that `start()` will need comes back alongside the provider, and the detector hands it straight back — a logic keeps no state of its own between the two.
 
-A detector may carry several data logics, but must not end up producing both kinds at once — those are mutually exclusive document kinds, and `prepare()` raises if it would.
+A detector may carry several data logics, but must not end up producing both kinds at once — bluesky collects one or the other from a device, and `prepare()` raises if it would. Where a provider makes a datakey that a lower tier also makes, with the same shape and dtype, the higher tier wins: stream assets over event pages, and either over a registered signal of that name.
 
 ```{note}
 Which logic serves is decided in `prepare()`, so it can change between runs — a detector whose file writer is switched off can fall back to its stats time series. Change it **between runs**, not inside one: a run's descriptor is emitted at its start, so switching part way through would leave the descriptor and the documents disagreeing.

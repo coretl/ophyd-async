@@ -34,13 +34,9 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
         if plugins is not None:
             for plugin_name, plugin in plugins.items():
                 setattr(self, plugin_name, plugin)
-        logics: list[
-            DetectorTriggerLogic | DetectorAcquireLogic | DetectorDataLogic
-        ] = []
-        if trigger_logic:
-            logics.append(trigger_logic)
-        if acquire_logic:
-            logics.append(acquire_logic)
+        self._trigger_logic = trigger_logic
+        self._acquire_logic = acquire_logic
+        data_logics: list[DetectorDataLogic] = []
         if writer_factories:
             if prefix is None:
                 raise ValueError("prefix is required when writer_factories are given")
@@ -54,7 +50,8 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
             for factory in writer_factories:
                 writer, data_logic = factory(prefix, driver, plugin_list)
                 setattr(self, factory.writer_name, writer)
-                logics.append(data_logic)
+                data_logics.append(data_logic)
+        self._data_logics = tuple(data_logics)
         # The driver is always wired up, so register it whole and let ADBaseIO
         # declare which of its signals are configuration. Plugins are
         # deliberately *not* registered: a detector normally carries far more
@@ -63,12 +60,15 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
         self.set_readable_format(self.driver, Format.CHILD)
         for signal in config_sigs:
             self.set_readable_format(signal, Format.CONFIG_SIGNAL)
-        self._logic = DetectorLogic(*logics)
         super().__init__(name=name)
 
     @cached_property
     def logic(self) -> DetectorLogic:
-        return self._logic
+        return DetectorLogic(
+            trigger=self._trigger_logic,
+            acquire=self._acquire_logic,
+            data=self._data_logics,
+        )
 
     def get_plugin(
         self, name: str, plugin_type: type[NDPluginBaseIOT] = NDPluginBaseIO
