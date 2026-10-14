@@ -125,8 +125,8 @@ async def watch_readback(
 
     Yields a `WatcherUpdate` for each readback value until the action is done,
     then re-raises any error the action raised. Use it from a `FlyableLogic`
-    hook that moves the logic's device, returning it from a plain `def` so the
-    hook is not itself an async generator.
+    hook that moves the logic's device, returning it from the hook as its
+    progress.
 
     :param logic: the logic whose readback is watched, and which supplies the
         units and precision.

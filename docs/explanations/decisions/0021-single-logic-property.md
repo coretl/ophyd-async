@@ -56,7 +56,7 @@ descriptor so that `Device`'s metaclass collects it. It is declared as returning
 check on the override and would reject the correct case too.
 
 Because `StandardFlyable` is now genuinely abstract, `FlyableLogic.with_device` builds
-a concrete `_EphemeralFlyable` to attach the logic to.
+a concrete `_EphemeralFlyable`, which takes the logic in its `__init__`.
 
 An alternative of a single `logics` collection searched by type was rejected: membership
 cannot be proved statically, so it would reintroduce exactly the runtime-only failure

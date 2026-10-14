@@ -40,23 +40,35 @@ that changes during a scan is an object the context holds. Every hook is an
 
 | Method | Default behaviour | Override to… |
 |--------|-------------------|--------------|
-| `on_prepare(value)` | *abstract* | work out the scan, set up the hardware, and return a context, or a `(context, progress)` tuple to report progress |
+| `on_prepare(value)` | *abstract* | work out the scan, set up the hardware, and return a context (see [](#flyer-progress)) |
 | `on_kickoff(ctx)` | *abstract* | start the scan and return the status of what is running, or `None` |
-| `on_complete(ctx, status)` | *abstract* | wait for the scan to finish, or return an async iterator of [](#WatcherUpdate) to report progress |
+| `on_complete(ctx, status)` | *abstract* | wait for the scan to finish (see [](#flyer-progress)) |
 | `stop()` | no-op | disarm the hardware and wait for it to stop |
 | `on_stage()` | calls `stop()` | set the hardware up on `stage()` if it differs from stop |
 | `on_unstage()` | calls `stop()` | clean the hardware up on `unstage()` if it differs from stop |
-
-To report progress, `on_prepare` returns a 2-tuple of the context and an async iterator
-of [](#WatcherUpdate), and `on_complete` returns the iterator; otherwise they just do
-their work and return. `StandardFlyable` iterates the iterator and stamps its own name
-on each update. A context that is itself a 2-tuple ending in an async iterator would be
-misread as progress.
 
 There are two ways to get a Device out of a `FlyableLogic`: mix `StandardFlyable` into
 a Device class (for hardware that is always a flyer, like a motor), or call
 [](#FlyableLogic.with_device) to wrap a bare logic object in an ephemeral flyer inside
 a plan (for hardware configured per scan, like a PandA block).
+
+(flyer-progress)=
+### Reporting progress
+
+`prepare()` and `complete()` can report progress to watchers as an async iterator of
+[](#WatcherUpdate), which `StandardFlyable` runs, stamping its own name on each update.
+Each hook is in two stages: an async function, then optionally that iterator.
+
+- `on_prepare` does enough in the async function to return the context. If the logic
+  reports progress, it returns a `(context, progress)` 2-tuple and does the rest, such as
+  moving to the start, in the progress iterator. Otherwise it does it all in the async
+  function and returns just the context.
+- `on_complete` returns the progress iterator and does everything in it if the logic
+  reports progress. Otherwise it does everything in the async function and returns
+  `None`.
+
+A context that is itself a 2-tuple ending in an async iterator would be misread as
+progress.
 
 ## A movable device that also flies
 
@@ -145,8 +157,8 @@ for it to go inactive again (the context and status are `None`, so they are igno
 ```
 
 Rather than declare this logic on a Device class, construct it in the plan from the
-PandA block you want to drive and call [](#FlyableLogic.with_device) to get a ready
-flyer to prepare, kickoff, and complete:
+PandA block you want to drive and call [](#FlyableLogic.with_device) to get a flyer
+to stage, prepare, kickoff, complete and unstage:
 
 ```python
 flyer = StaticPcompFlyableLogic(panda.pcomp[1]).with_device(name="pcomp")

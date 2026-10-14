@@ -15,6 +15,7 @@ from ophyd_async.core import (
     MockSignalBackend,
     SignalR,
     StandardReadable,
+    TransitionError,
     soft_signal_r_and_setter,
     soft_signal_rw,
 )
@@ -305,3 +306,13 @@ async def test_duplicate_readable_raises_exception():
 
     with pytest.raises(KeyError):
         DummyDerivedDevice("test_duplicates")
+
+
+async def test_standard_readable_stage_twice_raises():
+    sr = StandardReadable(name="sr")
+    await sr.stage()
+    # Like ophyd's RedundantStaging
+    with pytest.raises(TransitionError, match="cannot go to STAGED from STAGED"):
+        await sr.stage()
+    await sr.unstage()
+    await sr.stage()

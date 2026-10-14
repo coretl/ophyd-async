@@ -80,9 +80,17 @@ class _StateMachine:
 
     @asynccontextmanager
     async def during(
-        self, state: _State, *, end: _State, on_error: _State
+        self,
+        state: _State,
+        *,
+        end: _State,
+        on_error: _State,
+        on_error_cleanup: Callable[[], None] | None = None,
     ) -> AsyncGenerator[None, None]:
         """Run a verb in the in-progress `state`, then go to `end` or `on_error`.
+
+        :param on_error_cleanup: called before going to `on_error`, only if this
+            verb still owns the state.
 
         Safe to wrap `yield`s of an async generator. If `unstage()` has moved the
         machine on in the meantime, even into a new run of the same verb, this
@@ -95,6 +103,8 @@ class _StateMachine:
             # Can be false: unstage cancelled this verb and moved the state on,
             # or an abandoned async generator was closed later from another task
             if self.state is state and self._task is asyncio.current_task():
+                if on_error_cleanup is not None:
+                    on_error_cleanup()
                 self.transition(on_error)
             raise
         else:

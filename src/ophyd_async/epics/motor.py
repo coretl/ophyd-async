@@ -259,7 +259,11 @@ class MotorFlyableMovableLogic(
         # kickoff() returns. A plan can then kickoff the motor and afterwards
         # kickoff internally-triggered detectors, which is more accurate for
         # long acceleration times.
-        await asyncio.sleep(ctx.acceleration_time)
+        try:
+            await asyncio.sleep(ctx.acceleration_time)
+        except BaseException:
+            status.task.cancel()
+            raise
         return status
 
     async def on_complete(

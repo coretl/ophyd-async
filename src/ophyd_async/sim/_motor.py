@@ -92,7 +92,11 @@ class SimMotorLogic(
         """Begin moving motor from prepared position to final position."""
         status = AsyncStatus(self.move(ctx.end, lambda: None))
         # Wait for the acceleration time to ensure we are at velocity
-        await asyncio.sleep(ctx.acceleration_time)
+        try:
+            await asyncio.sleep(ctx.acceleration_time)
+        except BaseException:
+            status.task.cancel()
+            raise
         return status
 
     async def on_complete(
@@ -111,7 +115,8 @@ class SimMotor(
 ):
     """For usage when simulating a motor.
 
-    Like the EPICS `Motor`, `stage()` and `unstage()` stop any motion.
+    Like the EPICS `Motor`, `stage()` and `unstage()` call `stop()`, which sets the
+    setpoint to the current readback; a move already in progress carries on.
     """
 
     def __init__(

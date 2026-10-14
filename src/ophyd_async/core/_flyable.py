@@ -114,11 +114,7 @@ class FlyableLogic(Generic[PrepareT, CtxT, FlyStatusT]):
 
     def with_device(self, name: str = "") -> "StandardFlyable[Any, Any, Any]":
         """Wrap this logic in an ephemeral `StandardFlyable` for use in a plan."""
-        flyer = _EphemeralFlyable[PrepareT, CtxT, FlyStatusT](name=name)
-        # cached_property writes straight to the instance __dict__, so this
-        # satisfies the abstract declaration without a subclass per logic type.
-        flyer.logic = self
-        return flyer
+        return _EphemeralFlyable(self, name=name)
 
 
 class FlyMotorInfo(ConfinedModel):
@@ -220,7 +216,7 @@ class StandardFlyable(
 
         A static flyer (e.g. `Motor`) provides this as a `@cached_property` that
         builds a `FlyableLogic` from its signals. An ephemeral flyer created by
-        `FlyableLogic.with_device` has it set directly on the instance.
+        `FlyableLogic.with_device` returns the logic it was created with.
 
         A Device that is flyable *and* movable implements this once with a logic
         object inheriting both `FlyableLogic` and `MovableLogic`; each mix-in
@@ -244,13 +240,6 @@ class StandardFlyable(
         await self.logic.on_unstage()
         self._reset_fly_state()
 
-    async def _on_prepare_context(self, ctx: CtxT) -> None:
-        """Called by `prepare()` with the context just made, before its progress runs.
-
-        Does nothing; a subclass overrides it to start what the rest of the
-        prepare, and later verbs, depend on.
-        """
-
     @WatchableAsyncStatus.wrap
     async def prepare(self, value: PrepareT) -> AsyncIterator[WatcherUpdate]:
         """Set up the fly scan and move to its start.
@@ -266,7 +255,6 @@ class StandardFlyable(
                     pass
                 case result:
                     ctx, progress = cast(CtxT, result), None
-            await self._on_prepare_context(ctx)
             if progress is not None:
                 async for update in progress:
                     yield replace(update, name=self.name)
@@ -289,34 +277,32 @@ class StandardFlyable(
         device is left staged.
         """
         async with self._state.during(
-            _State.COMPLETING, end=_State.COMPLETED, on_error=_State.STAGED
+            _State.COMPLETING,
+            end=_State.COMPLETED,
+            on_error=_State.STAGED,
+            on_error_cleanup=self._reset_fly_state,
         ):
-            try:
-                progress = await self.logic.on_complete(
-                    self._fly_ctx,
-                    # None only if kickoff returned nothing, which FlyStatusT says
-                    cast(FlyStatusT, self._fly_status),
-                )
-                if progress is not None:
-                    async for update in progress:
-                        yield replace(update, name=self.name)
-            except BaseException:
-                self._reset_fly_state()
-                raise
+            progress = await self.logic.on_complete(
+                self._fly_ctx,
+                # None only if kickoff returned nothing, which FlyStatusT says
+                cast(FlyStatusT, self._fly_status),
+            )
+            if progress is not None:
+                async for update in progress:
+                    yield replace(update, name=self.name)
             # Completed: nothing left to wait for
             self._fly_status = None
 
 
 class _EphemeralFlyable(StandardFlyable[PrepareT, CtxT, FlyStatusT]):
-    """A concrete `StandardFlyable` whose logic is set on the instance.
+    """A `StandardFlyable` with the logic it was created with."""
 
-    `StandardFlyable.logic` is abstract, so the class itself cannot be
-    instantiated; `FlyableLogic.with_device` needs something concrete to attach
-    a logic object to.
-    """
+    def __init__(
+        self, logic: FlyableLogic[PrepareT, CtxT, FlyStatusT], name: str = ""
+    ) -> None:
+        self._logic = logic
+        super().__init__(name=name)
 
     @cached_property
     def logic(self) -> FlyableLogic[PrepareT, CtxT, FlyStatusT]:
-        raise NotImplementedError(
-            f"{self.name}: no logic set; create this via FlyableLogic.with_device()"
-        )
+        return self._logic

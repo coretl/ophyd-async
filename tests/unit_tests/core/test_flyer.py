@@ -503,6 +503,44 @@ async def test_cancelled_verb_does_not_end_the_new_runs_state():
     await flyer.kickoff()  # the new prepare stands
 
 
+# Bug: a complete() cancelled by unstage cancelled the next run's fly status if
+# its cleanup finished after that run had kicked off
+async def test_cancelled_complete_does_not_cancel_the_new_runs_fly():
+    cleanup = asyncio.Event()
+
+    class SlowCleanupLogic(FlyingLogic):
+        async def on_complete(self, ctx: None, status: AsyncStatus) -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await cleanup.wait()  # slow cleanup
+
+    logic = SlowCleanupLogic()
+    flyer = await make_staged_flyer(logic)
+    await flyer.prepare(1)
+    await flyer.kickoff()
+    first = flyer.complete()
+    await asyncio.sleep(0)
+    await flyer.unstage()
+    await flyer.stage()
+    await flyer.prepare(2)
+    await flyer.kickoff()
+    new_fly = logic.fly_status
+    assert new_fly is not None
+
+    cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert not new_fly.done
+    # The new run can still complete
+    second = flyer.complete()
+    await asyncio.sleep(0)
+    assert not second.done
+    await flyer.unstage()
+    with pytest.raises(asyncio.CancelledError):
+        await second
+
+
 # A failed kickoff leaves the flyer staged, so it has to be prepared again
 async def test_failed_kickoff_goes_back_to_staged(recording_flyer):
     logic, flyer = recording_flyer

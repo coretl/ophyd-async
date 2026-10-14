@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock, call, patch
 
 import numpy as np
@@ -8,6 +9,7 @@ from ophyd_async.core import (
     callback_on_mock_execute,
     get_mock,
     get_mock_execute,
+    mock_puts_blocked,
     set_and_wait_for_value,
     set_mock_value,
 )
@@ -340,6 +342,40 @@ async def test_pmac_trajectory_kickoff(
         ],
         1e-3,
     )
+
+
+@pytest.mark.parametrize("run_up_ends_by", ["timeout", "unstage"])
+async def test_pmac_kickoff_that_fails_during_run_up_stops_the_trajectory(
+    sim_motors: tuple[PmacIO, Motor, Motor], run_up_ends_by: str
+):
+    pmac_io, sim_x_motor, sim_y_motor = sim_motors
+    flyer = PmacTrajectoryFlyableLogic(pmac_io).with_device()
+    spec = Fly(2.0 @ (Line(sim_y_motor, 1, 5, 2) * ~Line(sim_x_motor, 1, 5, 2)))
+    value = PmacScanInfo(spec=spec, ramp_time=None, turnaround_time=None)
+    positions = get_mock(pmac_io.trajectory.positions[7])
+    with patch("ophyd_async.epics.pmac._pmac_trajectory.SLICE_SIZE", 2):
+        await flyer.stage()
+        await flyer.prepare(value)
+        appends = len(positions.mock_calls)
+        # Keep the trajectory executing so it would go on appending
+        with mock_puts_blocked(pmac_io.trajectory.execute_profile):
+            if run_up_ends_by == "timeout":
+                with patch(
+                    "ophyd_async.epics.pmac._pmac_trajectory.wait_for_value",
+                    AsyncMock(side_effect=TimeoutError),
+                ):
+                    with pytest.raises(TimeoutError):
+                        await flyer.kickoff()
+            else:
+                status = flyer.kickoff()
+                await asyncio.sleep(0.01)
+                await flyer.unstage()
+                with pytest.raises(asyncio.CancelledError):
+                    await status
+            # A trajectory still running would refill the buffer as it empties
+            set_mock_value(pmac_io.trajectory.total_points, 2)
+            await asyncio.sleep(0.01)
+    assert len(positions.mock_calls) == appends
 
 
 async def test_pmac_trajectory_stage(sim_motors: tuple[PmacIO, Motor, Motor]):

@@ -103,11 +103,15 @@ class PmacTrajectoryFlyableLogic(
     async def on_kickoff(self, ctx: PmacPrepareCtx) -> AsyncStatus:
         status = self._execute_trajectory(ctx)
         # Wait for the ramp up to happen
-        await wait_for_value(
-            self.pmac.trajectory.total_points,
-            lambda v: v >= 1,
-            ctx.ramp_up_time + DEFAULT_TIMEOUT,
-        )
+        try:
+            await wait_for_value(
+                self.pmac.trajectory.total_points,
+                lambda v: v >= 1,
+                ctx.ramp_up_time + DEFAULT_TIMEOUT,
+            )
+        except BaseException:
+            status.task.cancel()
+            raise
         return status
 
     async def on_complete(self, ctx: PmacPrepareCtx, status: AsyncStatus) -> None:

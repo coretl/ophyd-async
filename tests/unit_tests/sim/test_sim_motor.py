@@ -136,6 +136,22 @@ async def test_fly(m1: SimMotor):
     assert await m1.user_readback.get_value() == fly_end
 
 
+@pytest.mark.timeout(3)
+async def test_unstage_during_kickoff_run_up_leaves_no_move_running(m2: SimMotor):
+    await m2.acceleration_time.set(0.5)
+    await m2.stage()
+    await m2.prepare(FlyMotorInfo(start_position=0, end_position=5, time_for_move=1))
+    kickoff_status = m2.kickoff()
+    await asyncio.sleep(0.2)
+    await m2.unstage()
+    with pytest.raises(asyncio.CancelledError):
+        await kickoff_status
+    # The readback updates at 10Hz, so a move still running would change it
+    stopped_at = await m2.user_readback.get_value()
+    await asyncio.sleep(0.3)
+    assert await m2.user_readback.get_value() == stopped_at
+
+
 async def test_sim_motor_can_be_set_to_its_current_position(m1: SimMotor):
     await m1.set(0)
 
