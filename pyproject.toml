@@ -24,6 +24,7 @@ dependencies = [
     "stamina>=23.1.0",
     "scanspec>=1.0.0",
     "velocity-profile",
+    "typing-extensions>=4.12",
 ]
 dynamic = ["version"]
 license.file = "LICENSE"

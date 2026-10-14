@@ -13,9 +13,10 @@ from collections.abc import (
 )
 from dataclasses import dataclass
 from enum import Enum, EnumMeta, StrEnum
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from inspect import isawaitable
 from typing import (
+    TYPE_CHECKING,
     Any,
     Generic,
     Literal,
@@ -28,10 +29,21 @@ from typing import (
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict
+from typing_extensions import TypeVar as TypeVarWithDefault
+
+if TYPE_CHECKING:
+    from ._status import AsyncStatus
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
 V = TypeVar("V")
+#: The context object returned by `FlyableLogic.on_prepare` and passed on to
+#: `on_kickoff` and `on_complete`. Defaults to `None`, for flyers that carry no
+#: state between stages.
+CtxT = TypeVarWithDefault("CtxT", default=None)
+#: The status returned by `FlyableLogic.on_kickoff` and passed on to `on_complete`.
+#: Defaults to `None`, for flyers with nothing to wait for after kickoff.
+FlyStatusT = TypeVarWithDefault("FlyStatusT", bound="AsyncStatus | None", default=None)
 P = ParamSpec("P")
 Callback = Callable[[T], None]
 DEFAULT_TIMEOUT = 10.0
@@ -437,6 +449,27 @@ def error_if_none(value: T | None, msg: str) -> T:
 def non_zero(value):
     """Return True if the value cast to an int is not zero."""
     return int(value) != 0
+
+
+def abstract_cached_property(func: Callable[[Any], T]) -> cached_property[T]:
+    """A `cached_property` that `ABCMeta` treats as abstract.
+
+    `functools.cached_property` does not forward `__isabstractmethod__` from the
+    function it wraps, so `@cached_property` stacked on `@abstractmethod`
+    registers nothing: the class stays instantiable and a missing implementation
+    surfaces as an `AttributeError` on `None` from deep inside `__init__`. Setting
+    the flag on the descriptor itself makes `Device`'s metaclass collect it, so
+    the omission is a `TypeError` at instantiation instead.
+
+    The declared return type is deliberately `cached_property[T]` rather than a
+    subclass, so that a subclass overriding it with a plain `@cached_property`
+    still gets checked for covariance by the type checker.
+
+    :param func: The property body, which should raise `NotImplementedError`.
+    """
+    prop = cached_property(func)
+    prop.__isabstractmethod__ = True  # type: ignore[attr-defined]
+    return prop
 
 
 async def _wait_for(coro: Awaitable[T], timeout: float | None, source: str) -> T:

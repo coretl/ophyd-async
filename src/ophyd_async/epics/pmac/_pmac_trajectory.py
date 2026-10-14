@@ -1,5 +1,5 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scanspec.core import Path, Slice
@@ -10,7 +10,6 @@ from ophyd_async.core import (
     AsyncStatus,
     FlyableLogic,
     SignalR,
-    error_if_none,
     gather_dict,
     observe_value,
     set_and_wait_for_value,
@@ -40,13 +39,6 @@ SLICE_SIZE = 4000
 
 
 @dataclass
-class PmacPrepareContext:
-    path: Path
-    motor_info: _PmacMotorInfo
-    ramp_up_time: float
-
-
-@dataclass
 class PmacScanInfo:
     spec: Spec[Motor]
     ramp_time: float | None
@@ -54,68 +46,72 @@ class PmacScanInfo:
 
 
 @dataclass
-class PmacFlyCtx:
-    """State threaded through a PMAC fly scan (prepare -> kickoff -> complete)."""
+class _TrajectoryCursor:
+    """Where the running trajectory has got to, mutated as points are appended."""
 
-    #: Trajectory + motion info built by `on_prepare`.
-    prepare: PmacPrepareContext
-    #: The running trajectory, produced by `on_kickoff`.
-    trajectory_status: AsyncStatus | None = None
+    #: The PVT the last built slice exited at, which the next slice starts from.
+    next_pvt: PVT | None = None
+    #: The number of points loaded into the PMAC so far.
+    loaded: int = 0
 
 
-class PmacTrajectoryFlyableLogic(FlyableLogic[PmacScanInfo, PmacFlyCtx]):
+@dataclass(frozen=True)
+class PmacPrepareCtx:
+    """What a PMAC fly scan needs after `on_prepare` has worked it out."""
+
+    #: The path to fly, consumed a slice at a time as the trajectory runs.
+    path: Path
+    #: The first slice of the path, which is built into the trajectory to start with.
+    first_slice: Slice
+    #: How many points of the path are left after the first slice.
+    path_length: int
+    motor_info: _PmacMotorInfo
+    ramp_up_pos: dict[Motor, np.float64]
+    ramp_up_time: float
+    turnaround_time: float | None
+    cursor: _TrajectoryCursor = field(default_factory=_TrajectoryCursor)
+
+
+class PmacTrajectoryFlyableLogic(
+    FlyableLogic[PmacScanInfo, PmacPrepareCtx, AsyncStatus]
+):
     def __init__(self, pmac: PmacIO) -> None:
         self.pmac = pmac
-        # Working state mutated by the running trajectory task; it spans prepare
-        # and the executing trajectory, so it lives on the logic rather than in
-        # the cross-stage context.
-        self._next_pvt: PVT | None = None
-        self._loaded = 0
-        self._turnaround_time: float | None = None
 
-    async def on_prepare(self, value: PmacScanInfo) -> PmacFlyCtx:
-        spec = value.spec
-        self._turnaround_time = value.turnaround_time
-        self._next_pvt = None
-        self._loaded = 0
-        path = Path(spec.calculate())
-        slice = path.consume(SLICE_SIZE)
-        path_length = len(path)
-        motors = slice.axes()
-        motor_info = await _PmacMotorInfo.from_motors(self.pmac, motors)
+    async def on_prepare(self, value: PmacScanInfo) -> PmacPrepareCtx:
+        path = Path(value.spec.calculate())
+        first_slice = path.consume(SLICE_SIZE)
+        motor_info = await _PmacMotorInfo.from_motors(self.pmac, first_slice.axes())
         ramp_up_pos, ramp_up_time = calculate_ramp_position_and_duration(
-            slice, motor_info, True, value.ramp_time
+            first_slice, motor_info, True, value.ramp_time
+        )
+        ctx = PmacPrepareCtx(
+            path=path,
+            first_slice=first_slice,
+            path_length=len(path),
+            motor_info=motor_info,
+            ramp_up_pos=ramp_up_pos,
+            ramp_up_time=ramp_up_time,
+            turnaround_time=value.turnaround_time,
         )
         await asyncio.gather(
-            self._build_trajectory(motor_info, slice, path_length, ramp_up_time),
-            self._move_to_start(motor_info, ramp_up_pos),
+            self._build_trajectory(ctx),
+            self._move_to_start(ctx.motor_info, ctx.ramp_up_pos),
         )
-        return PmacFlyCtx(
-            prepare=PmacPrepareContext(
-                path=path, motor_info=motor_info, ramp_up_time=ramp_up_time
-            )
-        )
+        return ctx
 
-    async def on_kickoff(self, ctx: PmacFlyCtx) -> PmacFlyCtx:
-        prepare = ctx.prepare
-        ctx.trajectory_status = self._execute_trajectory(
-            prepare.path, prepare.motor_info
-        )
+    async def on_kickoff(self, ctx: PmacPrepareCtx) -> AsyncStatus:
+        status = self._execute_trajectory(ctx)
         # Wait for the ramp up to happen
         await wait_for_value(
             self.pmac.trajectory.total_points,
             lambda v: v >= 1,
-            prepare.ramp_up_time + DEFAULT_TIMEOUT,
+            ctx.ramp_up_time + DEFAULT_TIMEOUT,
         )
-        return ctx
+        return status
 
-    async def on_complete(self, ctx: PmacFlyCtx) -> None:
-        trajectory_status = error_if_none(
-            ctx.trajectory_status, "Cannot complete. Must call kickoff first."
-        )
-        await trajectory_status
-        # Reset number of loaded points
-        self._loaded = 0
+    async def on_complete(self, ctx: PmacPrepareCtx, status: AsyncStatus) -> None:
+        await status
 
     async def stop(self) -> None:
         # Abort current trajectory, if one is running
@@ -142,7 +138,7 @@ class PmacTrajectoryFlyableLogic(FlyableLogic[PmacScanInfo, PmacFlyCtx]):
         await self.pmac.trajectory.execute_profile.set(True)
 
     @AsyncStatus.wrap
-    async def _execute_trajectory(self, path: Path, motor_info: _PmacMotorInfo):
+    async def _execute_trajectory(self, ctx: PmacPrepareCtx):
         execute_status = self.pmac.trajectory.execute_profile.set(True, timeout=None)
         # We consume SLICE_SIZE from self.path and parse a trajectory
         # containing at least 2 * SLICE_SIZE, as a gapless trajectory
@@ -157,11 +153,13 @@ class PmacTrajectoryFlyableLogic(FlyableLogic[PmacScanInfo, PmacFlyCtx]):
             timeout=DEFAULT_TIMEOUT,
         ):
             # Ensure we maintain a minimum buffer size, if we have more points to append
-            if len(path) != 0 and self._loaded - current_point < min_buffer_size:
+            if (
+                len(ctx.path) != 0
+                and ctx.cursor.loaded - current_point < min_buffer_size
+            ):
                 # We have less than SLICE_SIZE * 2 points in the buffer, so refill
-                next_slice = path.consume(SLICE_SIZE)
-                path_length = len(path)
-                await self._append_trajectory(next_slice, path_length, motor_info)
+                next_slice = ctx.path.consume(SLICE_SIZE)
+                await self._append_trajectory(ctx, next_slice, len(ctx.path))
 
         await self._check_profile_status(
             self.pmac.trajectory.execute_status,
@@ -192,10 +190,10 @@ class PmacTrajectoryFlyableLogic(FlyableLogic[PmacScanInfo, PmacFlyCtx]):
                 ) from exc
 
     async def _append_trajectory(
-        self, slice: Slice, path_length: int, motor_info: _PmacMotorInfo
+        self, ctx: PmacPrepareCtx, slice: Slice, path_length: int
     ):
-        trajectory = await self._parse_trajectory(slice, path_length, motor_info, None)
-        await self._set_trajectory_arrays(trajectory, motor_info)
+        trajectory = await self._parse_trajectory(ctx, slice, path_length, None)
+        await self._set_trajectory_arrays(trajectory, ctx.motor_info)
         await self.pmac.trajectory.append_profile.trigger()
 
         await self._check_profile_status(
@@ -203,15 +201,10 @@ class PmacTrajectoryFlyableLogic(FlyableLogic[PmacScanInfo, PmacFlyCtx]):
             self.pmac.trajectory.append_message,
         )
 
-    async def _build_trajectory(
-        self,
-        motor_info: _PmacMotorInfo,
-        slice: Slice,
-        path_length: int,
-        ramp_up_time: float,
-    ):
+    async def _build_trajectory(self, ctx: PmacPrepareCtx):
+        motor_info = ctx.motor_info
         trajectory = await self._parse_trajectory(
-            slice, path_length, motor_info, ramp_up_time
+            ctx, ctx.first_slice, ctx.path_length, ctx.ramp_up_time
         )
         use_axis = {
             i: (i in motor_info.motor_cs_index.values()) for i in CS_INDEX.values()
@@ -235,17 +228,18 @@ class PmacTrajectoryFlyableLogic(FlyableLogic[PmacScanInfo, PmacFlyCtx]):
 
     async def _parse_trajectory(
         self,
+        ctx: PmacPrepareCtx,
         slice: Slice,
         path_length: int,
-        motor_info: _PmacMotorInfo,
         ramp_up_time: float | None = None,
     ) -> Trajectory:
+        motor_info = ctx.motor_info
         trajectory, exit_pvt = Trajectory.from_slice(
             slice,
             motor_info,
-            None if ramp_up_time else self._next_pvt,
+            None if ramp_up_time else ctx.cursor.next_pvt,
             ramp_up_time=ramp_up_time,
-            turnaround_time=self._turnaround_time,
+            turnaround_time=ctx.turnaround_time,
         )
 
         if path_length == 0:
@@ -255,8 +249,8 @@ class PmacTrajectoryFlyableLogic(FlyableLogic[PmacScanInfo, PmacFlyCtx]):
             trajectory = trajectory.with_ramp_down(
                 exit_pvt, ramp_down_pos, ramp_down_time, 0
             )
-        self._next_pvt = exit_pvt
-        self._loaded += len(trajectory)
+        ctx.cursor.next_pvt = exit_pvt
+        ctx.cursor.loaded += len(trajectory)
 
         return trajectory
 

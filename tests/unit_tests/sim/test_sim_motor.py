@@ -14,7 +14,6 @@ from ophyd_async.core import (
     forward_watcher_updates,
 )
 from ophyd_async.sim import SimMotor
-from ophyd_async.testing import StatusWatcher
 
 
 class TwoMotorStage(Device):
@@ -116,23 +115,24 @@ async def test_fly(m1: SimMotor):
     await m1.acceleration_time.set(0.1)
     info = FlyMotorInfo(start_position=0, end_position=1, time_for_move=0.2)
     fly_start, fly_end, velocity = -0.25, 1.25, 5
+    await m1.stage()
     await m1.prepare(info)
     assert await m1.user_readback.get_value() == fly_start
     assert await m1.velocity.get_value() == velocity
     await m1.kickoff()
     status = m1.complete()
-    watcher = StatusWatcher(status)
-    for i, v in enumerate([-0.25, 0, 0.5, 1.0, 1.25]):
-        await watcher.wait_for_call(
-            current=pytest.approx(v),
-            initial=fly_start,
-            name="M1",
-            target=fly_end,
-            time_elapsed=pytest.approx(i * 0.1, abs=0.1),
-            unit="mm",
-        )
+    watcher = Mock()
+    status.watch(watcher)
     await status
-    watcher.mock.assert_not_called()
+    # Progress is reported from where the motor is when complete is called
+    # (it has been running up for the acceleration time) to the end
+    updates = [c.kwargs for c in watcher.call_args_list]
+    currents = [u["current"] for u in updates]
+    assert currents == sorted(currents)
+    assert currents[-1] == pytest.approx(fly_end)
+    assert {(u["initial"], u["target"], u["name"], u["unit"]) for u in updates} == {
+        (fly_start, fly_end, "M1", "mm")
+    }
     assert await m1.user_readback.get_value() == fly_end
 
 
