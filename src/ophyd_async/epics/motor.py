@@ -6,6 +6,7 @@ https://github.com/epics-modules/motor
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -13,6 +14,7 @@ from ophyd_async.core import (
     CALCULATE_TIMEOUT,
     DEFAULT_TIMEOUT,
     AsyncStatus,
+    CalculatableTimeout,
     DeviceMock,
     FlyableLogic,
     FlyMotorInfo,
@@ -25,11 +27,12 @@ from ophyd_async.core import (
     StandardReadable,
     StrictEnum,
     TimeoutCalculator,
+    WatcherUpdate,
     callback_on_mock_put,
     default_mock_class,
-    error_if_none,
     set_mock_value,
     simulate_move,
+    watch_readback,
 )
 from ophyd_async.core import StandardReadableFormat as Format
 from ophyd_async.epics.core import epics_signal_r, epics_signal_rw, epics_signal_w
@@ -87,26 +90,34 @@ class UseSetMode(StrictEnum):
     """Change offset (in record or in controller) when setpoint is written."""
 
 
-@dataclass
-class MotorFlyCtx:
-    """State threaded through a motor fly scan (prepare -> kickoff -> complete)."""
+@dataclass(frozen=True)
+class MotorPrepareCtx:
+    """What a motor fly scan needs after `on_prepare` has worked it out."""
 
-    #: The info the scan was prepared with, produced by `on_prepare`.
-    fly_info: FlyMotorInfo
-    #: The move to the end position, produced by `on_kickoff`.
-    status: AsyncStatus | None = None
+    #: Where to start from: the start position with the run-up distance added.
+    start: float
+    #: Where to end: the end position with the run-down distance added.
+    end: float
+    #: The fastest the motor can go, used to move to the start.
+    max_speed: float
+    #: The speed of the constant velocity phase.
+    speed: float
+    #: How long the motor takes to get up to speed.
+    acceleration_time: float
+    #: Maximum time for the move from start to end.
+    timeout: CalculatableTimeout
 
 
 @dataclass
 class MotorFlyableMovableLogic(
-    MovableLogic[float], FlyableLogic[FlyMotorInfo, MotorFlyCtx]
+    MovableLogic[float], FlyableLogic[FlyMotorInfo, MotorPrepareCtx, AsyncStatus]
 ):
     """Combined move + fly logic for a motor record.
 
-    A single logic object backs a `Motor`'s `movable_logic` and `flyable_logic`:
+    A single logic object backs a `Motor`'s `logic`:
     it implements `MovableLogic` (the motor-record move, limit and timeout logic)
     and `FlyableLogic` (the fly hooks, which reuse `move`/`check_move` and carry
-    all per-scan state in a `MotorFlyCtx` rather than on the logic).
+    all per-scan state in a `MotorPrepareCtx` rather than on the logic).
     """
 
     motor_stop: SignalW[int]
@@ -196,8 +207,13 @@ class MotorFlyableMovableLogic(
         """Move by setting the setpoint and waiting for put completion."""
         await self.setpoint.set(new_position, timeout=timeout())
 
-    async def on_prepare(self, value: FlyMotorInfo) -> MotorFlyCtx:
-        """Move to the beginning of a run-up distance ready for a fly scan."""
+    async def on_prepare(
+        self, value: FlyMotorInfo
+    ) -> tuple[MotorPrepareCtx, AsyncIterator[WatcherUpdate]]:
+        """Check the scan is possible, then move to the beginning of the run-up.
+
+        Progress of the move is reported.
+        """
         # Velocity at which the motor travels from start to end, in motor egu/s.
         max_speed, egu = await asyncio.gather(
             self.max_velocity.get_value(), self.motor_egu.get_value()
@@ -209,43 +225,52 @@ class MotorFlyableMovableLogic(
             )
         # Check the run-up and run-down positions are within limits
         acceleration_time = await self.acceleration_time.get_value()
-        ramp_up_start_pos = value.ramp_up_start_pos(acceleration_time)
-        ramp_down_end_pos = value.ramp_down_end_pos(acceleration_time)
-        await asyncio.gather(
-            self.check_move(ramp_up_start_pos), self.check_move(ramp_down_end_pos)
+        start = value.ramp_up_start_pos(acceleration_time)
+        end = value.ramp_down_end_pos(acceleration_time)
+        await asyncio.gather(self.check_move(start), self.check_move(end))
+        ctx = MotorPrepareCtx(
+            start=start,
+            end=end,
+            max_speed=abs(max_speed),
+            speed=value.speed,
+            acceleration_time=acceleration_time,
+            timeout=value.timeout,
         )
-        # Move to the run-up start at maximum velocity
-        await self.velocity.set(abs(max_speed))
-        old_position = await self.readback.get_value()
-        timeout = await self.calculate_timeout(old_position, ramp_up_start_pos)
-        await self.move(ramp_up_start_pos, lambda: timeout)
-        # Set the velocity we will use for the fly scan
-        await self.velocity.set(value.speed)
-        return MotorFlyCtx(fly_info=value)
+        return ctx, watch_readback(self, self._move_to_start(ctx), target=ctx.start)
 
-    async def on_kickoff(self, ctx: MotorFlyCtx) -> MotorFlyCtx:
+    async def _move_to_start(self, ctx: MotorPrepareCtx) -> None:
+        # Move to the run-up start at maximum velocity
+        await self.velocity.set(ctx.max_speed)
+        old_position = await self.readback.get_value()
+        timeout = await self.calculate_timeout(old_position, ctx.start)
+        await self.move(ctx.start, lambda: timeout)
+        # Set the velocity we will use for the fly scan
+        await self.velocity.set(ctx.speed)
+
+    async def on_kickoff(self, ctx: MotorPrepareCtx) -> AsyncStatus:
         """Begin moving the motor from the prepared position to the final position."""
-        acceleration_time = await self.acceleration_time.get_value()
-        target = ctx.fly_info.ramp_down_end_pos(acceleration_time)
-        if ctx.fly_info.timeout == CALCULATE_TIMEOUT:
+        if ctx.timeout == CALCULATE_TIMEOUT:
             initial = await self.readback.get_value()
-            timeout = await self.calculate_timeout(initial, target)
+            timeout = await self.calculate_timeout(initial, ctx.end)
         else:
-            timeout = ctx.fly_info.timeout
-        ctx.status = AsyncStatus(self.move(target, lambda: timeout))
+            timeout = ctx.timeout
+        status = AsyncStatus(self.move(ctx.end, lambda: timeout))
         # Wait out the run-up so the motor is at constant velocity before
         # kickoff() returns. A plan can then kickoff the motor and afterwards
         # kickoff internally-triggered detectors, which is more accurate for
         # long acceleration times.
-        await asyncio.sleep(acceleration_time)
-        return ctx
+        try:
+            await asyncio.sleep(ctx.acceleration_time)
+        except BaseException:
+            status.task.cancel()
+            raise
+        return status
 
-    async def on_complete(self, ctx: MotorFlyCtx) -> None:
-        """Block until the motor reaches the fly-scan end position."""
-        status = error_if_none(
-            ctx.status, f"kickoff for motor {self.readback.name} not called."
-        )
-        await status
+    async def on_complete(
+        self, ctx: MotorPrepareCtx, status: AsyncStatus
+    ) -> AsyncIterator[WatcherUpdate]:
+        """Report progress until the motor reaches the fly-scan end position."""
+        return watch_readback(self, status, target=ctx.end, initial=ctx.start)
 
 
 class InstantMotorMock(DeviceMock["Motor"]):
@@ -304,7 +329,9 @@ class VeloAndAcclRespectingMotorMock(DeviceMock["Motor"]):
 
 @default_mock_class(InstantMotorMock)
 class Motor(
-    StandardMovable[float], StandardFlyable[FlyMotorInfo, MotorFlyCtx], StandardReadable
+    StandardMovable[float],
+    StandardFlyable[FlyMotorInfo, MotorPrepareCtx, AsyncStatus],
+    StandardReadable,
 ):
     """Device that moves a motor record."""
 
@@ -348,8 +375,8 @@ class Motor(
         super().__init__(name)
 
     @cached_property
-    def _logic(self) -> MotorFlyableMovableLogic:
-        """The combined move + fly logic, shared by movable_logic and flyable_logic."""
+    def logic(self) -> MotorFlyableMovableLogic:
+        """The combined move + fly logic, satisfying both mix-ins at once."""
         return MotorFlyableMovableLogic(
             readback=self.user_readback,
             setpoint=self.user_setpoint,
@@ -364,11 +391,3 @@ class Motor(
             max_velocity=self.max_velocity,
             motor_egu=self.motor_egu,
         )
-
-    @cached_property
-    def movable_logic(self) -> MotorFlyableMovableLogic:
-        return self._logic
-
-    @cached_property
-    def flyable_logic(self) -> MotorFlyableMovableLogic:
-        return self._logic

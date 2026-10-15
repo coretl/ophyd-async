@@ -1,69 +1,100 @@
-import asyncio
 from abc import abstractmethod
 from collections.abc import AsyncIterator
-from enum import Enum
+from dataclasses import replace
 from functools import cached_property
-from typing import Generic, TypeVar, cast
+from typing import Any, Generic, TypeVar, cast
 
 from bluesky.protocols import Flyable, Preparable
 from pydantic import Field
+from typing_extensions import TypeVar as TypeVarWithDefault
 
-from ._movable import MovableLogic
-from ._signal import observe_signals_value, observe_value
-from ._standard_base import _StandardBase
+from ._standard_base import _StandardBase, _State, _StateMachine
 from ._status import AsyncStatus, WatchableAsyncStatus
 from ._utils import (
     CALCULATE_TIMEOUT,
     CalculatableTimeout,
     ConfinedModel,
     WatcherUpdate,
+    abstract_cached_property,
 )
 
 #: The per-scan info passed to `FlyableLogic.on_prepare` (often a
 #: [`scanspec.core.Path`](inv:scanspec#scanspec.core.Path), but any type).
 PrepareT = TypeVar("PrepareT")
-#: The context object threaded from `on_prepare` through `on_kickoff` to
-#: `on_complete`. Use `None` for flyers that carry no state between stages.
-CtxT = TypeVar("CtxT")
+#: The context object returned by `FlyableLogic.on_prepare` and passed on to
+#: `on_kickoff` and `on_complete`. Defaults to `None`, for flyers that carry no
+#: state between stages.
+CtxT = TypeVarWithDefault("CtxT", default=None)
+#: The status returned by `FlyableLogic.on_kickoff` and passed on to `on_complete`.
+#: Defaults to `None`, for flyers with nothing to wait for after kickoff.
+FlyStatusT = TypeVarWithDefault("FlyStatusT", bound=AsyncStatus | None, default=None)
 
 
-class FlyableLogic(Generic[PrepareT, CtxT]):
+class FlyableLogic(Generic[PrepareT, CtxT, FlyStatusT]):
     """Minimum logic needed for controlling a `StandardFlyable`.
 
     Inherit and fill in the hooks for a particular flyable (e.g. a motion or
     trigger system). This base holds no state; concrete subclasses are typically
     `@dataclass`es that hold whatever signals or sub-devices they need as fields.
 
-    State that must be carried between stages is threaded through an explicit
-    context object rather than stored on the logic: `on_prepare` returns it,
-    `on_kickoff` receives and returns it, and `on_complete` receives it.
-    `StandardFlyable` owns that context and enforces the call ordering, so
-    subclasses do not need to guard against being called out of order. A flyer
-    with no cross-stage state uses `None` for the context (see the PandA trigger
-    logics).
+    What a scan needs between stages is carried by a context object rather than
+    stored on the logic: `on_prepare` works it out and returns it, and it is
+    passed to every later hook. It is fixed from then on (use a frozen dataclass
+    where practical); anything that changes during a scan is an object the
+    context holds. `StandardFlyable` owns the context and enforces the call
+    ordering, so subclasses do not need to guard against being called out of
+    order. A flyer with no cross-stage state leaves the context type as `None`
+    (see the PandA trigger logics).
+
+    The type parameters are the per-scan info `PrepareT`, the context `CtxT` and
+    the status `FlyStatusT` that `on_kickoff` returns; the last two default to
+    `None`, so `FlyableLogic[PrepareT]` is a logic with neither.
+
+    The hook names are deliberately not bluesky verbs, so a logic passed to a
+    plan stub does not look like a device.
     """
 
     @abstractmethod
-    async def on_prepare(self, value: PrepareT) -> CtxT:
-        """Move to the start of the fly scan, set it up, and return its context.
+    async def on_prepare(
+        self, value: PrepareT
+    ) -> CtxT | tuple[CtxT, AsyncIterator[WatcherUpdate]]:
+        """Work out the scan, set up the hardware, and return the scan's context.
+
+        To report progress to watchers (see `watch_readback`) while the slow part
+        of prepare runs, e.g. moving to the start of the scan, return the context
+        together with an async iterator of `WatcherUpdate` as a 2-tuple; the
+        iterator is run after the context is made. A context that is itself a
+        2-tuple ending in an async iterator would be misread as this.
 
         :param value: the per-scan info for this fly scan.
         """
 
     @abstractmethod
-    async def on_kickoff(self, ctx: CtxT) -> CtxT:
-        """Start the fly scan.
+    async def on_kickoff(self, ctx: CtxT) -> FlyStatusT:
+        """Start the fly scan, returning once it is up to speed.
+
+        Return the status of what is now running, to be passed to `on_complete`,
+        or `None` if there is nothing to wait for. `StandardFlyable` cancels it
+        on `unstage()`, and when `complete()` is cancelled or fails.
+
+        If this awaits after starting the status, it is its job to cancel that
+        status if it is itself cancelled.
 
         :param ctx: the context returned by `on_prepare`.
-
-        Return the (possibly updated) context to be passed to `on_complete`.
         """
 
     @abstractmethod
-    async def on_complete(self, ctx: CtxT) -> None:
-        """Block until the fly scan is done.
+    async def on_complete(
+        self, ctx: CtxT, status: FlyStatusT
+    ) -> AsyncIterator[WatcherUpdate] | None:
+        """Wait for the end of the fly scan.
 
-        :param ctx: the context returned by `on_kickoff`.
+        Either wait here and return `None`, or return an async iterator of
+        `WatcherUpdate` to report progress to watchers (see `watch_readback`),
+        which finishes when the fly scan does.
+
+        :param ctx: the context returned by `on_prepare`.
+        :param status: what `on_kickoff` returned.
         """
 
     async def stop(self) -> None:
@@ -71,6 +102,11 @@ class FlyableLogic(Generic[PrepareT, CtxT]):
 
         Called by `on_stage` and `on_unstage` by default; override those instead
         if stage and unstage need to differ.
+
+        Deliberately the same name as `MovableLogic.stop`, so that a logic
+        implementing both -- a motor record's, which is moved *and* flown --
+        writes one stop that serves as the move-stop verb and as fly-scan
+        teardown. The hardware action is the same in both cases.
         """
         pass
 
@@ -82,11 +118,9 @@ class FlyableLogic(Generic[PrepareT, CtxT]):
         """Clean the flyer up on `unstage()`. Defaults to `stop`."""
         await self.stop()
 
-    def with_device(self, name: str = "") -> "StandardFlyable":
+    def with_device(self, name: str = "") -> "StandardFlyable[Any, Any, Any]":
         """Wrap this logic in an ephemeral `StandardFlyable` for use in a plan."""
-        flyer = StandardFlyable(name=name)
-        flyer.flyable_logic = self
-        return flyer
+        return _EphemeralFlyable(self, name=name)
 
 
 class FlyMotorInfo(ConfinedModel):
@@ -130,28 +164,30 @@ class FlyMotorInfo(ConfinedModel):
         )
 
 
-class _FlyStage(Enum):
-    """Lifecycle stage of a `StandardFlyable`, used to enforce call ordering."""
-
-    IDLE = "IDLE"
-    PREPARED = "PREPARED"
-    KICKED_OFF = "KICKED_OFF"
-
-
 class StandardFlyable(
     _StandardBase,
     Preparable,
     Flyable,
-    Generic[PrepareT, CtxT],
+    Generic[PrepareT, CtxT, FlyStatusT],
 ):
     """Device that provides standard logic for flying.
 
-    This class must be inherited and have a `flyable_logic` @cached_property.
+    This class must be inherited and have a `logic` @cached_property.
     For an ephemeral flyer in a plan, call `FlyableLogic.with_device` instead of
-    inheriting. It owns the context threaded between the logic's stages and
-    enforces prepare -> kickoff -> complete ordering. `stage()`/`unstage()` run
-    the logic's `on_stage`/`on_unstage` (which default to `stop`) and reset the
-    context.
+    inheriting. It must be staged before it is prepared. `prepare()`, `kickoff()`
+    and `complete()` must then be called in that order, otherwise they raise
+    `TransitionError`; `complete()` ends in the completed state, from which it can
+    be prepared again. It holds the context returned by the logic's
+    `on_prepare` and the status returned by its `on_kickoff`.
+
+    `stage()` runs the logic's `on_stage` and resets the fly; it raises unless the
+    device is unstaged. `unstage()` runs the logic's `on_unstage` (both default to
+    `stop`), cancels the running `prepare()`, `kickoff()` or `complete()` and the
+    status held from `on_kickoff`, and resets the fly.
+    A `complete()` that is cancelled or fails cancels the held status and leaves
+    the device staged. `prepare()` and `complete()` report to watchers whatever
+    progress the logic's hooks return, named after this device; `kickoff()`
+    reports none.
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -160,123 +196,119 @@ class StandardFlyable(
         # _StandardBase mix-in, e.g. StandardReadable on a Motor).
         self._stage_funcs += (self._on_stage,)
         self._unstage_funcs += (self._on_unstage,)
-        # Context threaded prepare -> kickoff -> complete. Only meaningful once
-        # prepared; access is guarded by _fly_stage.
-        self._fly_ctx: CtxT = cast(CtxT, None)
-        self._fly_stage = _FlyStage.IDLE
+        # Context and status threaded prepare -> kickoff -> complete. The context
+        # is only set by prepare(), and the state machine stops anything reading
+        # it before then.
+        self._fly_ctx: CtxT
+        self._fly_status: FlyStatusT | None = None
 
     @cached_property
-    def flyable_logic(self) -> FlyableLogic[PrepareT, CtxT]:
+    def _state(self) -> _StateMachine:
+        # super()._state caches the base machine in the instance first, then this
+        # property overwrites it with the combined one
+        return super()._state | {
+            _State.STAGED: {_State.PREPARING},
+            _State.PREPARING: {_State.PREPARED, _State.STAGED},
+            _State.PREPARED: {_State.PREPARING, _State.KICKING_OFF},
+            _State.KICKING_OFF: {_State.KICKED_OFF, _State.STAGED},
+            _State.KICKED_OFF: {_State.COMPLETING},
+            _State.COMPLETING: {_State.COMPLETED, _State.STAGED},
+            _State.COMPLETED: {_State.PREPARING},
+        }
+
+    @abstract_cached_property
+    def logic(self) -> FlyableLogic[PrepareT, CtxT, FlyStatusT]:
         """The logic object that describes how this device flies.
 
         A static flyer (e.g. `Motor`) provides this as a `@cached_property` that
         builds a `FlyableLogic` from its signals. An ephemeral flyer created by
-        `FlyableLogic.with_device` has it set directly on the instance.
+        `FlyableLogic.with_device` returns the logic it was created with.
+
+        A Device that is flyable *and* movable implements this once with a logic
+        object inheriting both `FlyableLogic` and `MovableLogic`; each mix-in
+        declares `logic` with its own required type, so the type
+        checker verifies the one implementation against both.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} has no flyable_logic; override it as a "
-            "@cached_property or create the flyer via FlyableLogic.with_device()"
-        )
+        raise NotImplementedError
 
     def _reset_fly_state(self) -> None:
-        self._fly_ctx = cast(CtxT, None)
-        self._fly_stage = _FlyStage.IDLE
+        # The state machine has already cancelled any verb in flight; this ends
+        # our wait for what the kickoff started.
+        if self._fly_status is not None and not self._fly_status.done:
+            self._fly_status.task.cancel()
+        self._fly_status = None
 
-    @AsyncStatus.wrap
     async def _on_stage(self) -> None:
-        await self.flyable_logic.on_stage()
+        await self.logic.on_stage()
         self._reset_fly_state()
 
-    @AsyncStatus.wrap
     async def _on_unstage(self) -> None:
-        await self.flyable_logic.on_unstage()
+        await self.logic.on_unstage()
         self._reset_fly_state()
 
     @WatchableAsyncStatus.wrap
     async def prepare(self, value: PrepareT) -> AsyncIterator[WatcherUpdate]:
-        """Move to the start and set up the fly scan.
+        """Set up the fly scan and move to its start.
 
-        If the logic is also a `MovableLogic` (e.g. a flying `Motor`), report
-        progress of the move to the start to watchers by observing its readback,
-        starting once `on_prepare` writes the setpoint it is moving to.
+        Reports whatever progress the logic's `on_prepare` returns.
         """
-        logic = self.flyable_logic
-
-        async def on_prepare() -> None:
-            self._fly_ctx = await logic.on_prepare(value)
-
-        if isinstance(logic, MovableLogic):
-            initial, (units, precision) = await asyncio.gather(
-                logic.readback.get_value(), logic.get_units_precision()
-            )
-            current, target = initial, None
-            setpoint_seen = False
-            async with AsyncStatus(on_prepare()) as preparing:
-                async for signal, signal_value in observe_signals_value(
-                    logic.readback, logic.setpoint, done_status=preparing
-                ):
-                    if signal is logic.readback:
-                        current = signal_value
-                    elif setpoint_seen:
-                        target = signal_value
-                    else:
-                        # The first setpoint value is the stale one from before the move
-                        setpoint_seen = True
-                    if target is not None:
-                        yield WatcherUpdate(
-                            current=current,
-                            initial=initial,
-                            target=target,
-                            name=self.name,
-                            unit=units,
-                            precision=precision,
-                        )
-        else:
-            await on_prepare()
-        self._fly_stage = _FlyStage.PREPARED
+        # A failed prepare must leave nothing to kick off
+        async with self._state.during(
+            _State.PREPARING, end=_State.PREPARED, on_error=_State.STAGED
+        ):
+            match await self.logic.on_prepare(value):
+                case (ctx, AsyncIterator() as progress):
+                    pass
+                case result:
+                    ctx, progress = cast(CtxT, result), None
+            if progress is not None:
+                async for update in progress:
+                    yield replace(update, name=self.name)
+            self._fly_ctx = ctx
 
     @AsyncStatus.wrap
     async def kickoff(self) -> None:
-        """Start the fly scan."""
-        if self._fly_stage is not _FlyStage.PREPARED:
-            raise RuntimeError(
-                f"{self.name}: prepare() must be called before kickoff()"
-            )
-        self._fly_ctx = await self.flyable_logic.on_kickoff(self._fly_ctx)
-        self._fly_stage = _FlyStage.KICKED_OFF
+        """Start the fly scan, returning once it is up to speed."""
+        async with self._state.during(
+            _State.KICKING_OFF, end=_State.KICKED_OFF, on_error=_State.STAGED
+        ):
+            self._fly_status = await self.logic.on_kickoff(self._fly_ctx)
 
     @WatchableAsyncStatus.wrap
     async def complete(self) -> AsyncIterator[WatcherUpdate]:
         """Block until the fly scan is done.
 
-        If the logic is also a `MovableLogic` (e.g. a flying `Motor`), report
-        progress to watchers by observing its readback while the fly scan runs,
-        reusing the same watcher-update stream as `StandardMovable.set`. Flyers
-        whose logic is not movable simply block with no progress updates.
+        Reports whatever progress the logic's `on_complete` returns. If it is
+        cancelled or fails, the status held from `on_kickoff` is cancelled and the
+        device is left staged.
         """
-        if self._fly_stage is not _FlyStage.KICKED_OFF:
-            raise RuntimeError(
-                f"{self.name}: kickoff() must be called before complete()"
+        async with self._state.during(
+            _State.COMPLETING,
+            end=_State.COMPLETED,
+            on_error=_State.STAGED,
+            on_error_cleanup=self._reset_fly_state,
+        ):
+            progress = await self.logic.on_complete(
+                self._fly_ctx,
+                # None only if kickoff returned nothing, which FlyStatusT says
+                cast(FlyStatusT, self._fly_status),
             )
-        logic = self.flyable_logic
-        if isinstance(logic, MovableLogic):
-            initial, target, (units, precision) = await asyncio.gather(
-                logic.readback.get_value(),
-                logic.setpoint.get_value(),
-                logic.get_units_precision(),
-            )
-            async with AsyncStatus(logic.on_complete(self._fly_ctx)) as completing:
-                async for current_position in observe_value(
-                    logic.readback, done_status=completing
-                ):
-                    yield WatcherUpdate(
-                        current=current_position,
-                        initial=initial,
-                        target=target,
-                        name=self.name,
-                        unit=units,
-                        precision=precision,
-                    )
-        else:
-            await self.flyable_logic.on_complete(self._fly_ctx)
-        self._fly_stage = _FlyStage.IDLE
+            if progress is not None:
+                async for update in progress:
+                    yield replace(update, name=self.name)
+            # Completed: nothing left to wait for
+            self._fly_status = None
+
+
+class _EphemeralFlyable(StandardFlyable[PrepareT, CtxT, FlyStatusT]):
+    """A `StandardFlyable` with the logic it was created with."""
+
+    def __init__(
+        self, logic: FlyableLogic[PrepareT, CtxT, FlyStatusT], name: str = ""
+    ) -> None:
+        self._logic = logic
+        super().__init__(name=name)
+
+    @cached_property
+    def logic(self) -> FlyableLogic[PrepareT, CtxT, FlyStatusT]:
+        return self._logic

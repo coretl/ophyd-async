@@ -75,6 +75,7 @@ from ._movable import (
     MovableLogic,
     StandardMovable,
     TimeoutCalculator,
+    watch_readback,
 )
 from ._path_providers import (
     AutoIncrementFilenameProvider,
@@ -136,6 +137,7 @@ from ._signal_backend import (
     make_datakey,
 )
 from ._soft_signal_backend import SoftSignalBackend
+from ._standard_base import TransitionError
 from ._status import (
     AsyncStatus,
     WatchableAsyncStatus,
@@ -155,6 +157,7 @@ from ._utils import (
     SubsetEnum,
     SupersetEnum,
     WatcherUpdate,
+    abstract_cached_property,
     error_if_none,
     gather_dict,
     get_dtype,
@@ -202,6 +205,7 @@ __all__ = [
     "StandardMovable",
     "InstantMovableMock",
     "TimeoutCalculator",
+    "watch_readback",
     # Protocols
     "AsyncReadable",
     "AsyncConfigurable",
@@ -234,6 +238,7 @@ __all__ = [
     "SupersetEnum",
     "EnumTypes",
     "Table",
+    "TransitionError",
     "SignalMetadata",
     "Primitive",
     # Soft signal
@@ -325,6 +330,7 @@ __all__ = [
     "make_datakey",
     "wait_for_connection",
     "Ignore",
+    "abstract_cached_property",
     "non_zero",
     "simulate_move",
     # Derived signal
