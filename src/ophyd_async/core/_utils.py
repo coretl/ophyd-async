@@ -16,7 +16,6 @@ from enum import Enum, EnumMeta, StrEnum
 from functools import cached_property, lru_cache
 from inspect import isawaitable
 from typing import (
-    TYPE_CHECKING,
     Any,
     Generic,
     Literal,
@@ -29,21 +28,10 @@ from typing import (
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict
-from typing_extensions import TypeVar as TypeVarWithDefault
-
-if TYPE_CHECKING:
-    from ._status import AsyncStatus
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
 V = TypeVar("V")
-#: The context object returned by `FlyableLogic.on_prepare` and passed on to
-#: `on_kickoff` and `on_complete`. Defaults to `None`, for flyers that carry no
-#: state between stages.
-CtxT = TypeVarWithDefault("CtxT", default=None)
-#: The status returned by `FlyableLogic.on_kickoff` and passed on to `on_complete`.
-#: Defaults to `None`, for flyers with nothing to wait for after kickoff.
-FlyStatusT = TypeVarWithDefault("FlyStatusT", bound="AsyncStatus | None", default=None)
 P = ParamSpec("P")
 Callback = Callable[[T], None]
 DEFAULT_TIMEOUT = 10.0

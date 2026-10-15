@@ -6,6 +6,7 @@ from typing import Any, Generic, TypeVar, cast
 
 from bluesky.protocols import Flyable, Preparable
 from pydantic import Field
+from typing_extensions import TypeVar as TypeVarWithDefault
 
 from ._standard_base import _StandardBase, _State, _StateMachine
 from ._status import AsyncStatus, WatchableAsyncStatus
@@ -13,8 +14,6 @@ from ._utils import (
     CALCULATE_TIMEOUT,
     CalculatableTimeout,
     ConfinedModel,
-    CtxT,
-    FlyStatusT,
     WatcherUpdate,
     abstract_cached_property,
 )
@@ -22,6 +21,13 @@ from ._utils import (
 #: The per-scan info passed to `FlyableLogic.on_prepare` (often a
 #: [`scanspec.core.Path`](inv:scanspec#scanspec.core.Path), but any type).
 PrepareT = TypeVar("PrepareT")
+#: The context object returned by `FlyableLogic.on_prepare` and passed on to
+#: `on_kickoff` and `on_complete`. Defaults to `None`, for flyers that carry no
+#: state between stages.
+CtxT = TypeVarWithDefault("CtxT", default=None)
+#: The status returned by `FlyableLogic.on_kickoff` and passed on to `on_complete`.
+#: Defaults to `None`, for flyers with nothing to wait for after kickoff.
+FlyStatusT = TypeVarWithDefault("FlyStatusT", bound=AsyncStatus | None, default=None)
 
 
 class FlyableLogic(Generic[PrepareT, CtxT, FlyStatusT]):

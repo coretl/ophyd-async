@@ -29,3 +29,4 @@
 - `unstage()` now cancels a running fly, so the PMAC trajectory stops appending points and no status is left running after the hardware is stopped.
 - `unstage()` now ends a running `complete()` when `kickoff()` returned no status, such as for the PandA.
 - A failed `prepare()` no longer leaves the flyer prepared with the failed context, so there is nothing to kick off.
+- `set_and_wait_for_other_value()` cancelled before the first value arrives, such as by `stop()` during a move, no longer leaves its value-watching task running.
