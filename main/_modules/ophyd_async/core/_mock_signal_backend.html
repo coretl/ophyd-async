@@ -7,7 +7,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ophyd_async.core._mock_signal_backend &#8212; ophyd-async 0.1.dev1038+g25a4f9ed2 documentation</title>
+    <title>ophyd_async.core._mock_signal_backend &#8212; ophyd-async 0.1.dev1046+g02547df0e documentation</title>
   
   
   
@@ -41,7 +41,7 @@
   <link rel="preload" as="script" href="../../../_static/scripts/bootstrap.js?digest=55c26ed414f5f8a31ebb" />
 <link rel="preload" as="script" href="../../../_static/scripts/pydata-sphinx-theme.js?digest=55c26ed414f5f8a31ebb" />
 
-    <script src="../../../_static/documentation_options.js?v=1a261263"></script>
+    <script src="../../../_static/documentation_options.js?v=0675b5cb"></script>
     <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../../../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -569,8 +569,8 @@ window.runMermaid = runMermaid;</script>
       
     
     
-    <img src="../../../_static/ophyd-async-logo.svg" class="logo__image only-light" alt="ophyd-async 0.1.dev1038+g25a4f9ed2 documentation - Home"/>
-    <img src="../../../_static/ophyd-async-logo.svg" class="logo__image only-dark pst-js-only" alt="ophyd-async 0.1.dev1038+g25a4f9ed2 documentation - Home"/>
+    <img src="../../../_static/ophyd-async-logo.svg" class="logo__image only-light" alt="ophyd-async 0.1.dev1046+g02547df0e documentation - Home"/>
+    <img src="../../../_static/ophyd-async-logo.svg" class="logo__image only-dark pst-js-only" alt="ophyd-async 0.1.dev1046+g02547df0e documentation - Home"/>
   
   
 </a></div>
@@ -906,7 +906,7 @@ window.runMermaid = runMermaid;</script>
 <span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">TYPE_CHECKING</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">unittest.mock</span><span class="w"> </span><span class="kn">import</span> <span class="n">AsyncMock</span>
 
-<span class="kn">from</span><span class="w"> </span><span class="nn">bluesky.protocols</span><span class="w"> </span><span class="kn">import</span> <span class="n">Reading</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">bluesky.protocols</span><span class="w"> </span><span class="kn">import</span> <span class="n">Location</span><span class="p">,</span> <span class="n">Reading</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">event_model</span><span class="w"> </span><span class="kn">import</span> <span class="n">DataKey</span>
 
 <span class="kn">from</span><span class="w"> </span><span class="nn">._derived_signal_backend</span><span class="w"> </span><span class="kn">import</span> <span class="n">DerivedSignalBackend</span>
@@ -921,6 +921,7 @@ window.runMermaid = runMermaid;</script>
     <span class="n">Callable</span><span class="p">[[</span><span class="n">SignalDatatypeT</span><span class="p">],</span> <span class="n">SignalDatatypeT</span> <span class="o">|</span> <span class="kc">None</span><span class="p">]</span>
     <span class="o">|</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">SignalDatatypeT</span><span class="p">],</span> <span class="n">Awaitable</span><span class="p">[</span><span class="n">SignalDatatypeT</span> <span class="o">|</span> <span class="kc">None</span><span class="p">]]</span>
 <span class="p">)</span>
+<span class="n">MockCallbackFilter</span> <span class="o">=</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">SignalDatatypeT</span><span class="p">],</span> <span class="n">SignalDatatypeT</span> <span class="o">|</span> <span class="kc">None</span><span class="p">]</span>
 
 
 <div class="viewcode-block" id="MockSignalBackend">
@@ -950,6 +951,7 @@ window.runMermaid = runMermaid;</script>
         <span class="c1"># use existing Mock if provided</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">mock</span> <span class="o">=</span> <span class="n">mock</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_mock_put_callback</span><span class="p">:</span> <span class="n">MockPutCallback</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_callback_filter</span><span class="p">:</span> <span class="n">MockCallbackFilter</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">datatype</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">initial_backend</span><span class="o">.</span><span class="n">datatype</span><span class="p">)</span>
 
 <div class="viewcode-block" id="MockSignalBackend.set_mock_put_callback">
@@ -961,9 +963,15 @@ window.runMermaid = runMermaid;</script>
             <span class="bp">self</span><span class="o">.</span><span class="n">put_mock</span><span class="o">.</span><span class="n">side_effect</span> <span class="o">=</span> <span class="n">callback</span></div>
 
 
+<div class="viewcode-block" id="MockSignalBackend.set_mock_callback_filter">
+<a class="viewcode-back" href="../../../_api/ophyd_async/ophyd_async.core.html#ophyd_async.core.MockSignalBackend.set_mock_callback_filter">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_mock_callback_filter</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="nb">filter</span><span class="p">:</span> <span class="n">MockCallbackFilter</span> <span class="o">|</span> <span class="kc">None</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_callback_filter</span> <span class="o">=</span> <span class="nb">filter</span></div>
+
+
     <span class="nd">@cached_property</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">put_mock</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">AsyncMock</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the mock that will track calls to `put()`.&quot;&quot;&quot;</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;The mock that will track calls to `put()`.&quot;&quot;&quot;</span>
         <span class="n">put_mock</span> <span class="o">=</span> <span class="n">AsyncMock</span><span class="p">(</span>
             <span class="n">name</span><span class="o">=</span><span class="s2">&quot;put&quot;</span><span class="p">,</span>
             <span class="n">spec</span><span class="o">=</span><span class="n">Callable</span><span class="p">,</span>
@@ -976,9 +984,19 @@ window.runMermaid = runMermaid;</script>
 
 <div class="viewcode-block" id="MockSignalBackend.set_value">
 <a class="viewcode-back" href="../../../_api/ophyd_async/ophyd_async.core.html#ophyd_async.core.MockSignalBackend.set_value">[docs]</a>
-    <span class="k">def</span><span class="w"> </span><span class="nf">set_value</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">value</span><span class="p">:</span> <span class="n">SignalDatatypeT</span><span class="p">):</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set the value of the signal.&quot;&quot;&quot;</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">soft_backend</span><span class="o">.</span><span class="n">set_value</span><span class="p">(</span><span class="n">value</span><span class="p">)</span></div>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_value</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">value</span><span class="p">:</span> <span class="n">SignalDatatypeT</span><span class="p">,</span>
+        <span class="n">timestamp</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">alarm_severity</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set the value, timestamp and alarm severity of the signal.</span>
+
+<span class="sd">        :param value: The new value.</span>
+<span class="sd">        :param timestamp: The reading timestamp, `None` means now.</span>
+<span class="sd">        :param alarm_severity: The alarm severity, 0 means ok.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">soft_backend</span><span class="o">.</span><span class="n">set_value</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">timestamp</span><span class="p">,</span> <span class="n">alarm_severity</span><span class="p">)</span></div>
 
 
 <div class="viewcode-block" id="MockSignalBackend.set_units">
@@ -1007,7 +1025,7 @@ window.runMermaid = runMermaid;</script>
 
     <span class="nd">@cached_property</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">put_proceeds</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">Event</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return an Event that will block `put()` until set.</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;An Event that will block `put()` until set.</span>
 
 <span class="sd">        The Event is initially set, but can be unset to block `put()`.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
@@ -1037,10 +1055,10 @@ window.runMermaid = runMermaid;</script>
         <span class="k">return</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">soft_backend</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span></div>
 
 
-<div class="viewcode-block" id="MockSignalBackend.get_setpoint">
-<a class="viewcode-back" href="../../../_api/ophyd_async/ophyd_async.core.html#ophyd_async.core.MockSignalBackend.get_setpoint">[docs]</a>
-    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_setpoint</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SignalDatatypeT</span><span class="p">:</span>
-        <span class="k">return</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">soft_backend</span><span class="o">.</span><span class="n">get_setpoint</span><span class="p">()</span></div>
+<div class="viewcode-block" id="MockSignalBackend.get_location">
+<a class="viewcode-back" href="../../../_api/ophyd_async/ophyd_async.core.html#ophyd_async.core.MockSignalBackend.get_location">[docs]</a>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_location</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Location</span><span class="p">[</span><span class="n">SignalDatatypeT</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">soft_backend</span><span class="o">.</span><span class="n">get_location</span><span class="p">()</span></div>
 
 
 <div class="viewcode-block" id="MockSignalBackend.get_datakey">
@@ -1052,7 +1070,24 @@ window.runMermaid = runMermaid;</script>
 <div class="viewcode-block" id="MockSignalBackend.set_callback">
 <a class="viewcode-back" href="../../../_api/ophyd_async/ophyd_async.core.html#ophyd_async.core.MockSignalBackend.set_callback">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">set_callback</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">callback</span><span class="p">:</span> <span class="n">Callback</span><span class="p">[</span><span class="n">Reading</span><span class="p">[</span><span class="n">SignalDatatypeT</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">soft_backend</span><span class="o">.</span><span class="n">set_callback</span><span class="p">(</span><span class="n">callback</span><span class="p">)</span></div>
+        <span class="c1"># None pass through</span>
+        <span class="k">if</span> <span class="n">callback</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">soft_backend</span><span class="o">.</span><span class="n">set_callback</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>
+            <span class="k">return</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">filtered</span><span class="p">(</span><span class="n">reading</span><span class="p">:</span> <span class="n">Reading</span><span class="p">[</span><span class="n">SignalDatatypeT</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_callback_filter</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">value</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_callback_filter</span><span class="p">(</span><span class="n">reading</span><span class="p">[</span><span class="s2">&quot;value&quot;</span><span class="p">])</span>
+                <span class="c1"># None means veto: the subscriber never sees this update. This</span>
+                <span class="c1"># includes the initial value the soft backend emits synchronously</span>
+                <span class="c1"># at subscribe time, which is what makes waits time out for real.</span>
+                <span class="k">if</span> <span class="n">value</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="k">return</span>
+                <span class="c1"># Copy rather than mutate</span>
+                <span class="n">reading</span> <span class="o">=</span> <span class="p">{</span><span class="o">**</span><span class="n">reading</span><span class="p">,</span> <span class="s2">&quot;value&quot;</span><span class="p">:</span> <span class="n">value</span><span class="p">}</span>
+            <span class="n">callback</span><span class="p">(</span><span class="n">reading</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">soft_backend</span><span class="o">.</span><span class="n">set_callback</span><span class="p">(</span><span class="n">filtered</span><span class="p">)</span></div>
 </div>
 
 </pre></div>

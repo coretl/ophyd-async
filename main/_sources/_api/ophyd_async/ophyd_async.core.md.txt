@@ -415,6 +415,10 @@
   - ```{autodoc2-docstring} ophyd_async.core._mock_signal_utils.set_mock_put_proceeds
     :summary:
     ```
+* - {py:obj}`set_callback_filter <ophyd_async.core._mock_signal_utils.set_callback_filter>`
+  - ```{autodoc2-docstring} ophyd_async.core._mock_signal_utils.set_callback_filter
+    :summary:
+    ```
 * - {py:obj}`set_mock_units <ophyd_async.core._mock_signal_utils.set_mock_units>`
   - ```{autodoc2-docstring} ophyd_async.core._mock_signal_utils.set_mock_units
     :summary:
@@ -477,6 +481,10 @@
     ```
 * - {py:obj}`get_enum_cls <ophyd_async.core._utils.get_enum_cls>`
   - ```{autodoc2-docstring} ophyd_async.core._utils.get_enum_cls
+    :summary:
+    ```
+* - {py:obj}`get_ndim <ophyd_async.core._utils.get_ndim>`
+  - ```{autodoc2-docstring} ophyd_async.core._utils.get_ndim
     :summary:
     ```
 * - {py:obj}`get_unique <ophyd_async.core._utils.get_unique>`
@@ -1617,12 +1625,12 @@ Bases: {py:obj}`typing.Generic`\[{py:obj}`ophyd_async.core._signal_backend.Signa
 
 ````
 
-````{py:method} get_setpoint() -> ~ophyd_async.core._signal_backend.SignalDatatypeT
-:canonical: ophyd_async.core._signal_backend.SignalBackend.get_setpoint
+````{py:method} get_location() -> ~bluesky.protocols.Location[~ophyd_async.core._signal_backend.SignalDatatypeT]
+:canonical: ophyd_async.core._signal_backend.SignalBackend.get_location
 :abstractmethod:
 :async:
 
-```{autodoc2-docstring} ophyd_async.core._signal_backend.SignalBackend.get_setpoint
+```{autodoc2-docstring} ophyd_async.core._signal_backend.SignalBackend.get_location
 ```
 
 ````
@@ -1864,7 +1872,7 @@ Bases: {py:obj}`ophyd_async.core._signal_backend.SignalBackend`\[{py:obj}`ophyd_
 ```{autodoc2-docstring} ophyd_async.core._soft_signal_backend.SoftSignalBackend
 ```
 
-````{py:method} set_value(value: ~ophyd_async.core._signal_backend.SignalDatatypeT)
+````{py:method} set_value(value: ~ophyd_async.core._signal_backend.SignalDatatypeT, timestamp: float | None = None, alarm_severity: int = 0)
 :canonical: ophyd_async.core._soft_signal_backend.SoftSignalBackend.set_value
 
 ```{autodoc2-docstring} ophyd_async.core._soft_signal_backend.SoftSignalBackend.set_value
@@ -1925,11 +1933,11 @@ Bases: {py:obj}`ophyd_async.core._signal_backend.SignalBackend`\[{py:obj}`ophyd_
 
 ````
 
-````{py:method} get_setpoint() -> ~ophyd_async.core._signal_backend.SignalDatatypeT
-:canonical: ophyd_async.core._soft_signal_backend.SoftSignalBackend.get_setpoint
+````{py:method} get_location() -> ~bluesky.protocols.Location[~ophyd_async.core._signal_backend.SignalDatatypeT]
+:canonical: ophyd_async.core._soft_signal_backend.SoftSignalBackend.get_location
 :async:
 
-```{autodoc2-docstring} ophyd_async.core._soft_signal_backend.SoftSignalBackend.get_setpoint
+```{autodoc2-docstring} ophyd_async.core._soft_signal_backend.SoftSignalBackend.get_location
 ```
 
 ````
@@ -2003,6 +2011,14 @@ Bases: {py:obj}`ophyd_async.core._signal_backend.SignalBackend`\[{py:obj}`ophyd_
 
 ````
 
+````{py:method} set_mock_callback_filter(filter: ~ophyd_async.core._mock_signal_backend.MockCallbackFilter | None)
+:canonical: ophyd_async.core._mock_signal_backend.MockSignalBackend.set_mock_callback_filter
+
+```{autodoc2-docstring} ophyd_async.core._mock_signal_backend.MockSignalBackend.set_mock_callback_filter
+```
+
+````
+
 ````{py:method} put_mock() -> ~unittest.mock.AsyncMock
 :canonical: ophyd_async.core._mock_signal_backend.MockSignalBackend.put_mock
 
@@ -2011,7 +2027,7 @@ Bases: {py:obj}`ophyd_async.core._signal_backend.SignalBackend`\[{py:obj}`ophyd_
 
 ````
 
-````{py:method} set_value(value: ~ophyd_async.core._signal_backend.SignalDatatypeT)
+````{py:method} set_value(value: ~ophyd_async.core._signal_backend.SignalDatatypeT, timestamp: float | None = None, alarm_severity: int = 0)
 :canonical: ophyd_async.core._mock_signal_backend.MockSignalBackend.set_value
 
 ```{autodoc2-docstring} ophyd_async.core._mock_signal_backend.MockSignalBackend.set_value
@@ -2087,11 +2103,11 @@ Bases: {py:obj}`ophyd_async.core._signal_backend.SignalBackend`\[{py:obj}`ophyd_
 
 ````
 
-````{py:method} get_setpoint() -> ~ophyd_async.core._signal_backend.SignalDatatypeT
-:canonical: ophyd_async.core._mock_signal_backend.MockSignalBackend.get_setpoint
+````{py:method} get_location() -> ~bluesky.protocols.Location[~ophyd_async.core._signal_backend.SignalDatatypeT]
+:canonical: ophyd_async.core._mock_signal_backend.MockSignalBackend.get_location
 :async:
 
-```{autodoc2-docstring} ophyd_async.core._mock_signal_backend.MockSignalBackend.get_setpoint
+```{autodoc2-docstring} ophyd_async.core._mock_signal_backend.MockSignalBackend.get_location
 ```
 
 ````
@@ -2136,7 +2152,7 @@ Bases: {py:obj}`ophyd_async.core._signal_backend.SignalBackend`\[{py:obj}`ophyd_
 ```
 ````
 
-````{py:function} set_mock_value(signal: ~ophyd_async.core._signal.Signal[~ophyd_async.core._signal_backend.SignalDatatypeT], value: ~ophyd_async.core._signal_backend.SignalDatatypeT)
+````{py:function} set_mock_value(signal: ~ophyd_async.core._signal.Signal[~ophyd_async.core._signal_backend.SignalDatatypeT], value: ~ophyd_async.core._signal_backend.SignalDatatypeT, timestamp: float | None = None, alarm_severity: int = 0)
 :canonical: ophyd_async.core._mock_signal_utils.set_mock_value
 
 ```{autodoc2-docstring} ophyd_async.core._mock_signal_utils.set_mock_value
@@ -2205,6 +2221,13 @@ Bases: {py:obj}`ophyd_async.core._signal_backend.SignalBackend`\[{py:obj}`ophyd_
 :canonical: ophyd_async.core._mock_signal_utils.set_mock_put_proceeds
 
 ```{autodoc2-docstring} ophyd_async.core._mock_signal_utils.set_mock_put_proceeds
+```
+````
+
+````{py:function} set_callback_filter(signal: ~ophyd_async.core._signal.Signal[~ophyd_async.core._signal_backend.SignalDatatypeT], filter: ~ophyd_async.core._mock_signal_backend.MockCallbackFilter)
+:canonical: ophyd_async.core._mock_signal_utils.set_callback_filter
+
+```{autodoc2-docstring} ophyd_async.core._mock_signal_utils.set_callback_filter
 ```
 ````
 
@@ -3726,6 +3749,13 @@ Bases: {py:obj}`typing.Generic`\[{py:obj}`ophyd_async.core._utils.T`\]
 :canonical: ophyd_async.core._utils.get_enum_cls
 
 ```{autodoc2-docstring} ophyd_async.core._utils.get_enum_cls
+```
+````
+
+````{py:function} get_ndim(datatype: type) -> int | None
+:canonical: ophyd_async.core._utils.get_ndim
+
+```{autodoc2-docstring} ophyd_async.core._utils.get_ndim
 ```
 ````
 
