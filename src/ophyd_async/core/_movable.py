@@ -1,11 +1,9 @@
 import asyncio
 import time
-from abc import abstractmethod
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Callable, Coroutine
+from dataclasses import dataclass, field, replace
 from enum import Enum
-from functools import cached_property
-from typing import Generic
+from typing import Any, Generic
 
 from bluesky.protocols import (
     Checkable,
@@ -26,6 +24,7 @@ from ._utils import (
     CalculatableTimeout,
     Callback,
     WatcherUpdate,
+    abstract_cached_property,
 )
 
 
@@ -111,9 +110,56 @@ class InstantMovableMock(DeviceMock["StandardMovable"]):
         """Mock signals to do an instant move on setpoint write."""
 
         def _instant_move(value):
-            set_mock_value(device.movable_logic.readback, value)  # Arrive instantly
+            set_mock_value(device.logic.readback, value)  # Arrive instantly
 
-        callback_on_mock_put(device.movable_logic.setpoint, _instant_move)
+        callback_on_mock_put(device.logic.setpoint, _instant_move)
+
+
+async def watch_readback(
+    logic: MovableLogic[SignalDatatypeT],
+    action: Coroutine[Any, Any, Any] | AsyncStatus,
+    target: SignalDatatypeT,
+    initial: SignalDatatypeT | None = None,
+) -> AsyncIterator[WatcherUpdate[SignalDatatypeT]]:
+    """Report the progress of an action by watching the readback of a logic.
+
+    Yields a `WatcherUpdate` for each readback value until the action is done,
+    then re-raises any error the action raised. Use it from a `FlyableLogic`
+    hook that moves the logic's device, returning it from the hook as its
+    progress.
+
+    :param logic: the logic whose readback is watched, and which supplies the
+        units and precision.
+    :param action: the coroutine or status that is making the move. A coroutine
+        is started here and cancelled if the iteration is abandoned; a status is
+        left running.
+    :param target: the value the action is moving to.
+    :param initial: where the move started from. Defaults to the readback now.
+    """
+    try:
+        if initial is None:
+            initial = await logic.readback.get_value()
+        units, precision = await logic.get_units_precision()
+    except BaseException:
+        if isinstance(action, Coroutine):
+            action.close()
+        raise
+    status = action if isinstance(action, AsyncStatus) else AsyncStatus(action)
+    try:
+        async for current in observe_value(logic.readback, done_status=status):
+            yield WatcherUpdate(
+                current=current,
+                initial=initial,
+                target=target,
+                name=logic.readback.name,
+                unit=units,
+                precision=precision,
+            )
+    finally:
+        # Only cancel what we started: a status passed in belongs to the caller
+        if status is not action:
+            async with status:
+                pass
 
 
 class StopState(Enum):
@@ -133,7 +179,7 @@ class StandardMovable(
 ):
     """Device that provides standard logic for moving.
 
-    This class must be inherited and have a `movable_logic` @cached_property.
+    This class must be inherited and have a `logic` @cached_property.
     If stop is called while moving, it will raise a RuntimeError.
     """
 
@@ -142,20 +188,26 @@ class StandardMovable(
     _stop_state: Enum = StopState.NONE
     _move_status: AsyncStatus | None = None
 
-    @cached_property
-    @abstractmethod
-    def movable_logic(self) -> MovableLogic:
+    @abstract_cached_property
+    def logic(self) -> MovableLogic[SignalDatatypeT]:
         """The logic object that describes how this device moves.
 
         This is intentionally public so that mock helpers (e.g.
         `InstantMovableMock`) and subclasses can access the `setpoint` and
         `readback` signals directly. Subclasses must implement this as a
-        `@cached_property` that returns a `MovableLogic` instance.
+        `@cached_property` returning a `MovableLogic`.
+
+        A Device that is movable *and* flyable (e.g. `Motor`) implements this
+        once with a logic object that inherits both `MovableLogic` and
+        `FlyableLogic`; each mix-in declares `logic` with its own
+        required type, so the type checker verifies the one implementation
+        against both.
         """
+        raise NotImplementedError
 
     async def check_value(self, value: SignalDatatypeT) -> None:
         """Check the move is valid before doing it."""
-        await self.movable_logic.check_move(value)
+        await self.logic.check_move(value)
 
     @WatchableAsyncStatus.wrap
     async def set(
@@ -165,14 +217,11 @@ class StandardMovable(
     ):
         """Move to the given value."""
         self._stop_state = StopState.NONE
-        old_position, (units, precision) = await asyncio.gather(
-            self.movable_logic.readback.get_value(),
-            self.movable_logic.get_units_precision(),
-        )
-        await self.movable_logic.check_move(new_position)
+        old_position = await self.logic.readback.get_value()
+        await self.logic.check_move(new_position)
 
         if timeout == CALCULATE_TIMEOUT:
-            move_timeout = await self.movable_logic.calculate_timeout(
+            move_timeout = await self.logic.calculate_timeout(
                 old_position, new_position
             )
         else:
@@ -180,22 +229,17 @@ class StandardMovable(
 
         try:
             async with AsyncStatus(
-                self.movable_logic.move(
+                self.logic.move(
                     new_position=new_position, timeout=MoveTimeout(move_timeout)
                 )
             ) as self._move_status:
-                async for current_position in observe_value(
-                    self.movable_logic.readback,
-                    done_status=self._move_status,
+                async for update in watch_readback(
+                    self.logic,
+                    self._move_status,
+                    target=new_position,
+                    initial=old_position,
                 ):
-                    yield WatcherUpdate(
-                        current=current_position,
-                        initial=old_position,
-                        target=new_position,
-                        name=self.name,
-                        unit=units,
-                        precision=precision,
-                    )
+                    yield replace(update, name=self.name)
         # Convert cancellation into the appropriate stop result.
         # If stop(success=True) was called, complete without raising.
         # If stop(success=False) was called, raise a RuntimeError below.
@@ -215,20 +259,20 @@ class StandardMovable(
     async def stop(self, success=False):
         """Request to stop moving and return immediately."""
         self._stop_state = StopState.USER_SUCCESS if success else StopState.USER_FAILURE
-        await self.movable_logic.stop()
+        await self.logic.stop()
         if self._move_status:
             self._move_status.task.cancel()
 
     def set_name(self, name: str, *, child_name_separator: str | None = None) -> None:
         super().set_name(name, child_name_separator=child_name_separator)
         # Readback should be named the same as its parent in read()
-        self.movable_logic.readback.set_name(name)
+        self.logic.readback.set_name(name)
 
     async def locate(self) -> Location[SignalDatatypeT]:
         """Return the current setpoint and readback of the device."""
         setpoint, readback = await asyncio.gather(
-            self.movable_logic.setpoint.get_value(),
-            self.movable_logic.readback.get_value(),
+            self.logic.setpoint.get_value(),
+            self.logic.readback.get_value(),
         )
         return Location(setpoint=setpoint, readback=readback)
 
@@ -236,7 +280,7 @@ class StandardMovable(
         self, function: Callback[dict[str, Reading[SignalDatatypeT]]]
     ) -> None:
         """Subscribe to reading."""
-        self.movable_logic.readback.subscribe_reading(function)
+        self.logic.readback.subscribe_reading(function)
 
     subscribe = subscribe_reading
 
@@ -244,4 +288,4 @@ class StandardMovable(
         self, function: Callback[dict[str, Reading[SignalDatatypeT]]]
     ) -> None:
         """Unsubscribe."""
-        self.movable_logic.readback.clear_sub(function)
+        self.logic.readback.clear_sub(function)

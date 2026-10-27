@@ -711,8 +711,9 @@ async def set_and_wait_for_other_value(
             # the other is cancelled
             await asyncio.gather(wait_task, status.task)
         return status
-    except Exception:
-        # Make sure the wait is not left dangling if there was an error
+    except BaseException:
+        # Make sure the wait is not left dangling if there was an error or we
+        # were cancelled
         wait_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await wait_task

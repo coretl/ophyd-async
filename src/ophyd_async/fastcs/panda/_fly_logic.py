@@ -44,12 +44,12 @@ class ScanSpecInfo(ConfinedModel):
 
 
 @dataclass
-class StaticSeqTableFlyableLogic(FlyableLogic[SeqTableInfo, None]):
+class StaticSeqTableFlyableLogic(FlyableLogic[SeqTableInfo]):
     """For controlling the PandA `SeqTable` when fly scanning."""
 
     seq: SeqBlock
 
-    async def on_prepare(self, value: SeqTableInfo):
+    async def on_prepare(self, value: SeqTableInfo) -> None:
         await asyncio.gather(
             self.seq.prescale_units.set(PandaTimeUnits.US),
             self.seq.enable.set(PandaBitMux.ZERO),
@@ -64,7 +64,7 @@ class StaticSeqTableFlyableLogic(FlyableLogic[SeqTableInfo, None]):
         await self.seq.enable.set(PandaBitMux.ONE)
         await wait_for_value(self.seq.active, True, timeout=1)
 
-    async def on_complete(self, ctx: None) -> None:
+    async def on_complete(self, ctx: None, status: None) -> None:
         await wait_for_value(self.seq.active, False, timeout=None)
 
     async def stop(self):
@@ -89,11 +89,11 @@ class PosOutScaleOffset:
 
 
 @dataclass
-class ScanSpecSeqTableFlyableLogic(FlyableLogic[ScanSpecInfo, None]):
+class ScanSpecSeqTableFlyableLogic(FlyableLogic[ScanSpecInfo]):
     seq: SeqBlock
     motor_pos_outs: dict[Motor, PosOutScaleOffset] = field(default_factory=dict)
 
-    async def on_prepare(self, value: ScanSpecInfo):
+    async def on_prepare(self, value: ScanSpecInfo) -> None:
         await self.seq.enable.set(PandaBitMux.ZERO)
         slice = Path(value.spec.calculate()).consume()
         slice_duration = error_if_none(slice.duration, "Slice must have duration")
@@ -159,7 +159,7 @@ class ScanSpecSeqTableFlyableLogic(FlyableLogic[ScanSpecInfo, None]):
         await self.seq.enable.set(PandaBitMux.ONE)
         await wait_for_value(self.seq.active, True, timeout=1)
 
-    async def on_complete(self, ctx: None) -> None:
+    async def on_complete(self, ctx: None, status: None) -> None:
         await wait_for_value(self.seq.active, False, timeout=None)
 
     async def stop(self):
@@ -192,12 +192,12 @@ class PcompInfo(ConfinedModel):
 
 
 @dataclass
-class StaticPcompFlyableLogic(FlyableLogic[PcompInfo, None]):
+class StaticPcompFlyableLogic(FlyableLogic[PcompInfo]):
     """For controlling the PandA `PcompBlock` when fly scanning."""
 
     pcomp: PcompBlock
 
-    async def on_prepare(self, value: PcompInfo):
+    async def on_prepare(self, value: PcompInfo) -> None:
         await self.pcomp.enable.set(PandaBitMux.ZERO)
         await asyncio.gather(
             self.pcomp.start.set(value.start_position),
@@ -211,7 +211,7 @@ class StaticPcompFlyableLogic(FlyableLogic[PcompInfo, None]):
         await self.pcomp.enable.set(PandaBitMux.ONE)
         await wait_for_value(self.pcomp.active, True, timeout=1)
 
-    async def on_complete(self, ctx: None) -> None:
+    async def on_complete(self, ctx: None, status: None) -> None:
         await wait_for_value(self.pcomp.active, False, timeout=None)
 
     async def stop(self):

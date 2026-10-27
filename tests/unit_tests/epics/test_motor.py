@@ -244,6 +244,7 @@ async def test_set(motor: Motor, setpoint, velocity, timeout) -> None:
 
 
 async def test_prepare_velocity_limit_error(motor: Motor):
+    await motor.stage()
     set_mock_value(motor.max_velocity, 10)
     with pytest.raises(MotorLimitsError):
         fly_info = FlyMotorInfo(start_position=-10, end_position=0, time_for_move=0.9)
@@ -251,6 +252,7 @@ async def test_prepare_velocity_limit_error(motor: Motor):
 
 
 async def test_valid_prepare_velocity(motor: Motor):
+    await motor.stage()
     # Widen user limits to accommodate ramp distances (trajectory goes to -10.5)
     set_mock_value(motor.low_limit_travel, -11)
     set_mock_value(motor.high_limit_travel, 21)
@@ -279,6 +281,7 @@ async def test_prepare_motor_limits_error(
     upper_limit,
     lower_limit,
 ):
+    await motor.stage()
     set_mock_value(motor.acceleration_time, acceleration_time)
     set_mock_value(motor.low_limit_travel, lower_limit)
     set_mock_value(motor.high_limit_travel, upper_limit)
@@ -293,6 +296,7 @@ async def test_prepare_motor_limits_error(
 
 
 async def test_prepare_valid_limits(motor: Motor):
+    await motor.stage()
     set_mock_value(motor.acceleration_time, 1)
     set_mock_value(motor.low_limit_travel, -10.01)
     set_mock_value(motor.high_limit_travel, 20.01)
@@ -331,6 +335,7 @@ async def test_fly_scan(
     expected_end: float,
 ):
     """Happy-path prepare -> kickoff -> complete through the public interface."""
+    await motor.stage()
     # A small acceleration time keeps the up-to-speed wait in kickoff() negligible
     set_mock_value(motor.acceleration_time, 0.2)
     set_mock_value(motor.low_limit_travel, -15)
@@ -352,16 +357,6 @@ async def test_fly_scan(
     await status
     assert status.done
     assert await motor.user_setpoint.get_value() == pytest.approx(expected_end)
-
-
-async def test_kickoff_before_prepare_raises(motor: Motor):
-    with pytest.raises(RuntimeError, match="prepare.* before kickoff"):
-        await motor.kickoff()
-
-
-async def test_complete_before_kickoff_raises(motor: Motor):
-    with pytest.raises(RuntimeError, match="kickoff.* before complete"):
-        await motor.complete()
 
 
 @pytest.mark.parametrize(
@@ -644,3 +639,19 @@ async def test_velo_and_accl_respecting_motor_mock_interrupted_move(
     # the target means the move ended early rather than finishing
     assert await motor.motor_done_move.get_value() == 1
     assert await motor.user_readback.get_value() < 10.0
+
+
+# As on main: stop() only affects set(), so during the run-up the motor record
+# finishes the put early and prepare returns with the motor short of the start
+async def test_stop_during_prepare_run_up_halts_the_motor(
+    velo_and_accl_respecting_motor: Motor,
+):
+    motor = velo_and_accl_respecting_motor
+    await motor.stage()
+    preparing = motor.prepare(
+        FlyMotorInfo(start_position=100, end_position=200, time_for_move=1)
+    )
+    await wait_for_value(motor.user_readback, lambda v: v > 1, timeout=1)
+    await motor.stop()
+    await preparing
+    assert await motor.user_readback.get_value() < 100

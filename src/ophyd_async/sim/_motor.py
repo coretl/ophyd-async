@@ -1,29 +1,49 @@
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from functools import cached_property
 
 from ophyd_async.core import (
     AsyncStatus,
     DeviceMock,
+    FlyableLogic,
     FlyMotorInfo,
     MovableLogic,
     SignalRW,
+    StandardFlyable,
     StandardMovable,
     StandardReadable,
     TimeoutCalculator,
-    WatchableAsyncStatus,
+    WatcherUpdate,
     default_mock_class,
-    error_if_none,
     simulate_move,
     soft_signal_r_and_setter,
     soft_signal_rw,
+    watch_readback,
 )
 from ophyd_async.core import StandardReadableFormat as Format
 
 
+@dataclass(frozen=True)
+class SimMotorPrepareCtx:
+    """What a simulated motor fly scan needs after `on_prepare`."""
+
+    #: Where to start from: the start position with the run-up distance added.
+    start: float
+    #: Where to end: the end position with the run-down distance added.
+    end: float
+    #: The speed of the constant velocity phase.
+    speed: float
+    #: How long the motor takes to get up to speed.
+    acceleration_time: float
+
+
 @dataclass
-class SimMotorMoveLogic(MovableLogic[float]):
+class SimMotorLogic(
+    MovableLogic[float], FlyableLogic[FlyMotorInfo, SimMotorPrepareCtx, AsyncStatus]
+):
+    """Combined move + fly logic for a simulated motor."""
+
     readback_set: Callable[[float], None]
     velocity: SignalRW[float]
     acceleration_time: SignalRW[float]
@@ -45,11 +65,59 @@ class SimMotorMoveLogic(MovableLogic[float]):
         ):
             self.readback_set(position)
 
+    async def on_prepare(
+        self, value: FlyMotorInfo
+    ) -> tuple[SimMotorPrepareCtx, AsyncIterator[WatcherUpdate]]:
+        """Work out the run-up and run-down positions, then move to the run-up start.
+
+        Progress of the move is reported.
+        """
+        acceleration_time = await self.acceleration_time.get_value()
+        ctx = SimMotorPrepareCtx(
+            start=value.ramp_up_start_pos(acceleration_time),
+            end=value.ramp_down_end_pos(acceleration_time),
+            speed=value.speed,
+            acceleration_time=acceleration_time,
+        )
+        return ctx, watch_readback(self, self._move_to_start(ctx), target=ctx.start)
+
+    async def _move_to_start(self, ctx: SimMotorPrepareCtx) -> None:
+        # Move to start as fast as we can
+        await self.velocity.set(0)
+        await self.move(ctx.start, lambda: None)
+        # Set the velocity for the actual move
+        await self.velocity.set(ctx.speed)
+
+    async def on_kickoff(self, ctx: SimMotorPrepareCtx) -> AsyncStatus:
+        """Begin moving motor from prepared position to final position."""
+        status = AsyncStatus(self.move(ctx.end, lambda: None))
+        # Wait for the acceleration time to ensure we are at velocity
+        try:
+            await asyncio.sleep(ctx.acceleration_time)
+        except BaseException:
+            status.task.cancel()
+            raise
+        return status
+
+    async def on_complete(
+        self, ctx: SimMotorPrepareCtx, status: AsyncStatus
+    ) -> AsyncIterator[WatcherUpdate]:
+        """Report progress until the motor reaches the completed position."""
+        return watch_readback(self, status, target=ctx.end, initial=ctx.start)
+
 
 # Remove InstantMovableMock as SimMotor owns this logic, depends if instant=True/False
 @default_mock_class(DeviceMock)
-class SimMotor(StandardReadable, StandardMovable[float]):
-    """For usage when simulating a motor."""
+class SimMotor(
+    StandardReadable,
+    StandardMovable[float],
+    StandardFlyable[FlyMotorInfo, SimMotorPrepareCtx, AsyncStatus],
+):
+    """For usage when simulating a motor.
+
+    Like the EPICS `Motor`, `stage()` and `unstage()` call `stop()`, which sets the
+    setpoint to the current readback; a move already in progress carries on.
+    """
 
     def __init__(
         self,
@@ -75,47 +143,14 @@ class SimMotor(StandardReadable, StandardMovable[float]):
             self.acceleration_time = soft_signal_rw(float, 0.5)
         self.user_setpoint = soft_signal_rw(float, initial_value, units=units)
 
-        # Stored in prepare
-        self._fly_info: FlyMotorInfo | None = None
-        # Set on kickoff(), complete when motor reaches end position
-        self._fly_status: WatchableAsyncStatus | None = None
-
         super().__init__(name=name)
 
     @cached_property
-    def movable_logic(self):
-        return SimMotorMoveLogic(
+    def logic(self) -> SimMotorLogic:
+        return SimMotorLogic(
             readback=self.user_readback,
             readback_set=self._user_readback_set,
             setpoint=self.user_setpoint,
             velocity=self.velocity,
             acceleration_time=self.acceleration_time,
         )
-
-    @AsyncStatus.wrap
-    async def prepare(self, value: FlyMotorInfo):
-        """Calculate run-up and move there, setting fly velocity when there."""
-        self._fly_info = value
-        # Move to start as fast as we can
-        await self.velocity.set(0)
-        await self.set(
-            value.ramp_up_start_pos(await self.acceleration_time.get_value())
-        )
-        # Set the velocity for the actual move
-        await self.velocity.set(value.speed)
-
-    @AsyncStatus.wrap
-    async def kickoff(self):
-        """Begin moving motor from prepared position to final position."""
-        fly_info = error_if_none(
-            self._fly_info, "Motor must be prepared before attempting to kickoff"
-        )
-        acceleration_time = await self.acceleration_time.get_value()
-        self._fly_status = self.set(fly_info.ramp_down_end_pos(acceleration_time))
-        # Wait for the acceleration time to ensure we are at velocity
-        await asyncio.sleep(acceleration_time)
-
-    def complete(self) -> WatchableAsyncStatus:
-        """Mark as complete once motor reaches completed position."""
-        fly_status = error_if_none(self._fly_status, "kickoff not called")
-        return fly_status
