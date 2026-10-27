@@ -29,31 +29,24 @@ jobs:
           iptables --version; update-alternatives --display iptables 2>&1 | head -5 || true
           nft --version || true
 
-      - name: Pull and inspect image directly
+      - name: Foreground compose up, show exit code
         continue-on-error: true
         run: |
-          time timeout 120 docker pull ghcr.io/epics-containers/gateways-runtime:2024.12.3 2>&1 | tail -15; echo "pull rc=${PIPESTATUS[0]}"
-          docker image ls
-          docker image inspect ghcr.io/epics-containers/gateways-runtime:2024.12.3 --format '{{.Os}}/{{.Architecture}}' || true
+          docker compose -f example-services/compose.yaml config -q; echo "config rc=$?"
+          timeout 60 docker compose -f example-services/compose.yaml up ca-gateway; echo "up rc=$?"
+          grep -n "epics-opis" example-services/compose.yaml
 
-      - name: Compose up ca-gateway as tests/conftest.py does
+      - name: Same, with the duplicate epics-opis include removed
         continue-on-error: true
         run: |
-          docker compose -f example-services/compose.yaml up ca-gateway > gw.log 2>&1 &
-          CPID=$!
-          for i in $(seq 1 60); do
-            grep -q "Running as user " gw.log && break
-            sleep 1
-          done
-          echo "waited ${i}s; compose pid $CPID alive?"; kill -0 $CPID && echo alive || echo DEAD
-          cat gw.log
-          docker compose -f example-services/compose.yaml ps -a || true
-          docker ps -a
-
-      - name: Docker daemon logs
-        if: always()
-        continue-on-error: true
-        run: sudo journalctl -u docker --no-pager | tail -40
+          awk '/services\/epics-opis\/compose.yml/ && seen++ {next} {print}' example-services/compose.yaml > example-services/compose.dedup.yaml
+          diff example-services/compose.yaml example-services/compose.dedup.yaml || true
+          docker compose -f example-services/compose.dedup.yaml config -q; echo "config rc=$?"
+          docker compose -f example-services/compose.dedup.yaml up -d ca-gateway; echo "up rc=$?"
+          sleep 8
+          docker ps
+          nc -vz -w 3 127.0.0.1 9064; echo "nc rc=$?"
+          docker compose -f example-services/compose.dedup.yaml down || true
 
       - name: Network state
         run: |
