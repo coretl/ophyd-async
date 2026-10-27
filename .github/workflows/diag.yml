@@ -1,0 +1,105 @@
+name: diag-ubuntu-2604
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    env:
+      EXAMPLE_SERVICES_PATH: ./example-services
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Versions
+        run: |
+          grep -m1 -i "^Image:" -r /imagegeneration 2>/dev/null || true
+          cat /etc/os-release | head -3
+          uname -a
+          docker version
+          docker compose version
+          docker info | grep -i -E "storage|cgroup|runtime|iptables|ipv6|rootless|firewall|security" || true
+          cat /etc/docker/daemon.json 2>/dev/null || echo "no daemon.json"
+          iptables --version; update-alternatives --display iptables 2>&1 | head -5 || true
+          nft --version || true
+
+      - name: Compose up ca-gateway as tests/conftest.py does
+        run: |
+          docker compose -f example-services/compose.yaml up ca-gateway > gw.log 2>&1 &
+          for i in $(seq 1 90); do
+            grep -q "Running as user " gw.log && break
+            sleep 1
+          done
+          echo "waited ${i}s"; cat gw.log
+
+      - name: Network state
+        run: |
+          docker ps -a
+          echo "--- ss"; sudo ss -ltnup | grep -E "9064|9065|docker|State" || true
+          echo "--- docker port"; docker port ca-gateway || true
+          echo "--- inspect ports"; docker inspect ca-gateway --format '{{json .NetworkSettings.Ports}} {{json .NetworkSettings.Networks}}'
+          echo "--- processes"; ps aux | grep -E "docker-proxy|dockerd" | grep -v grep || true
+          echo "--- iptables -S"; sudo iptables -S || true
+          echo "--- iptables -t nat -S"; sudo iptables -t nat -S || true
+          echo "--- ip6tables -S"; sudo ip6tables -S || true
+          echo "--- nft"; sudo nft list ruleset || true
+          echo "--- sysctl"; sysctl net.ipv4.conf.all.route_localnet net.ipv4.ip_forward net.ipv6.conf.all.disable_ipv6 || true
+          echo "--- ip addr"; ip -br addr
+          echo "--- localhost resolves"; getent ahosts localhost
+
+      - name: Probe gateway from host
+        continue-on-error: true
+        run: |
+          for t in 1 2 3; do
+            echo "--- attempt $t"
+            nc -vz -w 3 127.0.0.1 9064 || true
+            nc -vz -w 3 127.0.0.1 9065 || true
+            nc -vz -w 3 localhost 9064 || true
+            sleep 2
+          done
+          GWIP=$(docker inspect ca-gateway --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+          echo "gateway container ip $GWIP"
+          nc -vz -w 3 $GWIP 9064 || true
+          echo "--- inside container"
+          docker exec ca-gateway bash -c 'cat /proc/net/tcp | head; ss -ltnup 2>/dev/null || netstat -ltnup 2>/dev/null || true' || true
+
+      - name: Python CA probe (as the client sees it)
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import socket, struct
+          # TCP connect
+          for host in ("127.0.0.1", "localhost"):
+              try:
+                  s = socket.create_connection((host, 9064), timeout=3)
+                  print("TCP connect", host, "OK")
+                  s.close()
+              except Exception as e:
+                  print("TCP connect", host, "FAILED", repr(e))
+          # CA_PROTO_VERSION UDP to gateway (header: cmd=0,size=0,dtype=priority 0,count=13,p1=0,p2=0)
+          msg = struct.pack(">HHHHII", 0, 0, 0, 13, 0, 0)
+          u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); u.settimeout(3)
+          u.sendto(msg, ("127.0.0.1", 9064))
+          try:
+              print("UDP reply", u.recvfrom(100))
+          except Exception as e:
+              print("UDP no reply", repr(e))
+          PY
+
+      - name: Real container test for ground truth
+        continue-on-error: true
+        run: |
+          pip install -q uv
+          uv run --locked tox -e tests -- --durations=5 tests/container_tests -x 2>&1 | tail -60
+
+      - name: Gateway logs
+        if: always()
+        run: |
+          docker logs ca-gateway 2>&1 | tail -60
+          docker compose -f example-services/compose.yaml down || true
