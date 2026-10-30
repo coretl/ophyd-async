@@ -98,7 +98,7 @@ The `AreaDetector` baseclass will:
 - Build a [](#DetectorLogic) from your trigger and acquire logic and return it from `logic`
 - Create and register a data logic for file writing for each factory in `writer_factories`
 - Add configuration signals (driver.acquire_time, driver.acquire_period, and any you specify)
-- Store any plugins as attributes on the detector
+- Store any plugins as attributes on the detector, and register each as a readable, so the signals it declares appear in `read()`, `read_configuration()` and `hints` (opt one out with `det.set_readable_format(plugin, None)`)
 
 ## Declare the public interface
 
@@ -117,21 +117,45 @@ For example, for ADAravis:
 
 ## Add multiple data streams (optional)
 
-The composition-based architecture makes it possible to give a detector several data outputs. Every [](#adcore.ADDataFactory) factory takes `always_enable`: `False` (the default) follows the plugin's `EnableCallbacks` PV, so a data output whose plugin is off sits out and another can serve the scan, and `True` switches the plugin on at the start of a scan.
+The composition-based architecture makes it possible to give a detector several data outputs. The file writer factories ([](#adcore.ADDataFactory.hdf), `jpeg` and `tiff`) take `always_enable`: `False` (the default) follows the plugin's `EnableCallbacks` PV, so a writer whose plugin is off sits out and another output can serve the scan, and `True` switches the plugin on at `stage()`. A stats time series has no `always_enable`: its plugin's switches decide, as below. A writer with `always_enable=True` is switched on once, at `stage()`; the factory does not write `EnableCallbacks` again at `prepare()`.
 
 ### Reading stats plugins alongside file writing
-A plugin scalar needs no data logic: a detector is a [](#StandardReadable), so register
-the signal and it appears in `read()` alongside whatever the file writer produces.
+A plugin in `plugins` is registered as a readable, so a detector with a stats plugin needs no
+data logic to read it: the plugin declares which of its signals are read and hinted, and they
+appear in `read()` alongside whatever the file writer produces.
 
 ```python
 from ophyd_async.core import StandardReadableFormat as Format
 
+stats = adcore.NDStatsIO("PREFIX:STATS:")
 det = adaravis.AravisDetector(
     prefix, adcore.ADDataFactory.hdf(path_provider), plugins={"stats": stats}
 )
-# Add stats total as a hinted signal in events
-det.set_readable_format(det.stats.total, Format.HINTED_UNCACHED_SIGNAL)
+# Read a statistic the plugin does not read by default
+det.set_readable_format(stats.sigma, Format.UNCACHED_SIGNAL)
 ```
+
+Each statistic of an [](#adcore.NDStatsIO) has one name, that of its scalar signal (`det-stats-total` here), however it is published:
+
+- as the scalar, read once per event, when nothing else serves it
+- as a stats time series ([](#adcore.ADDataFactory.stats_time_series)), for a detector that writes no file
+- as an NDAttribute in the HDF file, for each plugin listed in the `ndattribute_sources` of [](#adcore.ADDataFactory.hdf)
+
+The time series and the HDF writer take the plugin by reference, so make it first and put it in `plugins`. Only the factories of file writers make a plugin of their own.
+
+```python
+stats = adcore.NDStatsIO("PREFIX:STATS:")
+det = adaravis.AravisDetector(
+    prefix,
+    adcore.ADDataFactory.hdf(path_provider, ndattribute_sources=[stats]),
+    adcore.ADDataFactory.stats_time_series(stats),
+    plugins={"stats": stats},
+)
+```
+
+The highest of these that serves a scan replaces the others, and the plugin's hints stay. Which statistics are used is set on the plugin, not in Python: a statistic is used if the plugin's `EnableCallbacks` and its group's compute switch (`compute_statistics` or `compute_centroid`) are on at `stage()`, and it has a read format on the plugin. A scalar whose statistic is off is left out of `read()`, `describe()` and `hints`.
+
+`stage()` records these switches and each plugin's `nd_array_port`, once, and `prepare()` raises if any of them has changed since, so set them before staging, for example in a settings file. The chain of plugins that feeds a plugin is not checked: how it is wired at `stage()` is up to you. The process plugin of a trigger logic and the circular buffer of a continuously acquiring detector are switched on by their logic, so they are not recorded. An [](#adcore.NDROIStatIO) works the same way, with the `use` and `Name` of each channel recorded too: its channels are readable children of the plugin, named `<plugin name>-<Name PV>` at `stage()`, so a channel called Blue has the total `det-roistat-Blue-total`.
 
 ### Multiple HDF writers for different ROIs
 ```python

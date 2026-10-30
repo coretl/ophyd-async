@@ -364,3 +364,19 @@ async def test_uc9_continuous_acquisition_step_then_fly_scan(
         {"start": 2, "stop": 5}
     ]
     await det.unstage()
+
+
+async def test_cont_acq_prepare_again_after_it_switched_the_circular_buffer_on(
+    cont_acq_detector: adcore.AreaDetector[adcore.ADBaseIO],
+):
+    set_mock_value(cont_acq_detector.cb.enable_callbacks, EnableDisable.DISABLE)
+    await cont_acq_detector.stage()
+    # The first trigger prepares, switching the circular buffer on
+    await cont_acq_detector.trigger()
+    assert (
+        await cont_acq_detector.cb.enable_callbacks.get_value() is EnableDisable.ENABLE
+    )
+
+    # That is not a switch changed by someone else since stage()
+    await cont_acq_detector.prepare(TriggerInfo())
+    await cont_acq_detector.trigger()
