@@ -12,6 +12,7 @@ from ophyd_async.core import (
 )
 from ophyd_async.epics import adaravis, adcore, adsimdetector
 from ophyd_async.epics.core import epics_signal_r
+from ophyd_async.testing import assert_reading
 
 
 async def test_step_scan_hdf_detector_with_stats_and_temp(
