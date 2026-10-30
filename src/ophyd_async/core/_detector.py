@@ -15,8 +15,9 @@ from typing import cast
 from bluesky.protocols import (
     Collectable,
     Flyable,
-    HasHints,
+    Hints,
     Preparable,
+    Reading,
     Stageable,
     StreamAsset,
     Triggerable,
@@ -30,8 +31,6 @@ from ._readable import (
     StandardReadable,
     StandardReadableFormat,
     _config_signals,
-    _HintedFields,
-    _Verb,
 )
 from ._settings import Settings
 from ._signal import (
@@ -395,6 +394,11 @@ class StandardDetector(
         # so the readable children registered on this detector still get staged
         self._stage_funcs += (self._stage_detector,)
         self._unstage_funcs += (self._unstage_detector,)
+        # What the data logics produce, gathered alongside the registered
+        # children, so the verb methods themselves need no overriding
+        self._read_funcs += (self.__on_read,)
+        self._describe_funcs += (self.__on_describe,)
+        self._hints_funcs += (self.__on_hints,)
 
     # Report the number of events for the next kickoff
     @cached_property
@@ -739,35 +743,30 @@ class StandardDetector(
         ):
             yield update
 
-    def _extra_funcs_for(self, verb: _Verb) -> Iterator[Callable[[], Awaitable[dict]]]:
-        """Contribute what the data logics produce to read() and describe().
-
-        StandardReadable gathers these alongside the registered children, so
-        the verb methods themselves need no overriding.
+    async def __on_read(self) -> dict[str, Reading]:
+        """What the data logics contribute to `read()`: nothing, but checks prepare.
 
         Raising when nothing has been prepared is deliberate, and predates
         registered children being readable at all: a detector that has not been
-        prepared has no data keys, so a `describe()` that quietly succeeded
-        would emit a descriptor missing the detector's data. In practice
-        `trigger()` prepares implicitly, so `trigger_and_read` never reaches
-        this. `read_configuration()` and `describe_configuration()` are
-        unaffected, as this hook only feeds the data verbs.
-
-        The cost is that the *registered children* are unreachable through
-        `read()`/`describe()` until then too, since this raises before the
-        registry is consulted. That is accepted rather than worked around:
-        reading an unprepared detector is already defined as an error.
+        prepared has no data keys. In practice `trigger()` prepares implicitly,
+        so `trigger_and_read` never reaches this.
         """
-        if verb not in (_Verb.DESCRIBE, _Verb.READ):
-            return
+        error_if_none(self._prepare_ctx, "Prepare not run")
+        return {}
+
+    async def __on_describe(self) -> dict[str, DataKey]:
+        """What the data logics contribute to `describe()`.
+
+        Raises when nothing has been prepared, as a `describe()` that quietly
+        succeeded would emit a descriptor missing the detector's data.
+        Streamable providers describe their shape for a step scan, but produce
+        their data through collect_asset_docs rather than read().
+        """
         ctx = error_if_none(self._prepare_ctx, "Prepare not run")
-        if verb is _Verb.DESCRIBE:
-            # Streamable providers describe their shape for a step scan, but
-            # produce their data through collect_asset_docs rather than read()
-            for sdp in ctx.streamable_data_providers:
-                yield functools.partial(
-                    sdp.make_datakeys, ctx.trigger_info.collections_per_event
-                )
+        return await merge_gathered_dicts(
+            sdp.make_datakeys(ctx.trigger_info.collections_per_event)
+            for sdp in ctx.streamable_data_providers
+        )
 
     async def describe_collect(self) -> dict[str, DataKey]:
         ctx = error_if_none(self._prepare_ctx, "Prepare not run")
@@ -778,11 +777,11 @@ class StandardDetector(
         ]
         return await merge_gathered_dicts(coros)
 
-    def _extra_hint_sources(self) -> Iterator[HasHints]:
-        """Contribute the data logics' hinted fields alongside the children's."""
+    def __on_hints(self) -> Iterator[Hints]:
+        """The data logics' hinted fields, alongside the children's."""
         for dl in self._data_logics:
             if fields := dl.get_hinted_fields(self.name + dl.datakey_suffix):
-                yield _HintedFields(fields)
+                yield {"fields": list(fields)}
 
     async def collect_asset_docs(
         self, index: int | None = None
