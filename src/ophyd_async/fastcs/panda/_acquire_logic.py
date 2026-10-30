@@ -1,3 +1,5 @@
+from collections.abc import AsyncGenerator
+
 from ophyd_async.core import (
     DetectorAcquireLogic,
     set_and_wait_for_other_value,
@@ -12,12 +14,10 @@ class PandaAcquireLogic(DetectorAcquireLogic):
     def __init__(self, pcap: PcapBlock) -> None:
         self.pcap = pcap
 
-    async def start_acquiring(self):
+    async def acquire(self) -> AsyncGenerator[None, None]:
         await set_and_wait_for_other_value(self.pcap.arm, True, self.pcap.active, True)
-
-    async def wait_for_idle(self):
-        # TODO: https://github.com/PandABlocks/PandABlocks-FPGA/issues/262
-        pass
+        # TODO: wait for idle, https://github.com/PandABlocks/PandABlocks-FPGA/issues/262
+        yield
 
     async def ensure_stopped(self):
         await set_and_wait_for_other_value(

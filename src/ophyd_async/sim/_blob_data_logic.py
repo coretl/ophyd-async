@@ -3,11 +3,10 @@ from collections.abc import Sequence
 import numpy as np
 
 from ophyd_async.core import (
-    DetectorDataLogic,
     PathProvider,
-    StreamableDataProvider,
     StreamResourceDataProvider,
     StreamResourceInfo,
+    UnboundedDataLogic,
 )
 
 from ._pattern_generator import DATA_PATH, SUM_PATH, PatternGenerator
@@ -16,7 +15,7 @@ WIDTH = 320
 HEIGHT = 240
 
 
-class BlobDataLogic(DetectorDataLogic):
+class BlobDataLogic(UnboundedDataLogic[StreamResourceDataProvider]):
     def __init__(
         self,
         path_provider: PathProvider,
@@ -25,15 +24,21 @@ class BlobDataLogic(DetectorDataLogic):
         self.path_provider = path_provider
         self.pattern_generator = pattern_generator
 
-    async def prepare_unbounded(self, datakey_name: str) -> StreamableDataProvider:
-        # Work out where to write
-        path_info = self.path_provider(datakey_name)
-        # Open the file
-        write_path = path_info.directory_path / f"{path_info.filename}.h5"
-        self.pattern_generator.open_file(write_path, WIDTH, HEIGHT)
-        # Return a provider that reflects what we have made
+    async def start_provider(
+        self,
+        name: str,
+        collections_per_event: int,
+        collection_period: float,
+        flush_period: float,
+    ) -> StreamResourceDataProvider:
+        # The sim blob writer uses a fixed chunk shape and writes for as long as
+        # it is told to, so neither period is needed
+        path_info = self.path_provider(name)
+        self.pattern_generator.open_file(
+            path_info.directory_path / f"{path_info.filename}.h5", WIDTH, HEIGHT
+        )
         data_resource = StreamResourceInfo(
-            data_key=datakey_name,
+            data_key=name,
             shape=(HEIGHT, WIDTH),
             # NDAttributes appear to always be configured with
             # this chunk size
@@ -42,7 +47,7 @@ class BlobDataLogic(DetectorDataLogic):
             parameters={"dataset": DATA_PATH},
         )
         sum_resource = StreamResourceInfo(
-            data_key=f"{datakey_name}-sum",
+            data_key=f"{name}-sum",
             shape=(),
             # NDAttributes appear to always be configured with
             # this chunk size
@@ -54,12 +59,13 @@ class BlobDataLogic(DetectorDataLogic):
             uri=f"{path_info.directory_uri}{path_info.filename}.h5",
             resources=[data_resource, sum_resource],
             mimetype="application/x-hdf5",
-            collections_written_signal=self.pattern_generator.images_written,
+            collections_written=self.pattern_generator.images_written,
+            collections_per_event=collections_per_event,
         )
 
-    async def stop(self) -> None:
+    async def ensure_stopped(self) -> None:
         self.pattern_generator.close_file()
 
-    def get_hinted_fields(self, datakey_name: str) -> Sequence[str]:
+    def get_hinted_fields(self, name: str) -> Sequence[str]:
         # The main dataset is always hinted
-        return [datakey_name]
+        return [name]

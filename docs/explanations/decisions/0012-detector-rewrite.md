@@ -9,6 +9,9 @@ Partly superseded by [ADR 0024](0024-standard-detector-is-a-standard-readable.md
 made `StandardDetector` a `StandardReadable` and removed the `prepare_single` tier along
 with `ReadableDataProvider`.
 
+The data logics and providers were reworked again in
+[ADR 0025](0025-bounded-data-logic-tier.md).
+
 ## Context
 
 The original `StandardDetector` implementation had several architectural issues:

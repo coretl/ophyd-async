@@ -321,10 +321,15 @@ async def test_status_of_set_and_wait_for_value():
     set_signal = epics_signal_rw(int, "pva://signal")
     match_signal = epics_signal_rw(int, "pva://match_signal")
 
+    # Open by default; closed around one call to hold its set running after the
+    # match, so "status not done yet" does not depend on loop timing
+    set_may_finish = asyncio.Event()
+    set_may_finish.set()
+
     async def set_match_signal_after_delay(value: Any, **kwargs):
         await asyncio.sleep(0.2)
         await match_signal.set(value / 2)
-        await asyncio.sleep(0.001)
+        await set_may_finish.wait()
 
     await set_signal.connect(mock=True)
     await match_signal.connect(mock=True)
@@ -345,10 +350,12 @@ async def test_status_of_set_and_wait_for_value():
     status = await set_and_wait_for_other_value(set_signal, 32, match_signal, 16)
     assert status.done
 
+    set_may_finish.clear()
     status = await set_and_wait_for_other_value(
         set_signal, 30, match_signal, 15, wait_for_set_completion=False
     )
     assert not status.done
+    set_may_finish.set()
     await status
 
     with pytest.raises(asyncio.TimeoutError):
