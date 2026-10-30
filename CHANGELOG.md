@@ -28,6 +28,9 @@
 - The progress of `StandardFlyable.prepare()` now comes from the `WatcherUpdate`s the logic's `prepare_to_fly` yields, replacing the heuristic that watched setpoint writes (#1448).
 - `WatchableAsyncStatus` closes the async generator it drives as soon as it is cancelled or fails, rather than when the generator is collected, and a watcher that raises is logged and ignored rather than failing the status.
 - A `StandardFlyable` whose fly failed after `kickoff()` and was never completed logs a warning when it is unstaged or prepared again, instead of leaving the failure unretrieved.
+- `StandardReadable` now keeps one format per registered child, keyed by the child, so registering a child again replaces its format instead of adding a second contribution, and the order of `hints` is the order children were first registered. The private `_describe_config_funcs`, `_read_config_funcs` and `_has_hints` tuples are gone: a subclass that added to them now adds a hook to `_describe_configuration_funcs`, `_read_configuration_funcs` or `_hints_funcs` (see ADR 0025).
+- The deprecated `ConfigSignal` and `HintedSignal` aliases are removed from `ophyd_async.core`; use `StandardReadableFormat.CONFIG_SIGNAL`, `HINTED_SIGNAL` or `HINTED_UNCACHED_SIGNAL`. `StandardReadable.add_readables()` is deprecated in favour of `set_readable_format()` on each device.
+- `store_settings()` writes the readable format changes of the Device tree under the reserved key `<READABLE_FORMATS>`, and `apply_settings()` resets the tree to its class formats before applying them. Settings files stored before this have no such key and leave formats alone. `retrieve_settings()` warns about and drops any other `<...>` key.
 
 ### Added
 
@@ -38,6 +41,9 @@
 - `StoppedError`, the `RuntimeError` raised when `stop()` or a new `set()` ends a move, prepare or fly early.
 - `Logic`, the base of `MovableLogic` and `FlyableLogic`, with the abstract `ensure_stopped()`. `FlyableLogic` adds `ensure_ready()`, which defaults to it.
 - An exception raised by a hook during `stage()`, `unstage()`, `prepare()` or a fly of a Standard device carries the note `raised by <device name>`.
+- `StandardReadable.set_readable_format()`, `reset_readable_formats()`, `get_readable_formats()` and `get_readable_format_changes()`, to change how a child contributes to `read()`, `read_configuration()` and `hints` at runtime, the equivalent of `Kind` in ophyd v1 (see "How to change what a Device reports at runtime").
+- `ReadableFormats`, `walk_readable_formats()`, `apply_readable_formats()` and `READABLE_FORMATS_KEY` in `ophyd_async.core`, and a `readable_formats` field on `Settings`, so formats are stored and retrieved with the signal values.
+- pyright now runs with `reportMatchNotExhaustive`.
 
 ### Fixed
 

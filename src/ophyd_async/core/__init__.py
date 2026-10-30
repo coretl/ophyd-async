@@ -102,10 +102,12 @@ from ._protocol import (
     Watcher,
 )
 from ._readable import (
-    ConfigSignal,
-    HintedSignal,
+    READABLE_FORMATS_KEY,
+    ReadableFormats,
     StandardReadable,
     StandardReadableFormat,
+    apply_readable_formats,
+    walk_readable_formats,
 )
 from ._settings import Settings, SettingsProvider
 from ._signal import (
@@ -282,6 +284,10 @@ __all__ = [
     # Readable
     "StandardReadable",
     "StandardReadableFormat",
+    "ReadableFormats",
+    "walk_readable_formats",
+    "apply_readable_formats",
+    "READABLE_FORMATS_KEY",
     # Detector
     "DetectorTrigger",
     "TriggerInfo",
@@ -346,8 +352,6 @@ __all__ = [
     "DerivedSignalFactory",
     "merge_gathered_dicts",
     # Back compat - delete before 1.0
-    "ConfigSignal",
-    "HintedSignal",
     # Standard enums
     "EnabledDisabled",
     "EnableDisable",
