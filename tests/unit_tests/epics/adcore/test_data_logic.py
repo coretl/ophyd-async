@@ -98,9 +98,10 @@ async def test_hdf_follows_the_plugin_when_not_enabling_it(
         always_enable=always_enable,
     )
 
+    await logic.ensure_ready()
     made = await logic.start_provider("det", 1, 0.1, 0)
     assert (made is not None) is makes_provider
-    # Starting switches the plugin on either way, and sitting out writes nothing
+    # Staging switches the plugin on only if told to, and sitting out writes nothing
     assert await writer.capture.get_value() is makes_provider
     assert await writer.enable_callbacks.get_value() is (
         EnableDisable.ENABLE if makes_provider else EnableDisable.DISABLE
@@ -156,7 +157,6 @@ async def test_prepare_hdf(
             call.hdf.lazy_open.put(True),
             call.hdf.swmr_mode.put(True),
             call.hdf.xml_file_name.put(""),
-            call.hdf.enable_callbacks.put(EnableDisable.ENABLE),
             call.hdf.create_directory.put(0),
             call.hdf.file_path.put(f"{static_path_provider().directory_path}{os.sep}"),
             call.hdf.file_name.put("ophyd_async_tests"),
@@ -193,7 +193,6 @@ async def test_prepare_multipart(
         writer,
         [
             call.lazy_open.put(True),
-            call.enable_callbacks.put(EnableDisable.ENABLE),
             call.create_directory.put(0),
             call.file_path.put(f"{static_path_provider().directory_path}{os.sep}"),
             call.file_name.put("ophyd_async_tests"),
@@ -501,3 +500,49 @@ async def test_multipart_start_waits_for_num_captured_to_read_zero(
         mimetype="multipart/related;type=image/tiff",
     )
     await _start_waits_for_a_zero_counter(logic, writer.num_captured)
+
+
+async def test_hdf_writes_the_ndattributes_of_its_sources_and_parses_the_others(
+    static_path_provider: StaticPathProvider,
+):
+    listed = adcore.NDStatsIO("PREFIX:LISTED:")
+    unlisted = adcore.NDStatsIO("PREFIX:UNLISTED:")
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector(
+            "PREFIX:",
+            adcore.ADDataFactory.hdf(
+                static_path_provider, ndattribute_sources=[listed]
+            ),
+            plugins={"listed": listed, "unlisted": unlisted},
+            name="det",
+        )
+    set_mock_value(det.driver.array_size_x, 1024)
+    set_mock_value(det.driver.array_size_y, 768)
+    set_mock_value(det.get_plugin("hdf", adcore.NDFileHDF5IO).file_path_exists, True)
+    # Opt the unlisted plugin out of being read, so only the file could name it
+    det.set_readable_format(unlisted, None)
+    for stats in (listed, unlisted):
+        set_mock_value(stats.enable_callbacks, EnableDisable.ENABLE)
+        set_mock_value(stats.compute_statistics, True)
+    # Names that the unlisted plugin was told to stamp are kept as they are
+    unlisted_attributes = [
+        adcore.NDAttributeParam(
+            name="free-form", param="TOTAL", datatype=adcore.NDAttributeDataType.DOUBLE
+        )
+    ]
+    set_mock_value(
+        unlisted.nd_attributes_file, adcore.ndattributes_to_xml(unlisted_attributes)
+    )
+    await det.stage()
+    await det.prepare(TriggerInfo())
+
+    datakeys = set(await det.describe())
+
+    assert "det-listed-total" in datakeys
+    assert "free-form" in datakeys
+    assert not [key for key in datakeys if key.startswith("det-unlisted")]
+    # The listed plugin's file was written, the unlisted plugin's left as set
+    assert "det-listed-total" in await listed.nd_attributes_file.get_value()
+    assert await unlisted.nd_attributes_file.get_value() == (
+        adcore.ndattributes_to_xml(unlisted_attributes)
+    )

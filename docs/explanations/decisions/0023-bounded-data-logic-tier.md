@@ -243,6 +243,8 @@ control embedded, rather than one logic per array with a shared control object. 
 the existing grain — a provider already emits many datakeys, as `ADHDFDataLogic` does for the
 main dataset plus its NDAttributes — and avoids the coordination problem of several logics
 contending over one `TSAcquire`. Which statistics are wanted becomes a constructor argument.
+(Superseded in [](./0024-detector-is-a-flyable.md): the plugin's switches decide, and each
+series is named after its scalar.)
 
 ## Consequences
 
@@ -265,7 +267,8 @@ plus a finite-buffer data logic starts working, closing #1364.
 A data logic may decline a scan for reasons of its own: `ADHDFDataLogic` and
 `StatsTimeSeriesDataLogic` take an `always_enable` flag, defaulting to today's behaviour of
 switching the plugin on, which when `False` makes them follow whatever the plugin is set to
-(at the first `prepare()` of a stage) and produce nothing when it is off.
+(at the first `prepare()` of a stage) and produce nothing when it is off. (The stats time
+series lost the flag again in [](./0024-detector-is-a-flyable.md).)
 
 A device whose exposure count and buffer size are the same PV has it written twice: by the
 trigger logic as `number_of_exposures`, and by the data logic as `num_collections`. The two

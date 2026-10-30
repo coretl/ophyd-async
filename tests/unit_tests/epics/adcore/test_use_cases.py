@@ -1,6 +1,12 @@
+from collections import defaultdict
 from unittest.mock import ANY
+from xml.etree import ElementTree as ET
 
+import bluesky.plan_stubs as bps
+import bluesky.preprocessors as bpp
+import numpy as np
 import pytest
+from bluesky import RunEngine
 
 from ophyd_async.core import (
     EnableDisable,
@@ -8,6 +14,7 @@ from ophyd_async.core import (
     TransitionError,
     TriggerInfo,
     callback_on_mock_put,
+    get_mock_put,
     init_devices,
     set_mock_value,
 )
@@ -24,19 +31,14 @@ async def test_step_scan_hdf_detector_with_stats_and_temp(
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
             "PREFIX:",
-            adcore.ADDataFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider, ndattribute_sources=[stat]),
             plugins={"stats": stat},
         )
         temp = epics_signal_r(float, "SAMP:TEMP:RBV")
     # Plugins are not registered automatically; opt this one in
     det.set_readable_format(stat, Format.CHILD)
+    # The HDF writer stamps the stats plugin's NDAttributes; the driver stamps these
     ndattributes = [
-        adcore.NDAttributeParam(
-            name="det-sum",
-            param="TOTAL",
-            datatype=adcore.NDAttributeDataType.DOUBLE,
-            description="Sum of the array",
-        ),
         adcore.NDAttributePv(
             name="sample-temp",
             signal=temp,
@@ -44,7 +46,11 @@ async def test_step_scan_hdf_detector_with_stats_and_temp(
             description="Temperature of the sample",
         ),
     ]
-    set_mock_value(stat.nd_attributes_file, adcore.ndattributes_to_xml(ndattributes))
+    set_mock_value(
+        det.driver.nd_attributes_file, adcore.ndattributes_to_xml(ndattributes)
+    )
+    set_mock_value(stat.enable_callbacks, EnableDisable.ENABLE)
+    set_mock_value(stat.compute_statistics, True)
     writer = det.get_plugin("hdf", adcore.NDFileHDF5IO)
     set_mock_value(det.driver.acquire_period, 0.1)
     set_mock_value(det.driver.acquire_time, 0.05)
@@ -94,7 +100,8 @@ async def test_step_scan_hdf_detector_with_stats_and_temp(
             "shape": [1, 768, 1024],
             "source": uri,
         },
-        "det-sum": {
+        # The HDF file serves the stats, under the names of their scalars
+        "det-stats-total": {
             "dtype": "number",
             "dtype_numpy": "<f8",
             "external": "STREAM:",
@@ -110,17 +117,24 @@ async def test_step_scan_hdf_detector_with_stats_and_temp(
         },
     }.items() <= description.items()
     assert "det" in det.hints["fields"]
+    # The stats scalars are in the file instead of the reading
     reading = await det.read()
-    # Stats scalar signals appear in read alongside stream data
-    assert {
-        "det-stats-total",
-        "det-stats-mean_value",
+    assert not [key for key in reading if key.startswith("det-stats-")]
+    ndattribute_keys = [
+        "sample-temp",
         "det-stats-min_value",
+        "det-stats-min_x",
+        "det-stats-min_y",
         "det-stats-max_value",
-    } <= reading.keys()
+        "det-stats-max_x",
+        "det-stats-max_y",
+        "det-stats-mean_value",
+        "det-stats-total",
+    ]
+    num_resources = 1 + len(ndattribute_keys)
     docs = [doc async for doc in det.collect_asset_docs()]
-    sr = docs[:3]
-    sd = docs[3:]
+    sr = docs[:num_resources]
+    sd = docs[num_resources:]
     assert sr == [
         (
             "stream_resource",
@@ -135,31 +149,21 @@ async def test_step_scan_hdf_detector_with_stats_and_temp(
                 "uri": uri,
             },
         ),
-        (
-            "stream_resource",
-            {
-                "data_key": "det-sum",
-                "mimetype": "application/x-hdf5",
-                "parameters": {
-                    "chunk_shape": (16384,),
-                    "dataset": "/entry/instrument/NDAttributes/det-sum",
+        *(
+            (
+                "stream_resource",
+                {
+                    "data_key": key,
+                    "mimetype": "application/x-hdf5",
+                    "parameters": {
+                        "chunk_shape": (16384,),
+                        "dataset": f"/entry/instrument/NDAttributes/{key}",
+                    },
+                    "uid": ANY,
+                    "uri": uri,
                 },
-                "uid": ANY,
-                "uri": uri,
-            },
-        ),
-        (
-            "stream_resource",
-            {
-                "data_key": "sample-temp",
-                "mimetype": "application/x-hdf5",
-                "parameters": {
-                    "chunk_shape": (16384,),
-                    "dataset": "/entry/instrument/NDAttributes/sample-temp",
-                },
-                "uid": ANY,
-                "uri": uri,
-            },
+            )
+            for key in ndattribute_keys
         ),
     ]
     assert sd == [
@@ -173,7 +177,7 @@ async def test_step_scan_hdf_detector_with_stats_and_temp(
                 "uid": ANY,
             },
         )
-        for i in range(3)
+        for i in range(num_resources)
     ]
     # Check we can prepare and do a second one
     await det.prepare(TriggerInfo(exposure_timeout=0.1))
@@ -181,16 +185,9 @@ async def test_step_scan_hdf_detector_with_stats_and_temp(
         det.driver.acquire, lambda v: set_mock_value(writer.num_captured, 2)
     )
     await det.trigger()
-    readings = await det.read()
-    assert {
-        "det-stats-total",
-        "det-stats-mean_value",
-        "det-stats-min_value",
-        "det-stats-max_value",
-    } <= readings.keys()
     docs = [doc async for doc in det.collect_asset_docs()]
     # Each prepare starts new resources in the same file, the indices carrying on
-    new_sr, sd = docs[:3], docs[3:]
+    new_sr, sd = docs[:num_resources], docs[num_resources:]
     assert new_sr == [(name, {**doc, "uid": ANY}) for name, doc in sr]
     assert {doc["uid"] for _, doc in new_sr}.isdisjoint(doc["uid"] for _, doc in sr)
     assert sd == [
@@ -204,7 +201,7 @@ async def test_step_scan_hdf_detector_with_stats_and_temp(
                 "uid": ANY,
             },
         )
-        for i in range(3)
+        for i in range(num_resources)
     ]
     # And if we trigger again without updating num_captured then we timeout
     with pytest.raises(
@@ -554,6 +551,7 @@ async def test_simdetector_with_stats_signal():
         det = adsimdetector.SimDetector("PREFIX:", plugins={"stats": stat})
     # Plugins are not registered automatically; opt this one in
     det.set_readable_format(stat, Format.CHILD)
+    _switch_stats(stat, on=True)
     set_mock_value(stat.total, 1.8)
     await det.stage()
     assert await det.driver.wait_for_plugins.get_value() is True
@@ -809,8 +807,357 @@ async def test_kinetix_step_scan_with_averaging_filter(
     ]
 
 
-# Ruling 1: a once-per-event readable is shadowed by a same-named higher tier at
-# any collections_per_event, and read once per event when nothing shadows it
+# Use cases 6 and 7: several data logics on one detector, whichever one serves
+# the scan chosen by the plugins' EnableCallbacks and compute switches. One name
+# per quantity: the readable, the time series and the HDF NDAttribute of a
+# statistic are all named after its scalar signal, e.g. det-stats-total.
+
+# The statistics NDStatsIO gives a read format, so publishes when switched on
+STATS_KEYS = [
+    "det-stats-min_value",
+    "det-stats-min_x",
+    "det-stats-min_y",
+    "det-stats-max_value",
+    "det-stats-max_x",
+    "det-stats-max_y",
+    "det-stats-mean_value",
+    "det-stats-total",
+]
+
+
+# The statistics NDStatsIO hints, whichever tier serves them
+STATS_HINTS = [
+    "det-stats-min_value",
+    "det-stats-max_value",
+    "det-stats-mean_value",
+    "det-stats-total",
+]
+
+
+def _switch_stats(stats: adcore.NDStatsIO, on: bool) -> None:
+    """Set the PVs that switch the basic statistics of a stats plugin."""
+    set_mock_value(
+        stats.enable_callbacks, EnableDisable.ENABLE if on else EnableDisable.DISABLE
+    )
+    set_mock_value(stats.compute_statistics, on)
+
+
+def _fill_time_series(
+    det, plugins: list[adcore.NDStatsIO], points: int, also=lambda: None
+):
+    """Behave like the IOC: arming a time series erases it, acquiring fills it."""
+
+    def erase(value):
+        if value:
+            for plugin in plugins:
+                set_mock_value(plugin.ts_current_point, 0)
+
+    def fill(value):
+        if value:
+            for plugin in plugins:
+                for stat in plugin.statistics:
+                    set_mock_value(
+                        stat.time_series,  # pyright: ignore[reportArgumentType]
+                        np.arange(points, dtype=np.float64),
+                    )
+                set_mock_value(
+                    plugin.ts_timestamp,  # pyright: ignore[reportArgumentType]
+                    100.0 + np.arange(points),
+                )
+                set_mock_value(plugin.ts_current_point, points)
+            also()
+
+    for plugin in plugins:
+        callback_on_mock_put(plugin.ts_acquire, erase)
+    callback_on_mock_put(det.driver.acquire, fill)
+
+
+def _fly_plan(det, info: TriggerInfo):
+    @bpp.stage_decorator([det])
+    @bpp.run_decorator()
+    def plan():
+        yield from bps.prepare(det, info, wait=True)
+        yield from bps.declare_stream(det, name="primary", collect=True)
+        yield from bps.kickoff(det, wait=True)
+        yield from bps.collect_while_completing(
+            flyers=[det], dets=[det], flush_period=0.05
+        )
+
+    return plan()
+
+
+def _fly(
+    RE: RunEngine,
+    det,
+    series: list[adcore.NDStatsIO],
+    points: int,
+    hdf: adcore.NDFileHDF5IO | None = None,
+) -> dict[str, list]:
+    also = lambda: None  # noqa: E731
+    if hdf is not None:
+        also = lambda: set_mock_value(hdf.num_captured, points)  # noqa: E731
+    _fill_time_series(det, series, points=points, also=also)
+    docs: dict[str, list] = defaultdict(list)
+    RE(
+        _fly_plan(det, TriggerInfo(number_of_events=points)),
+        lambda n, d: docs[n].append(d),
+    )
+    return docs
+
+
+async def _superset_detector(
+    path_provider: StaticPathProvider, always_enable: bool = False
+):
+    """Use case 6: the readables, time series and HDF NDAttributes of one stats
+    plugin, with its basic statistics switched on."""
+    stats = adcore.NDStatsIO("PREFIX:STAT:")
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector(
+            "PREFIX:",
+            adcore.ADDataFactory.hdf(
+                path_provider, always_enable=always_enable, ndattribute_sources=[stats]
+            ),
+            adcore.ADDataFactory.stats_time_series(stats),
+            plugins={"stats": stats},
+        )
+    _switch_stats(stats, on=True)
+    set_mock_value(det.driver.array_size_x, 1024)
+    set_mock_value(det.driver.array_size_y, 768)
+    set_mock_value(det.get_plugin("hdf", adcore.NDFileHDF5IO).file_path_exists, True)
+    return det
+
+
+# Use cases A and B: a detector with a stats plugin in plugins= only, then with its
+# time series. A plugin in plugins= is a readable, so its hints come with it.
+
+
+async def test_uc_a_detector_with_readable_stats(RE: RunEngine):
+    stats = adcore.NDStatsIO("PREFIX:STAT:")
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector("PREFIX:", plugins={"stats": stats}, name="det")
+    _switch_stats(stats, on=True)
+    set_mock_value(stats.total, 12.0)
+
+    @bpp.stage_decorator([det])
+    @bpp.run_decorator()
+    def step_plan():
+        yield from bps.trigger_and_read([det])
+
+    docs: dict[str, list] = defaultdict(list)
+    RE(step_plan(), lambda name, doc: docs[name].append(doc))
+
+    (descriptor,) = docs["descriptor"]
+    assert set(descriptor["data_keys"]) == set(STATS_KEYS)
+    assert descriptor["hints"]["det"]["fields"] == STATS_HINTS
+    (event,) = docs["event"]
+    assert event["data"]["det-stats-total"] == 12.0
+
+
+async def test_uc_a_a_plugin_opts_out_of_being_read():
+    stats = adcore.NDStatsIO("PREFIX:STAT:")
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector("PREFIX:", plugins={"stats": stats}, name="det")
+    _switch_stats(stats, on=True)
+    det.set_readable_format(stats, None)
+
+    await det.stage()
+    await det.prepare(TriggerInfo())
+
+    assert not [key for key in await det.describe() if "stats" in key]
+    assert det.hints == {}
+
+
+def test_uc_b_detector_with_a_stats_time_series(RE: RunEngine):
+    stats = adcore.NDStatsIO("PREFIX:STAT:")
+    with init_devices(mock=True):
+        det = adsimdetector.SimDetector(
+            "PREFIX:",
+            adcore.ADDataFactory.stats_time_series(stats),
+            plugins={"stats": stats},
+            name="det",
+        )
+    _switch_stats(stats, on=True)
+
+    docs = _fly(RE, det, [stats], points=3)
+
+    (descriptor,) = docs["descriptor"]
+    assert set(descriptor["data_keys"]) == set(STATS_KEYS)
+    # The time series replaces the readable, whose hints stay
+    assert descriptor["hints"]["det"]["fields"] == STATS_HINTS
+    (page,) = docs["event_page"]
+    assert page["data"]["det-stats-total"] == [[0.0], [1.0], [2.0]]
+    # It made no plugin of its own
+    assert [name for name, _ in det.children() if "stat" in name] == ["stats"]
+
+
+@pytest.mark.parametrize(
+    "always_enable,hdf_enabled,hdf_serves",
+    [
+        # By its PV, HDF on: the file serves, every time series suppressed
+        (False, EnableDisable.ENABLE, True),
+        # By its PV, HDF off: the time series serves
+        (False, EnableDisable.DISABLE, False),
+        # Always enabled, HDF serves whatever its PV was
+        (True, EnableDisable.DISABLE, True),
+    ],
+)
+async def test_uc6_the_hdf_switch_picks_the_file_or_the_time_series(
+    RE: RunEngine,
+    static_path_provider: StaticPathProvider,
+    always_enable: bool,
+    hdf_enabled: EnableDisable,
+    hdf_serves: bool,
+):
+    det = await _superset_detector(static_path_provider, always_enable)
+    hdf = det.get_plugin("hdf", adcore.NDFileHDF5IO)
+    set_mock_value(hdf.enable_callbacks, hdf_enabled)
+
+    docs = _fly(RE, det, [det.get_plugin("stats", adcore.NDStatsIO)], 3, hdf=hdf)
+
+    # The registered stats plugin hints the statistics, whoever serves them
+    (descriptor,) = docs["descriptor"]
+    assert descriptor["hints"]["det"]["fields"] == [
+        *STATS_HINTS,
+        *(["det"] if hdf_serves else []),
+    ]
+    if hdf_serves:
+        assert docs["event_page"] == []
+        keys = [doc["data_key"] for doc in docs["stream_resource"]]
+        assert keys == ["det", *STATS_KEYS]
+    else:
+        assert docs["stream_resource"] == []
+        (page,) = docs["event_page"]
+        assert list(page["data"]) == STATS_KEYS
+        assert page["data"]["det-stats-total"] == [[0.0], [1.0], [2.0]]
+
+
+async def test_uc6_hdf_enabled_the_file_serves_every_stats_quantity(
+    static_path_provider: StaticPathProvider,
+):
+    det = await _superset_detector(static_path_provider)
+    hdf = det.get_plugin("hdf", adcore.NDFileHDF5IO)
+    set_mock_value(hdf.enable_callbacks, EnableDisable.ENABLE)
+    await det.stage()
+    callback_on_mock_put(
+        det.driver.acquire, lambda v: set_mock_value(hdf.num_captured, 1)
+    )
+    await det.trigger()
+
+    description = await det.describe()
+
+    assert description["det-stats-total"]["external"] == "STREAM:"
+    assert "det-stats-total" not in await det.read()
+
+
+@pytest.fixture
+async def two_roi_detector(tmp_path):
+    """Use case 7: two HDF writers and two time series, one per ROI."""
+    path_provider = StaticPathProvider(
+        lambda datakey_name=None: str(datakey_name), tmp_path
+    )
+    stats1 = adcore.NDStatsIO("PREFIX:STAT1:")
+    stats2 = adcore.NDStatsIO("PREFIX:STAT2:")
+    async with init_devices(mock=True):
+        det = adaravis.AravisDetector(
+            "PREFIX:",
+            adcore.ADDataFactory.hdf(
+                path_provider,
+                writer_suffix="HDF1:",
+                writer_name="hdf1",
+                datakey_suffix="-roi1",
+                always_enable=False,
+            ),
+            adcore.ADDataFactory.hdf(
+                path_provider,
+                writer_suffix="HDF2:",
+                writer_name="hdf2",
+                datakey_suffix="-roi2",
+                always_enable=False,
+            ),
+            adcore.ADDataFactory.stats_time_series(stats1),
+            adcore.ADDataFactory.stats_time_series(stats2),
+            plugins={"stats1": stats1, "stats2": stats2},
+        )
+    set_mock_value(det.driver.array_size_x, 1024)
+    set_mock_value(det.driver.array_size_y, 768)
+    for name in ("hdf1", "hdf2"):
+        plugin = det.get_plugin(name, adcore.NDFileHDF5IO)
+        set_mock_value(plugin.enable_callbacks, EnableDisable.DISABLE)
+        set_mock_value(plugin.file_path_exists, True)
+    return det
+
+
+@pytest.mark.parametrize(
+    "stats1_on,stats2_on",
+    [(True, True), (False, True)],
+)
+def test_uc7_hdf_disabled_the_time_series_switched_on_serve_in_one_page(
+    RE: RunEngine, two_roi_detector, stats1_on: bool, stats2_on: bool
+):
+    det = two_roi_detector
+    series = [det.get_plugin(n, adcore.NDStatsIO) for n in ("stats1", "stats2")]
+    _switch_stats(series[0], stats1_on)
+    _switch_stats(series[1], stats2_on)
+
+    docs = _fly(RE, det, series, points=2)
+
+    assert docs["stream_resource"] == []
+    (page,) = docs["event_page"]
+    totals = [
+        f"det-{name}-total"
+        for name, on in (("stats1", stats1_on), ("stats2", stats2_on))
+        if on
+    ]
+    assert sorted(key for key in page["data"] if key.endswith("-total")) == totals
+    for total in totals:
+        assert page["data"][total] == [[0.0], [1.0]]
+
+
+# Ruling 1: a once-per-event readable is suppressed by a same-named higher tier at
+# any collections_per_event, and read once per event when nothing suppresses it
+
+
+@pytest.mark.parametrize("cpe", [1, 2])
+@pytest.mark.parametrize("hdf_enabled", [False, True])
+@pytest.mark.parametrize("bounded", [False, True])
+async def test_readable_stats_total_is_suppressed_by_any_higher_tier(
+    static_path_provider: StaticPathProvider,
+    bounded: bool,
+    hdf_enabled: bool,
+    cpe: int,
+):
+    """readable total < time series total (bounded) < HDF NDAttribute (unbounded)."""
+    stats = adcore.NDStatsIO("PREFIX:STAT:")
+    factories: list[adcore.ADDataFactory] = [
+        adcore.ADDataFactory.hdf(
+            static_path_provider, always_enable=False, ndattribute_sources=[stats]
+        )
+    ]
+    if bounded:
+        factories.append(adcore.ADDataFactory.stats_time_series(stats))
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector(
+            "PREFIX:", *factories, plugins={"stats": stats}, name="det"
+        )
+    _switch_stats(stats, on=True)
+    hdf = det.get_plugin("hdf", adcore.NDFileHDF5IO)
+    set_mock_value(
+        hdf.enable_callbacks,
+        EnableDisable.ENABLE if hdf_enabled else EnableDisable.DISABLE,
+    )
+    set_mock_value(hdf.file_path_exists, True)
+    set_mock_value(det.driver.array_size_x, 1024)
+    set_mock_value(det.driver.array_size_y, 768)
+    await det.stage()
+    info = TriggerInfo(number_of_events=1, collections_per_event=cpe)
+
+    await det.prepare(info)
+    total = (await det.describe())["det-stats-total"]
+    if bounded or hdf_enabled:
+        # Suppressed: the key now describes a [cpe] collections, not one value
+        assert total["shape"] == [cpe]
+    else:
+        assert total["shape"] == []
 
 
 @pytest.mark.parametrize("cpe", [1, 2])
@@ -818,18 +1165,130 @@ async def test_readable_with_no_data_logic_is_read_once_per_event(cpe: int):
     stat = adcore.NDStatsIO("PREFIX:STATS:")
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector("PREFIX:", plugins={"stats": stat}, name="det")
-    det.set_readable_format(stat.total, Format.UNCACHED_SIGNAL)
+    _switch_stats(stat, on=True)
     await det.stage()
     await det.prepare(TriggerInfo(number_of_events=1, collections_per_event=cpe))
 
     assert (await det.describe())["det-stats-total"]["shape"] == []
 
 
-@pytest.mark.parametrize("on_at_stage", [True, False])
-async def test_hdf_by_settings_follows_its_plugin_at_stage_for_the_whole_stage(
-    tmp_path, on_at_stage: bool
+@pytest.mark.parametrize(
+    "enabled,computed,published",
+    [
+        (EnableDisable.ENABLE, True, True),
+        # The plugin computes nothing while disabled
+        (EnableDisable.DISABLE, True, False),
+        (EnableDisable.ENABLE, False, False),
+    ],
+)
+async def test_stats_scalar_follows_its_switches_at_stage(
+    enabled: EnableDisable, computed: bool, published: bool
 ):
-    """Switching a writer's plugin mid-stage changes nothing until restaged."""
+    """The switches at stage decide which scalars are read."""
+    stat = adcore.NDStatsIO("PREFIX:STATS:")
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector("PREFIX:", plugins={"stats": stat}, name="det")
+    set_mock_value(stat.enable_callbacks, enabled)
+    set_mock_value(stat.compute_statistics, computed)
+
+    await det.stage()
+    await det.prepare(TriggerInfo())
+    await det.trigger()
+
+    assert ("det-stats-total" in await det.describe()) is published
+    assert ("det-stats-total" in await det.read()) is published
+    assert ("det-stats-total" in det.hints.get("fields", [])) is published
+    await det.unstage()
+
+
+async def test_prepare_raises_for_a_switch_changed_since_stage():
+    stat = adcore.NDStatsIO("PREFIX:STATS:")
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector("PREFIX:", plugins={"stats": stat}, name="det")
+    _switch_stats(stat, on=True)
+    await det.stage()
+    set_mock_value(stat.compute_statistics, False)
+
+    with pytest.raises(RuntimeError, match=r"changed since stage.*ComputeStatistics"):
+        await det.prepare(TriggerInfo())
+
+    # Staging again takes the new value, and nothing was written to the PV
+    await det.unstage()
+    await det.stage()
+    await det.prepare(TriggerInfo())
+    await det.trigger()
+    assert "det-stats-total" not in await det.read()
+    get_mock_put(stat.compute_statistics).assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        # A switch of the plugin, or the port it takes its NDArrays from
+        lambda stat: set_mock_value(stat.enable_callbacks, EnableDisable.DISABLE),
+        lambda stat: set_mock_value(stat.nd_array_port, "ROI1"),
+    ],
+    ids=["switch", "port"],
+)
+async def test_prepare_raises_for_a_switch_or_port_changed_since_stage(changed):
+    stat = adcore.NDStatsIO("PREFIX:STATS:")
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector("PREFIX:", plugins={"stats": stat}, name="det")
+    set_mock_value(stat.nd_array_port, "DET")
+    _switch_stats(stat, on=True)
+    await det.stage()
+    changed(stat)
+
+    with pytest.raises(RuntimeError, match=r"changed since stage.*(Callbacks|Port)"):
+        await det.prepare(TriggerInfo())
+
+
+async def test_prepare_takes_the_recording_of_stage_not_of_the_last_prepare():
+    stat = adcore.NDStatsIO("PREFIX:STATS:")
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector("PREFIX:", plugins={"stats": stat}, name="det")
+    _switch_stats(stat, on=True)
+    await det.stage()
+    await det.prepare(TriggerInfo())
+    await det.trigger()
+    set_mock_value(stat.compute_statistics, False)
+
+    with pytest.raises(RuntimeError, match=r"changed since stage"):
+        await det.prepare(TriggerInfo())
+    # Still against stage(): turning it back on is not a change
+    set_mock_value(stat.compute_statistics, True)
+    await det.prepare(TriggerInfo())
+
+
+@pytest.mark.parametrize("owned", [True, False])
+async def test_a_process_plugin_is_recorded_unless_the_trigger_logic_owns_it(
+    owned: bool,
+):
+    """Ownership is by logic: only the plugin the trigger logic switches is free."""
+    async with init_devices(mock=True):
+        if owned:
+            det = adsimdetector.SimDetector("PREFIX:", proc_suffix="PROC:", name="det")
+            proc = det.get_plugin("proc", adcore.NDProcessIO)
+        else:
+            proc = adcore.NDProcessIO("PREFIX:PROC:")
+            det = adsimdetector.SimDetector("PREFIX:", plugins={"proc": proc})
+    set_mock_value(proc.enable_callbacks, EnableDisable.DISABLE)
+    await det.stage()
+    # Filtering switches its own process plugin on at prepare
+    info = TriggerInfo(exposures_per_collection=2)
+    if owned:
+        await det.prepare(info)
+        await det.trigger()
+        await det.prepare(info)
+    else:
+        set_mock_value(proc.enable_callbacks, EnableDisable.ENABLE)
+        with pytest.raises(RuntimeError, match=r"changed since stage.*PROC:Enable"):
+            await det.prepare(info)
+
+
+@pytest.mark.parametrize("on_at_stage", [True, False])
+async def test_hdf_by_settings_follows_its_plugin_at_stage(tmp_path, on_at_stage: bool):
+    """Switching a writer's plugin mid-stage is caught by the next prepare."""
     path_provider = StaticPathProvider(
         lambda datakey_name=None: str(datakey_name), tmp_path
     )
@@ -872,13 +1331,278 @@ async def test_hdf_by_settings_follows_its_plugin_at_stage_for_the_whole_stage(
 
     enable_hdf2(on_at_stage)
     await det.stage()
-    for flip in (False, True):
-        if flip:
-            enable_hdf2(not on_at_stage)
+    await det.prepare(info)
+    await det.kickoff()
+    await det.complete()
+    assert set(await det.describe_collect()) == served
+    # Events since prepare()
+    assert await det.get_index() == info.number_of_events
+
+    enable_hdf2(not on_at_stage)
+    with pytest.raises(
+        RuntimeError, match=r"changed since stage.*HDF2:EnableCallbacks"
+    ):
         await det.prepare(info)
-        await det.kickoff()
-        await det.complete()
-        assert set(await det.describe_collect()) == served
-        # Events since prepare()
-        assert await det.get_index() == info.number_of_events
     await det.unstage()
+
+
+# Use case 8: a stats plugin per ROI, each stamped into the file of its own HDF
+# writer. A writer stamps only the NDAttribute sources listed for it.
+
+
+def _publish_only_total(stats: adcore.NDStatsIO) -> None:
+    """Leave the total as the only statistic with a read format."""
+    for statistic in stats.statistics:
+        if statistic.scalar is not stats.total:
+            stats.set_readable_format(statistic.scalar, None)
+
+
+def _roi_array_description(roi: adcore.NDROIIO):
+    return lambda driver: adcore.NDArrayDescription(
+        shape_signals=(roi.size_y, roi.size_x),
+        data_type_signal=driver.data_type,
+        color_mode_signal=driver.color_mode,
+    )
+
+
+async def test_uc8_2_rois_each_with_stats_and_hdf(RE: RunEngine, tmp_path):
+    path_provider = StaticPathProvider(
+        lambda datakey_name=None: str(datakey_name), tmp_path
+    )
+    rois = [adcore.NDROIIO(f"PREFIX:ROI{i}:") for i in (1, 2)]
+    for i, roi in enumerate(rois, start=1):
+        roi.stat = adcore.NDStatsIO(f"PREFIX:STAT{i}:")
+        _publish_only_total(roi.stat)
+    roi1, roi2 = rois
+    async with init_devices(mock=True):
+        det = adaravis.AravisDetector(
+            "PREFIX:",
+            *(
+                adcore.ADDataFactory.hdf(
+                    path_provider,
+                    writer_suffix=f"HDF{i}:",
+                    writer_name=f"hdf{i}",
+                    datakey_suffix=f"-roi{i}",
+                    array_description=_roi_array_description(roi),
+                    ndattribute_sources=[roi.stat],
+                )
+                for i, roi in enumerate(rois, start=1)
+            ),
+            plugins={"roi1": roi1, "roi2": roi2},
+        )
+    hdfs = [det.get_plugin(f"hdf{i}", adcore.NDFileHDF5IO) for i in (1, 2)]
+    for roi in rois:
+        det.set_readable_format(roi.stat, Format.CHILD)
+        _switch_stats(roi.stat, on=True)
+        set_mock_value(roi.size_x, 40)
+        set_mock_value(roi.size_y, 30)
+    for hdf in hdfs:
+        set_mock_value(hdf.file_path_exists, True)
+
+    def capture_three_frames(value: bool) -> None:
+        if value:
+            for hdf in hdfs:
+                set_mock_value(hdf.num_captured, 3)
+
+    callback_on_mock_put(det.driver.acquire, capture_three_frames)
+    docs: dict[str, list] = defaultdict(list)
+
+    RE(
+        _fly_plan(det, TriggerInfo(number_of_events=3)),
+        lambda name, doc: docs[name].append(doc),
+    )
+
+    # Each writer's file has its own ROI and the totals of its own stats plugin
+    uris = {doc["data_key"]: doc["uri"] for doc in docs["stream_resource"]}
+    assert uris == {
+        "det-roi1": ANY,
+        "det-roi1-stat-total": uris["det-roi1"],
+        "det-roi2": ANY,
+        "det-roi2-stat-total": uris["det-roi2"],
+    }
+    assert uris["det-roi1"] != uris["det-roi2"]
+    (descriptor,) = docs["descriptor"]
+    assert set(descriptor["data_keys"]) == set(uris)
+    # The totals stay hinted by the stats plugins that the files replace
+    assert sorted(descriptor["hints"]["det"]["fields"]) == sorted(uris)
+
+
+# Use case 9: an ROIStat plugin, modelled on the test-rig spectroscopy plans
+# (DRV -> ROISTAT -> HDF, three channels named Blue, Green and Red, only their
+# totals published). The HDF writer lists the plugin as an NDAttribute source,
+# so when it serves the totals are in its file, and when it sits out they are
+# read from the channels.
+
+CHANNEL_NAMES = {1: "Blue", 2: "Green", 3: "Red"}
+
+
+async def _roistat_detector(
+    tmp_path, hdf_on: bool, channel_names: dict[int, str] = CHANNEL_NAMES
+):
+    path_provider = StaticPathProvider(
+        lambda datakey_name=None: str(datakey_name), tmp_path
+    )
+    roistat = adcore.NDROIStatIO("PREFIX:ROISTAT:", num_channels=len(channel_names))
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector(
+            "PREFIX:",
+            adcore.ADDataFactory.hdf(
+                path_provider, always_enable=False, ndattribute_sources=[roistat]
+            ),
+            plugins={"roistat": roistat},
+            name="det",
+        )
+    set_mock_value(roistat.enable_callbacks, EnableDisable.ENABLE)
+    for number, name in channel_names.items():
+        channel = roistat.channels[number]
+        set_mock_value(channel.name_, name)
+        set_mock_value(channel.use, True)
+        set_mock_value(channel.total, 10.0 * number)
+        for scalar in (channel.min_value, channel.max_value, channel.mean_value):
+            channel.set_readable_format(scalar, None)
+    hdf = det.get_plugin("hdf", adcore.NDFileHDF5IO)
+    set_mock_value(
+        hdf.enable_callbacks, EnableDisable.ENABLE if hdf_on else EnableDisable.DISABLE
+    )
+    set_mock_value(hdf.file_path_exists, True)
+    set_mock_value(det.driver.array_size_x, 64)
+    set_mock_value(det.driver.array_size_y, 48)
+    return det, roistat, hdf
+
+
+def _scan_roistat_detector(RE: RunEngine, det, hdf: adcore.NDFileHDF5IO, hdf_on: bool):
+    """Run a fly scan if the HDF writer serves it, otherwise a step scan."""
+    docs: dict[str, list] = defaultdict(list)
+    if hdf_on:
+        callback_on_mock_put(
+            det.driver.acquire,
+            lambda value: set_mock_value(hdf.num_captured, 3) if value else None,
+        )
+        plan = _fly_plan(det, TriggerInfo(number_of_events=3))
+    else:
+
+        @bpp.stage_decorator([det])
+        @bpp.run_decorator()
+        def step_plan():
+            yield from bps.trigger_and_read([det])
+
+        plan = step_plan()
+    RE(plan, lambda name, doc: docs[name].append(doc))
+    return docs
+
+
+@pytest.mark.parametrize("hdf_on", [True, False])
+async def test_uc9_roistat_totals_are_in_the_file_or_read_from_the_channels(
+    RE: RunEngine, tmp_path, hdf_on: bool
+):
+    det, roistat, hdf = await _roistat_detector(tmp_path, hdf_on)
+    # Before stage the channels have their default names
+    assert roistat.channels[1].total.name == "det-roistat-channels-1-total"
+
+    docs = _scan_roistat_detector(RE, det, hdf, hdf_on)
+
+    totals = {f"det-roistat-{name}-total" for name in CHANNEL_NAMES.values()}
+    (descriptor,) = docs["descriptor"]
+    assert set(descriptor["data_keys"]) >= totals
+    # Hinted whether they are in the file or read, along with the image if filed
+    assert set(descriptor["hints"]["det"]["fields"]) == (
+        {"det", *totals} if hdf_on else totals
+    )
+    if hdf_on:
+        assert {doc["data_key"] for doc in docs["stream_resource"]} == {"det", *totals}
+        assert all(key in descriptor["data_keys"] for key in totals)
+        assert (
+            descriptor["data_keys"]["det-roistat-Blue-total"]["external"] == "STREAM:"
+        )
+        # The plugin was told to stamp each total from its own channel's address
+        xml = await roistat.nd_attributes_file.get_value()
+        stamped = [
+            (
+                a.attrib["name"],
+                a.attrib["source"],
+                a.attrib["addr"],
+                a.attrib["datatype"],
+            )
+            for a in ET.fromstring(xml)
+        ]
+        assert stamped == [
+            ("det-roistat-Blue-total", "ROISTAT_TOTAL", "0", "DOUBLE"),
+            ("det-roistat-Green-total", "ROISTAT_TOTAL", "1", "DOUBLE"),
+            ("det-roistat-Red-total", "ROISTAT_TOTAL", "2", "DOUBLE"),
+        ]
+    else:
+        assert docs["stream_resource"] == []
+        (event,) = docs["event"]
+        assert {key: event["data"][key] for key in totals} == {
+            "det-roistat-Blue-total": 10.0,
+            "det-roistat-Green-total": 20.0,
+            "det-roistat-Red-total": 30.0,
+        }
+
+
+@pytest.mark.parametrize("hdf_on", [True, False])
+async def test_uc9_a_roistat_channel_that_is_not_used_disappears(
+    RE: RunEngine, tmp_path, hdf_on: bool
+):
+    det, roistat, hdf = await _roistat_detector(tmp_path, hdf_on)
+    set_mock_value(roistat.channels[2].use, False)
+
+    docs = _scan_roistat_detector(RE, det, hdf, hdf_on)
+
+    (descriptor,) = docs["descriptor"]
+    assert "det-roistat-Blue-total" in descriptor["data_keys"]
+    assert "det-roistat-Red-total" in descriptor["data_keys"]
+    assert not [key for key in descriptor["data_keys"] if "Green" in key]
+    assert not [key for key in descriptor["hints"]["det"]["fields"] if "Green" in key]
+    if hdf_on:
+        assert not [
+            doc for doc in docs["stream_resource"] if "Green" in doc["data_key"]
+        ]
+    else:
+        (event,) = docs["event"]
+        assert not [key for key in event["data"] if "Green" in key]
+    # Its name was still taken from the PV
+    assert roistat.channels[2].total.name == "det-roistat-Green-total"
+
+
+async def test_uc9_roistat_channel_names_are_sanitised_at_stage(tmp_path):
+    names = {1: "Ice Cream", 2: "", 3: "r.o/i-3", 4: "keep_Case9"}
+    det, roistat, _ = await _roistat_detector(tmp_path, False, names)
+
+    await det.stage()
+
+    assert [roistat.channels[number].name for number in names] == [
+        "det-roistat-Ice_Cream",
+        "det-roistat-2",
+        "det-roistat-r_o_i_3",
+        "det-roistat-keep_Case9",
+    ]
+    assert roistat.channels[1].total.name == "det-roistat-Ice_Cream-total"
+
+
+async def test_uc9_roistat_channels_with_the_same_sanitised_name_raise_at_stage(
+    tmp_path,
+):
+    det, _, _ = await _roistat_detector(tmp_path, False, {1: "A B", 2: "A_B", 3: "C"})
+
+    with pytest.raises(ValueError, match=r"more than one channel is named \['A_B'\]"):
+        await det.stage()
+
+
+async def test_uc9_prepare_raises_for_a_roistat_channel_renamed_since_stage(tmp_path):
+    det, roistat, _ = await _roistat_detector(tmp_path, False)
+    await det.stage()
+    set_mock_value(roistat.channels[3].name_, "Infrared")
+
+    with pytest.raises(RuntimeError, match=r"changed since stage.*ROISTAT:3:Name"):
+        await det.prepare(TriggerInfo())
+
+
+async def test_uc9_prepare_raises_for_a_roistat_channel_used_since_stage(tmp_path):
+    det, roistat, _ = await _roistat_detector(tmp_path, False)
+    set_mock_value(roistat.channels[3].use, False)
+    await det.stage()
+    set_mock_value(roistat.channels[3].use, True)
+
+    with pytest.raises(RuntimeError, match=r"changed since stage.*ROISTAT:3:Use_RBV"):
+        await det.prepare(TriggerInfo())

@@ -50,6 +50,7 @@ from event_model.documents import (
 )
 
 from ophyd_async.core import (
+    EnableDisable,
     StaticFilenameProvider,
     StaticPathProvider,
     TriggerInfo,
@@ -112,6 +113,28 @@ def adsim(RE: RunEngine, shared_tmp_path: Path) -> AreaDetector:
         )
 
     return adsim
+
+
+@pytest.fixture
+def adsimstat(RE: RunEngine) -> AreaDetector:
+    """A writer-less SimDetector whose only data logic is the STAT time series.
+
+    The stats plugin is given to the factory by reference, and listed in `plugins`
+    so it is in the detector's tree. It writes no file: the NDPluginStats time
+    series is a fixed-length buffer read back as event pages, so this exercises
+    the bounded data-logic tier against a real IOC (the
+    `ADDataFactory.stats_time_series` factory and NDStatsIO's `TS:*` signals).
+    """
+    stats = adcore.NDStatsIO("BL01T-DI-CAM-01:STAT:")
+    with init_devices():
+        adsimstat = SimDetector(
+            "BL01T-DI-CAM-01:",
+            adcore.ADDataFactory.stats_time_series(stats),
+            driver_suffix="DET:",
+            plugins={"stats": stats},
+        )
+
+    return adsimstat
 
 
 @pytest.fixture(autouse=True)
@@ -356,6 +379,63 @@ def test_software_triggering(
             num_events={"primary": 2},
         ),
     ]
+
+
+@pytest.mark.timeout(TIMEOUT + 15.0)
+def test_stats_time_series_step_scan(
+    RE: RunEngine, adsimstat: SimDetector, bl01t_di_cam_01: None
+) -> None:
+    """A writer-less stats detector arms the TS buffer, acquires, and reads the
+    per-frame Total series back as a single event holding the whole array.
+
+    This drives the real STAT plugin's ``TS:*`` records end to end: prepare sizes
+    and arms ``TS:TSNumPoints``/``TS:TSAcquire``, the sim driver takes the frames,
+    and read() slices ``TSTotal`` (timestamped by ``TSTimestamp``) into a
+    single 5-element reading named after the ``Total_RBV`` scalar.
+    """
+    collections = 5
+    stats = adsimstat.get_plugin("stats", adcore.NDStatsIO)
+    # The plugin's switches at stage decide which statistics are published
+    RE(
+        bps.mv(
+            stats.enable_callbacks,
+            EnableDisable.ENABLE,
+            stats.compute_statistics,
+            True,
+        )
+    )
+
+    @bpp.stage_decorator([adsimstat])
+    @bpp.run_decorator()
+    def prepare_then_count() -> MsgGenerator[None]:
+        # prepare() must come after stage(), which resets the detector
+        yield from bps.prepare(
+            adsimstat,
+            TriggerInfo(collections_per_event=collections, livetime=0.1),
+            wait=True,
+        )
+        yield from bps.trigger_and_read([adsimstat])
+
+    named_docs: list[tuple[str, DocumentType]] = []
+    RE(prepare_then_count(), lambda name, doc: named_docs.append((name, doc)))
+
+    # A bounded logic exposes collect_pages, never collect_asset_docs.
+    assert hasattr(adsimstat, "collect_pages")
+    assert not hasattr(adsimstat, "collect_asset_docs")
+
+    descriptor = next(doc for name, doc in named_docs if name == "descriptor")
+    data_key = descriptor["data_keys"]["adsimstat-stats-total"]
+    assert data_key["shape"] == [collections]
+    assert data_key["dtype"] == "array"
+    assert data_key["dtype_numpy"] == "<f8"
+
+    event = next(doc for name, doc in named_docs if name == "event")
+    # read() derives one reading whose value is the whole TS:TSTotal buffer.
+    values = event["data"]["adsimstat-stats-total"]
+    assert len(values) == collections
+    assert all(isinstance(v, float) for v in values)
+    # The reading is timestamped from TS:TSTimestamp, so it is populated.
+    assert event["timestamps"]["adsimstat-stats-total"] >= 0
 
 
 def run_plan_and_get_documents(
