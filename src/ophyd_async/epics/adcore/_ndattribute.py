@@ -1,11 +1,12 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
+from typing import Protocol, runtime_checkable
 from xml.etree import ElementTree as ET
 
 import numpy as np
 
-from ophyd_async.core import SignalR
+from ophyd_async.core import SignalR, SignalRW
 
 
 class NDAttributeDataType(Enum):
@@ -43,6 +44,21 @@ class NDAttributeParam:
     datatype: NDAttributeDataType  # The datatype of the parameter
     addr: int = 0  # The address as seen in the INP link of the record
     description: str = ""  # A description that appears in the HDF file as an attribute
+
+
+@runtime_checkable
+class NDAttributeSource(Protocol):
+    """A plugin that says which NDAttributes it stamps on each frame.
+
+    An HDF writer that lists it in `ADDataFactory.hdf(ndattribute_sources=)`
+    writes them to the plugin's `nd_attributes_file` and makes a dataset of each.
+    """
+
+    nd_attributes_file: SignalRW[str]
+
+    def get_ndattributes(self) -> Sequence[NDAttributeParam]:
+        """The NDAttributes to stamp on each frame of this scan."""
+        ...
 
 
 def ndattributes_to_xml(

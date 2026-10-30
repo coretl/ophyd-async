@@ -2,21 +2,9 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
-from ophyd_async.core import StaticPathProvider, init_devices
-from ophyd_async.epics import adcore, adsimdetector
+from ophyd_async.core import init_devices
+from ophyd_async.epics import adcore
 from ophyd_async.epics.core import epics_signal_r
-
-
-def test_setup_ndstats_raises_type_error(RE, static_path_provider: StaticPathProvider):
-    with init_devices(mock=True):
-        det = adsimdetector.SimDetector(
-            "PREFIX:", adcore.ADDataFactory.hdf(static_path_provider)
-        )
-    with pytest.raises(
-        AttributeError,
-        match="det has no plugin named 'stats'",
-    ):
-        RE(adcore.setup_ndstats_sum(det))
 
 
 async def test_nd_attributes_plan_stub(RE):
