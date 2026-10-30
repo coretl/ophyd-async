@@ -529,16 +529,13 @@ def _config_signals(device: Device) -> set[SignalR]:
 
     Unlike `walk_config_signals` this reads the registry rather than calling
     `read_configuration()`, so it does no I/O and includes read-only `SignalR`s
-    as well as `SignalRW`s -- `ADBaseIO.model` is a `SignalR`, and it is
-    exactly the signal an areaDetector trigger logic needs for deadtime.
-
-    Deliberately private and unexported: #1367 restructures detector logic, so
-    what the public shape of this should be is not settled yet.
+    as well as `SignalRW`s (`ADBaseIO.model` is a `SignalR`, and it is exactly
+    the signal an areaDetector trigger logic needs for deadtime).
     """
     signals: set[SignalR] = set()
     if not isinstance(device, StandardReadable):
         return signals
-    for entry in device._readables.entries():  # noqa: SLF001
+    for entry in device.get_readable_formats():
         match entry:
             case (signal, Format.CONFIG_SIGNAL):
                 signals.add(signal)

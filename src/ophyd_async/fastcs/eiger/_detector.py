@@ -2,6 +2,7 @@ from ophyd_async.core import (
     PathProvider,
     SignalR,
     StandardDetector,
+    StandardReadableFormat,
     TriggerableCommand,
     soft_signal_rw,
 )
@@ -44,6 +45,6 @@ class EigerDetector(StandardDetector):
             ),
         )
 
-        self.add_config_signals(self.pixel_mask)
+        self.set_readable_format(self.pixel_mask, StandardReadableFormat.CONFIG_SIGNAL)
 
         super().__init__(name=name, connector=connector)

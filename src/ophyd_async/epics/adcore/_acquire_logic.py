@@ -90,7 +90,7 @@ class ADContAcqAcquireLogic(DetectorAcquireLogic):
 
     Deliberately has no `wait_for_plugins` equivalent to [](#ADAcquireLogic).
     That setting gates the driver's `AcquireBusy` going to 0 at the end of an
-    acquisition, and here the driver is always acquiring -- there is no such
+    acquisition, and here the driver is always acquiring, so there is no such
     transition to wait on. `wait_for_idle` waits on the circular buffer's
     capture instead.
 
