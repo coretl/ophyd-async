@@ -50,6 +50,19 @@ yield from apply_readable_formats(beamline, {})  # every Device in the tree
 
 Both also discard formats loaded from a snapshot.
 
+## Opting a detector plugin in
+
+A [](#StandardDetector) is a [](#StandardReadable), so the same call works on one. An
+areaDetector carries more plugins than are wired into its chain, so none is registered
+automatically: opt in the ones producing meaningful values.
+
+```python
+det.set_readable_format(det.stats.total, Format.HINTED_UNCACHED_SIGNAL)
+```
+
+Data from a [](#DetectorDataLogic) is added on top, so a detector can write a file and
+report a plugin scalar in a step scan.
+
 ```{seealso}
 [](./store-and-retrieve.md) to save formats with signal values and load them back, and
 [](../explanations/decisions/0023-runtime-readable-format.md) for the design.
