@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from collections.abc import (
-    AsyncIterator,
+    AsyncGenerator,
     Awaitable,
     Callable,
     Iterable,
@@ -13,8 +13,7 @@ from collections.abc import (
 )
 from dataclasses import dataclass
 from enum import Enum, EnumMeta, StrEnum
-from functools import lru_cache
-from inspect import isawaitable
+from functools import cached_property, lru_cache
 from typing import (
     Any,
     Generic,
@@ -233,7 +232,7 @@ def cached_get_origin(tp: Any) -> Any:
     return get_origin(tp)
 
 
-def get_dtype(datatype: type) -> np.dtype:
+def get_dtype(datatype: Any) -> np.dtype:
     """Get the runtime dtype from a numpy ndarray type annotation.
 
     ```python
@@ -308,8 +307,12 @@ def get_enum_cls(datatype: type | None) -> type[EnumTypes] | None:
     return None
 
 
-def get_unique(values: dict[str, T], types: str) -> T:
+def get_unique(values: Mapping[str, T] | Sequence[tuple[str, T]], types: str) -> T:
     """If all values are the same, return that value, otherwise raise TypeError.
+
+    :param values: the values by label, as a mapping or as `(label, value)` pairs
+        when labels may repeat
+    :param types: what the values are, for the error message
 
     ```python
     >>> get_unique({"a": 1, "b": 1}, "integers")
@@ -321,9 +324,10 @@ def get_unique(values: dict[str, T], types: str) -> T:
 
     ```
     """
-    set_values = set(values.values())
+    pairs = list(values.items()) if isinstance(values, Mapping) else values
+    set_values = {v for _, v in pairs}
     if len(set_values) != 1:
-        diffs = ", ".join(f"{k} has {v}" for k, v in values.items())
+        diffs = ", ".join(f"{k} has {v}" for k, v in pairs)
         raise TypeError(f"Differing {types}: {diffs}")
     return set_values.pop()
 
@@ -340,9 +344,20 @@ async def merge_gathered_dicts(
     combined_read = await merge_gathered_dicts(s.read() for s in signals)
     ```
     """
+    return merge_dicts(await asyncio.gather(*coros))
+
+
+def merge_dicts(dicts: Iterable[Mapping[str, T]]) -> dict[str, T]:
+    """Merge dictionaries, raising if any key appears in more than one.
+
+    :example:
+    ```python
+    merged = merge_dicts([{"a": 1}, {"b": 2}])
+    ```
+    """
     ret: dict[str, T] = {}
     duplicates: list[str] = []
-    for result in await asyncio.gather(*coros):
+    for result in dicts:
         for key in result:
             if key in ret:
                 duplicates.append(key)
@@ -358,36 +373,10 @@ async def merge_gathered_dicts(
     return ret
 
 
-def _partition_awaitable(
-    maybe_awaitables: Iterable[T | Awaitable[T]],
-) -> tuple[dict[int, Awaitable[T]], dict[int, T]]:
-    awaitable: dict[int, Awaitable[T]] = {}
-    not_awaitable: dict[int, T] = {}
-    for i, x in enumerate(maybe_awaitables):
-        if isawaitable(x):
-            awaitable[i] = x
-        else:
-            not_awaitable[i] = x
-    return awaitable, not_awaitable
-
-
-async def gather_dict(coros: dict[T | Awaitable[T], V | Awaitable[V]]) -> dict[T, V]:
-    """Await any coros in the keys or values of a dictionary."""
-    k_awaitable, k_not_awaitable = _partition_awaitable(coros.keys())
-    v_awaitable, v_not_awaitable = _partition_awaitable(coros.values())
-
-    # Await all awaitables in parallel
-    k_results, v_results = await asyncio.gather(
-        asyncio.gather(*k_awaitable.values()),
-        asyncio.gather(*v_awaitable.values()),
-    )
-
-    # Combine awaited and non-awaited values by index
-    k_map = k_not_awaitable | dict(zip(k_awaitable, k_results, strict=True))
-    v_map = v_not_awaitable | dict(zip(v_awaitable, v_results, strict=True))
-
-    # Reconstruct dict in original index order
-    return {k_map[i]: v_map[i] for i in range(len(coros))}
+async def gather_dict(coros: Mapping[T, Awaitable[V]]) -> dict[T, V]:
+    """Await the values of a dictionary in parallel, keeping the keys."""
+    results = await asyncio.gather(*coros.values())
+    return dict(zip(coros, results, strict=True))
 
 
 def in_micros(t: float) -> int:
@@ -464,11 +453,37 @@ def non_zero(value):
     return int(value) != 0
 
 
+def abstract_cached_property(func: Callable[[Any], T]) -> cached_property[T]:
+    """A `cached_property` that `ABCMeta` treats as abstract.
+
+    `functools.cached_property` does not forward `__isabstractmethod__` from the
+    function it wraps, so `@cached_property` stacked on `@abstractmethod`
+    registers nothing: the class stays instantiable and a missing implementation
+    surfaces as an `AttributeError` on `None` from deep inside `__init__`. Setting
+    the flag on the descriptor itself makes `Device`'s metaclass collect it, so
+    the omission is a `TypeError` at instantiation instead.
+
+    The declared return type is deliberately `cached_property[T]` rather than a
+    subclass, so that a subclass overriding it with a plain `@cached_property`
+    still gets checked for covariance by the type checker.
+
+    :param func: The property body, which should raise `NotImplementedError`.
+    """
+    prop = cached_property(func)
+    prop.__isabstractmethod__ = True  # type: ignore[attr-defined]
+    return prop
+
+
 async def _wait_for(coro: Awaitable[T], timeout: float | None, source: str) -> T:
+    """Await `coro`, raising `TimeoutError(source)` if it takes over `timeout`."""
+    cm = asyncio.timeout(timeout)
     try:
-        return await asyncio.wait_for(coro, timeout)
-    except TimeoutError as exc:
-        raise TimeoutError(source) from exc
+        async with cm:
+            return await coro
+    except TimeoutError:
+        if cm.expired():
+            raise TimeoutError(source) from None
+        raise
 
 
 async def simulate_move(
@@ -476,7 +491,7 @@ async def simulate_move(
     new_position: float,
     velocity: float,
     acceleration_time: float,
-) -> AsyncIterator[float]:
+) -> AsyncGenerator[float, None]:
     """Yield positions at 10Hz along a trapezoidal velocity profile.
 
     :param old_position: Where the move starts.

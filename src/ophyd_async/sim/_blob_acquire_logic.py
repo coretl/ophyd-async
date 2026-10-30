@@ -1,5 +1,4 @@
 import asyncio
-from contextlib import suppress
 
 from ophyd_async.core import DetectorAcquireLogic, TriggerInfo
 
@@ -24,7 +23,9 @@ class BlobAcquireLogic(DetectorAcquireLogic):
     async def ensure_stopped(self):
         # Stop the background task and wait for it to finish
         if self.task:
-            self.task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self.task
-            self.task = None
+            task, self.task = self.task, None
+            task.cancel()
+            # An outside cancel while we wait propagates, it is not swallowed
+            await asyncio.wait([task])
+            if not task.cancelled() and (error := task.exception()):
+                raise error

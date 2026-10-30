@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import functools
 import inspect
 import time
 import warnings
 from collections.abc import AsyncGenerator, Callable
+from contextlib import aclosing
 from typing import Any, Generic, TypeVar, cast
 
 from bluesky.protocols import (
@@ -477,13 +477,18 @@ async def observe_value(
         do_something_with(value)
     ```
     """
-    async for _, value in observe_signals_value(
-        signal,
-        timeout=timeout,
-        done_status=done_status,
-        done_timeout=done_timeout,
-    ):
-        yield value
+    # Closing this generator must close the inner one, so its unsubscribe runs
+    # then, not when the abandoned inner generator is finalised
+    async with aclosing(
+        observe_signals_value(
+            signal,
+            timeout=timeout,
+            done_status=done_status,
+            done_timeout=done_timeout,
+        )
+    ) as updates:
+        async for _, value in updates:
+            yield value
 
 
 def _get_iteration_timeout(
@@ -600,11 +605,14 @@ class _ValueChecker(Generic[SignalDatatypeT]):
             self._matcher_name = repr(match)
 
     async def _wait_for_value(self, signal: SignalR[SignalDatatypeT]):
-        async for value in observe_value(signal):
-            self._last_value = value
-            self.got_first_value.set()
-            if self._matcher(value):
-                return
+        # Closed on return, so the unsubscribe (which cancels any poll task) runs
+        # now, not when the abandoned generator is finalised after we have gone
+        async with aclosing(observe_value(signal)) as values:
+            async for value in values:
+                self._last_value = value
+                self.got_first_value.set()
+                if self._matcher(value):
+                    return
 
     async def wait_for_value(
         self, signal: SignalR[SignalDatatypeT], timeout: float | None
@@ -680,13 +688,11 @@ async def set_and_wait_for_other_value(
     """
     # Start monitoring before the set to avoid a race condition
     checker = _ValueChecker(match_value)
-    wait_task = asyncio.create_task(
+    # The wait is cancelled when we exit, whether by error, cancel or success
+    async with AsyncStatus(
         checker.wait_for_value(match_signal, timeout=timeout)
-    )
-
-    # Put this in a try/except to ensure wait_task is cancelled when we exit
-    try:
-        # NOTE: this timeout races wait_task's own internal timeout (same
+    ) as wait_status:
+        # NOTE: this timeout races the wait's own internal timeout (same
         # duration, started moments earlier) - whichever elapses first wins.
         # That race is harmless because each path reports its own distinct,
         # helpful message.
@@ -704,19 +710,13 @@ async def set_and_wait_for_other_value(
 
         if not wait_for_set_completion:
             # Just wait for the match_signal to be at value
-            await wait_task
+            await wait_status
         else:
             # Wait for both to complete, so if the set raises an exception it
             # is surfaced early. Wait for the status task so if either errors
             # the other is cancelled
-            await asyncio.gather(wait_task, status.task)
+            await asyncio.gather(wait_status.task, status.task)
         return status
-    except Exception:
-        # Make sure the wait is not left dangling if there was an error
-        wait_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await wait_task
-        raise
 
 
 async def set_and_wait_for_value(

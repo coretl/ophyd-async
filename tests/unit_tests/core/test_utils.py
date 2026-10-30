@@ -1,8 +1,11 @@
 import asyncio
+import gc
 import re
 import sys
 from asyncio import CancelledError
+from typing import TypeVar, assert_type
 
+import numpy as np
 import pytest
 
 from ophyd_async.core import (
@@ -21,8 +24,12 @@ from ophyd_async.core import (
     simulate_move,
     soft_signal_rw,
 )
+from ophyd_async.core._utils import _wait_for
 from ophyd_async.epics.core import epics_signal_rw
 from ophyd_async.epics.motor import Motor
+
+
+T = TypeVar("T")
 
 
 class ValueErrorBackend(SoftSignalBackend):
@@ -338,7 +345,7 @@ def test_core_notconnected_emits_deprecation_warning():
         from ophyd_async.core import NotConnected  # noqa: F401
 
 
-async def _async_value(val):
+async def _async_value(val: T) -> T:
     """Helper function to create an awaitable that returns a value."""
     return val
 
@@ -349,32 +356,26 @@ async def test_gather_dict_empty():
     assert result == {}
 
 
-async def test_gather_dict_duplicate_resolved_keys():
-    """Test gather_dict when different awaitable keys resolve to the same value."""
-    # Two coroutine objects that resolve to the same key - second should win
+async def test_gather_dict_awaits_values_and_infers_types():
+    """Test gather_dict keeps keys and order, and types the result without hints."""
     result = await gather_dict(
-        {
-            _async_value("key"): "first",
-            _async_value("key"): "second",
-        }
+        {"a": _async_value(1), "b": _async_value(2), "c": _async_value(3)}
     )
-    assert result == {"key": "second"}
+    # pyright fails on this line in CI if the awaited types are not inferred
+    assert_type(result, dict[str, int])
+    assert result == {"a": 1, "b": 2, "c": 3}
+    assert list(result) == ["a", "b", "c"]
 
 
-@pytest.mark.parametrize("keys_awaitable", ("", "b", "abc"))
-@pytest.mark.parametrize("values_awaitable", ([], [2], [1, 2, 3]))
-async def test_gather_dict(keys_awaitable, values_awaitable):
-    """Test gather_dict with plain values, awaitable keys, and awaitable values."""
-    expected = {"a": 1, "b": 2, "c": 3}
+async def test_gather_dict_infers_array_values():
+    """Test gather_dict types ndarray results, which the old signature got wrong."""
 
-    input_dict = {}
-    for k, v in expected.items():
-        key = _async_value(k) if k in keys_awaitable else k
-        value = _async_value(v) if v in values_awaitable else v
-        input_dict[key] = value
-    result = await gather_dict(input_dict)
-    assert result == expected
-    assert list(result.keys()) == list(expected.keys())
+    async def get_array(n: int) -> np.ndarray:
+        return np.zeros(n)
+
+    result = await gather_dict({k: get_array(n) for k, n in (("a", 1), ("b", 2))})
+    assert_type(result, dict[str, np.ndarray])
+    assert list(result) == ["a", "b"]
 
 
 # Cancellation propagation is broken in asyncio.gather on Python 3.10, so the exception
@@ -484,3 +485,136 @@ async def test_simulate_move_ends_at_target(acceleration_time: float):
     positions = [p async for p in simulate_move(0, 1.5, 10, acceleration_time)]
     assert positions[-1] == 1.5
     assert positions == sorted(positions)
+
+
+class StuckPutBackend(SoftSignalBackend):
+    """A put that never finishes, and may fail while being cancelled."""
+
+    def __init__(self, cleanup_error: Exception | None):
+        self.cleanup_error = cleanup_error
+        super().__init__(datatype=int)
+
+    async def put(self, value: int | None) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if self.cleanup_error is not None:
+                raise self.cleanup_error from None
+            raise
+
+
+@pytest.mark.parametrize(
+    "cleanup_error, expected",
+    [(None, TimeoutError), (ValueError("cleanup failed"), ValueError)],
+)
+async def test_a_timed_out_put_raises_the_error_its_cancellation_raised(
+    cleanup_error: Exception | None, expected: type[Exception]
+):
+    loop = asyncio.get_running_loop()
+    unhandled = []
+    loop.set_exception_handler(lambda _, context: unhandled.append(context))
+    signal = SignalRW(StuckPutBackend(cleanup_error), name="sig")
+    await signal.connect()
+
+    with pytest.raises(expected):
+        await signal.set(1, timeout=0.01)
+
+    # The error was retrieved, not left for the loop to log
+    gc.collect()
+    await asyncio.sleep(0)
+    loop.set_exception_handler(None)
+    assert unhandled == []
+
+
+async def test_a_cancelled_wait_for_leaves_no_unretrieved_error():
+    loop = asyncio.get_running_loop()
+    unhandled = []
+    loop.set_exception_handler(lambda _, context: unhandled.append(context))
+
+    async def fails_when_cancelled():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise ValueError("cleanup failed") from None
+
+    outer = asyncio.create_task(_wait_for(fails_when_cancelled(), 10, "source"))
+    await asyncio.sleep(0.01)
+    outer.cancel()
+    # The error raised while ending the cancelled work shows through
+    with pytest.raises(ValueError, match="cleanup failed"):
+        await outer
+
+    gc.collect()
+    await asyncio.sleep(0)
+    loop.set_exception_handler(None)
+    assert unhandled == []
+
+
+async def test_wait_for_returns_the_result_with_and_without_a_timeout():
+    async def value():
+        await asyncio.sleep(0)
+        return 42
+
+    assert await _wait_for(value(), 5, "source") == 42
+    assert await _wait_for(value(), None, "source") == 42
+
+
+async def test_wait_for_expiry_raises_timeout_error_naming_the_source():
+    with pytest.raises(TimeoutError, match="^source$"):
+        await _wait_for(asyncio.sleep(1), 0.01, "source")
+
+
+async def test_wait_for_does_not_relabel_a_timeout_error_from_the_coroutine():
+    async def inner():
+        raise TimeoutError("inner")
+
+    with pytest.raises(TimeoutError, match="^inner$"):
+        await _wait_for(inner(), 5, "source")
+
+
+async def test_wait_for_does_not_swallow_a_cancel_arriving_as_the_work_finishes():
+    finished = asyncio.get_running_loop().create_future()
+
+    async def inner():
+        return await finished
+
+    outer = asyncio.create_task(_wait_for(inner(), 5, "source"))
+    await asyncio.sleep(0)
+    finished.set_result(1)
+    outer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+
+async def test_wait_for_shows_an_error_raised_while_being_cancelled():
+    async def inner():
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            raise ValueError("cleanup") from None
+
+    with pytest.raises(ValueError, match="cleanup"):
+        await _wait_for(inner(), 0.01, "source")
+
+
+async def test_wait_for_expiry_and_an_outside_cancel_is_a_cancel():
+    outer = asyncio.create_task(_wait_for(asyncio.sleep(1), 0.05, "source"))
+    await asyncio.sleep(0.05)  # About when the timeout expires
+    outer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+
+async def test_wait_for_expiry_after_a_swallowed_cancel_is_still_a_timeout_error():
+    async def body():
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass  # Swallowed without uncancel()
+        await _wait_for(asyncio.sleep(1), 0.01, "source")
+
+    task = asyncio.create_task(body())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(TimeoutError, match="^source$"):
+        await task

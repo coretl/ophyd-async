@@ -3,7 +3,15 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from collections.abc import Awaitable, Callable, Iterator, Mapping, MutableMapping
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Generator,
+    Iterator,
+    Mapping,
+    MutableMapping,
+)
+from contextlib import contextmanager
 from functools import cached_property
 from logging import LoggerAdapter, getLogger
 from typing import Any, Generic, TypeVar
@@ -551,6 +559,18 @@ class DeviceProcessor:
         }
         # Call the provided process function on them
         await self._process_devices(devices)
+
+
+@contextmanager
+def name_added_to_errors(device: HasName) -> Generator[None, None, None]:
+    """Note the device's name on any exception raised inside, once."""
+    try:
+        yield
+    except Exception as e:
+        note = f"raised by {device.name}"
+        if note not in getattr(e, "__notes__", ()):
+            e.add_note(note)
+        raise
 
 
 def init_devices(
