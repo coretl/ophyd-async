@@ -50,7 +50,7 @@ async def _make_detector(
     async with init_devices(mock=True):
         det = detector_cls(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(path_provider),
+            adcore.ADDataFactory.hdf(path_provider),
             proc_suffix=proc_suffix,
         )
     set_mock_value(det.get_plugin("hdf", adcore.NDFileHDF5IO).file_path_exists, True)

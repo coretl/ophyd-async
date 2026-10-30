@@ -61,8 +61,8 @@ from ophyd_async.core import DEFAULT_TIMEOUT, DetectorTrigger, TriggerInfo
             {
                 "number_of_events": -100,
             },
-            "number_of_events\n  Input should be greater than or "
-            "equal to 0 [type=greater_than_equal, input_value=-100, input_type=int]",
+            "number_of_events\n  Input should be greater than 0 "
+            "[type=greater_than, input_value=-100, input_type=int]",
         ),
     ],
 )
