@@ -31,13 +31,13 @@ async def _status_aexit(cancelling: asyncio.Event, _: pytest.MonkeyPatch):
         await asyncio.sleep(0)  # let the status task start
 
 
-async def _blob_ensure_stopped(cancelling: asyncio.Event, _: pytest.MonkeyPatch):
+async def _blob_acquire_close(cancelling: asyncio.Event, _: pytest.MonkeyPatch):
     pattern_generator = Mock()
     pattern_generator.write_images_to_file = lambda: _slow_to_cancel(cancelling)
-    logic = BlobAcquireLogic(pattern_generator)
-    await logic.start_acquiring()
+    acquisition = BlobAcquireLogic(pattern_generator).acquire()
+    await anext(acquisition)
     await asyncio.sleep(0)  # let the task start
-    await logic.ensure_stopped()
+    await acquisition.aclose()
 
 
 async def _set_and_wait(cancelling: asyncio.Event, monkeypatch: pytest.MonkeyPatch):
@@ -53,9 +53,7 @@ async def _set_and_wait(cancelling: asyncio.Event, monkeypatch: pytest.MonkeyPat
         await signal_module.set_and_wait_for_value(sig, 1, timeout=0.1)
 
 
-@pytest.mark.parametrize(
-    "cleanup", [_status_aexit, _blob_ensure_stopped, _set_and_wait]
-)
+@pytest.mark.parametrize("cleanup", [_status_aexit, _blob_acquire_close, _set_and_wait])
 async def test_cancelling_caller_during_cleanup_is_not_swallowed(
     cleanup: Callable[[asyncio.Event, pytest.MonkeyPatch], Coroutine[Any, Any, None]],
     monkeypatch: pytest.MonkeyPatch,

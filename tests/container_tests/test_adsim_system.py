@@ -34,6 +34,7 @@ from unittest.mock import ANY, patch
 
 import bluesky.plan_stubs as bps
 import bluesky.plans as bp
+import bluesky.preprocessors as bpp
 import pytest
 from aioca import purge_channel_caches
 from bluesky.run_engine import RunEngine
@@ -105,7 +106,7 @@ def adsim(RE: RunEngine, shared_tmp_path: Path) -> AreaDetector:
         process_plugin = NDProcessIO(f"{prefix}-DI-CAM-01:PROC:")
         adsim = SimDetector(
             f"{prefix}-DI-CAM-01:",
-            adcore.ADWriterFactory.hdf(provider, writer_suffix="HDF5:"),
+            adcore.ADDataFactory.hdf(provider, writer_suffix="HDF5:"),
             driver_suffix="DET:",
             plugins={"proc1": process_plugin},
         )
@@ -145,15 +146,18 @@ def apply_baseline_settings(adsim: SimDetector) -> MsgGenerator[None]:
 def test_prepare_is_idempotent_and_sets_exposure_time(
     RE: RunEngine, adsim: SimDetector, bl01t_di_cam_01: None
 ) -> None:
-    def prepare_then_count() -> MsgGenerator[None]:
+    @bpp.stage_decorator([adsim])
+    @bpp.run_decorator()
+    def prepare_then_trigger() -> MsgGenerator[None]:
+        # prepare() must come after stage()
         yield from bps.prepare(
             adsim,
             TriggerInfo(livetime=0.2),
             wait=True,
         )
-        yield from bp.count([adsim])
+        yield from bps.trigger_and_read([adsim])
 
-    RE(prepare_then_count())
+    RE(prepare_then_trigger())
 
     actual_exposure_time: float = RE(bps.rd(adsim.driver.acquire_time)).plan_result
     assert actual_exposure_time == 0.2

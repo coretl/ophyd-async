@@ -55,7 +55,7 @@ We will restructure `StandardDetector` to use composition with three separate lo
   
 - **`StreamableDataProvider`** - For streaming data (appears in StreamDatum documents)
   - `make_datakeys(collections_per_event)` - Generate DataKey descriptions
-  - `make_stream_docs(collections_written, collections_per_event)` - Emit StreamAsset documents
+  - `make_stream_docs(collections_from, collections_to, collections_per_event)` - Emit StreamAsset documents
   - `collections_written_signal` - Signal tracking write progress
 
 ### Detector Changes

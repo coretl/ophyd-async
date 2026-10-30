@@ -179,7 +179,7 @@ It derives from [](#StandardDetector) which is a utility baseclass that implemen
 - [](#DetectorAcquireLogic) to start and stop acquisition and wait for it to complete
 - [](#DetectorDataLogic) to tell the detector to open a file, describe the datasets it will write, and emit StreamAsset documents as frames are written
 
-In this case, we have three logic classes written just for this simulation, all taking a reference to the pattern generator that provides methods for both detector control and file writing. In other cases the detector control and filewriting may be handled by different sub-devices that talk to different parts of the control system. The job of the top level detector class is to take the arguments that the logic classes need, create the logic instances, and pass them to [](#StandardDetector.add_detector_logics).
+In this case, we have three logic classes written just for this simulation, all taking a reference to the pattern generator that provides methods for both detector control and file writing. In other cases the detector control and filewriting may be handled by different sub-devices that talk to different parts of the control system. The job of the top level detector class is to take the arguments that the logic classes need and, in `logic`, create the logic instances and wire them into a [](#DetectorLogic) by role: `DetectorLogic(trigger=..., acquire=..., data=[...])`.
 
 Now let's look at the underlying classes that define the detector behavior:
 
@@ -215,27 +215,45 @@ Next we have `BlobAcquireLogic`, a [](#DetectorAcquireLogic) subclass:
 
 Its job is to control the acquisition process on the detector, starting and stopping the collection of data:
 - `ensure_ready()` (inherited default) delegates to `ensure_stopped`, putting the detector into a known state at the start of each scan.
-- `start_acquiring()` starts the acquisition process that has been prepared. In this case we create a background task that will write our simulation images to file.
-- `wait_for_idle()` waits for that acquisition process to be complete.
-- `ensure_stopped()` interrupts the acquisition process and waits for it to complete. Called from `unstage()` at the end of a scan.
+- `acquire()` is an async generator for one acquisition. It starts the acquisition process that has been prepared, in this case a background task that will write our simulation images to file, yields once it is running, then waits for it to be complete. If the scan is cancelled the detector closes it at the `yield`, so the `finally` cancels the task.
+- `ensure_stopped()` stops the detector at the end of a scan, called from `unstage()`. Here `acquire()` owns the only thing running, so there is nothing to do.
 
 ### `BlobDataLogic`
 
-Then we have `BlobDataLogic`, a [](#DetectorDataLogic) subclass:
+Then we have `BlobDataLogic`, an [](#UnboundedDataLogic) subclass:
 
 ```{literalinclude} ../../src/ophyd_async/sim/_blob_data_logic.py
 :language: python
 ```
 
 Its job is to manage the file writing and data streaming:
-- `prepare_unbounded()` tells the detector to open a file, and returns a [](#StreamableDataProvider) that describes the datasets that will be written and tracks write progress
+- `start_provider()` works out where the file will go, opens it, and returns a [](#StreamableDataProvider) describing the datasets being written
 - `get_hinted_fields()` returns the data keys that are interesting to plot
-- `stop()` tells the detector to close the file
+- `ensure_stopped()` tells the detector to close the file
 
-The [](#StreamableDataProvider) returned from `prepare_unbounded()` contains:
-- `collections_written_signal` - a signal that tracks how many frames have been written
+The logic also has `collections_written`, a signal that tracks how many frames have been written. The [](#StreamableDataProvider) returned from `start_provider()` is made for the scan's collections per event, and contains:
 - `make_datakeys()` - creates DataKey descriptions for each dataset
 - `make_stream_docs()` - emits StreamResource and StreamDatum documents as frames are written
+
+#### Which kind of data a logic produces
+
+The detector starts each of its logics for the scan, and the type of provider that comes back says which kind of data it is.
+
+- a [](#StreamableDataProvider) publishes stream assets, like a file writer. The detector exposes `collect_asset_docs`, and `BlobDataLogic` is an example.
+- a [](#PageableDataProvider) publishes event pages, like an areaDetector stats time series or a scaler's arrays, so the detector exposes `collect_pages` instead. Its `make_page()` carries on from where its last page got to; a step scan's `read()` takes the last event of the page made up to the end of the point.
+- `None` means "not this stage", for instance a plugin that is switched off. The logic decides this without writing anything. This is not an error: a detector may carry more data logics than any one scan uses.
+
+Separately from that, a data logic is either a [](#BoundedDataLogic) or an [](#UnboundedDataLogic), whichever it inherits from (not both). An unbounded logic, like a file writer, keeps counting for as long as it is told to; its collections-written signal is read when each `prepare()` finishes. A bounded logic needs to be told how many collections to take, like a finite buffer: it is started after the unbounded ones and handed the datakeys their providers already make, and its provider must make none of them. It returns `None` if nothing is left to make, and raises for a scan with no fixed number of collections (`num_collections` of 0) if something is. At each point of a step scan after the first it is stopped and started again, so the buffer is cleared. Either kind may return either kind of provider.
+
+A source that produces one value per event, like a plugin scalar, needs no data logic at all: a detector is a [](#StandardReadable), so register the signal with [](#StandardReadable.set_readable_format).
+
+Both kinds of `start_provider()` are given the detector `name`, which a logic uses for its datakeys (adding its own suffix if it has one), and the fields they need from the scan's [](#TriggerInfo): `collections_per_event`, a `collection_period` and a `flush_period`, and the bounded one also `existing_datakeys` and `num_collections`. The `collection_period` is `exposures_per_collection * (livetime + deadtime)`, where `prepare()` reads the livetime and deadtime back from the trigger logic when the plan's [](#TriggerInfo) leaves `livetime` at 0 and [](#OPHYD_ASYNC_PRESERVE_DETECTOR_STATE) is `YES`; otherwise it is 0 for "use what is on the hardware".
+
+No two providers may make the same datakey: `prepare()` raises if they do. A datakey a provider makes replaces a registered signal of that name.
+
+```{note}
+Which logics serve is decided at the first `prepare()` after `stage()` and holds until `unstage()`, so it can change from one stage to the next — a detector whose file writer is switched off can serve its stats time series instead. Change it **between stages**, not inside one: a run's descriptor is emitted at its start, so switching part way through would leave the descriptor and the documents disagreeing.
+```
 
 ## Conclusion
 

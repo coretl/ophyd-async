@@ -1,5 +1,6 @@
 import asyncio
-from collections.abc import Callable, Sequence
+import warnings
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import PureWindowsPath
 from typing import Any, Generic
@@ -8,15 +9,17 @@ from xml.etree import ElementTree as ET
 import numpy as np
 
 from ophyd_async.core import (
-    DetectorDataLogic,
+    DEFAULT_TIMEOUT,
+    BoundedDataLogic,
     EnableDisable,
     PathInfo,
     PathProvider,
     SignalR,
-    StreamableDataProvider,
     StreamResourceDataProvider,
     StreamResourceInfo,
+    UnboundedDataLogic,
     set_and_wait_for_value,
+    wait_for_value,
 )
 from ophyd_async.epics.core import stop_busy_record
 
@@ -28,8 +31,9 @@ from ._io import (
     NDArrayBaseIO,
     NDFileHDF5IO,
     NDPluginBaseIO,
+    NDPluginBaseIOT,
     NDPluginFileIO,
-    NDPluginFileIOT,
+    plugin_is_enabled,
 )
 from ._ndattribute import NDAttributeDataType, NDAttributePvDbrType
 
@@ -144,8 +148,14 @@ async def prepare_file_paths(
     await writer.num_capture.set(0)
 
 
+async def _start_capture(writer: NDPluginFileIO) -> None:
+    await set_and_wait_for_value(writer.capture, True, wait_for_set_completion=False)
+    # Capturing resets NumCaptured, which the detector reads as its baseline
+    await wait_for_value(writer.num_captured, 0, timeout=DEFAULT_TIMEOUT)
+
+
 @dataclass
-class ADHDFDataLogic(DetectorDataLogic):
+class ADHDFDataLogic(UnboundedDataLogic[StreamResourceDataProvider]):
     """Data logic for AreaDetector HDF5 writer plugin.
 
     :param array_description: Signals describing the NDArray shape and data type.
@@ -164,73 +174,91 @@ class ADHDFDataLogic(DetectorDataLogic):
     plugins: Sequence[NDPluginBaseIO] = ()
     datakey_suffix: str = ""
     hinted: bool = True
+    #: True serves every scan. False sits out the scans of a stage if the
+    #: plugin's EnableCallbacks PV is off at the first prepare. Starting switches
+    #: it on.
+    always_enable: bool = True
 
-    async def prepare_unbounded(self, datakey_name: str) -> StreamableDataProvider:
-        # Work out where to write
+    def __post_init__(self) -> None:
+        self.collections_written = self.writer.num_captured
+
+    async def start_provider(
+        self,
+        name: str,
+        collections_per_event: int,
+        collection_period: float,
+        flush_period: float,
+    ) -> StreamResourceDataProvider | None:
+        if not self.always_enable and not await plugin_is_enabled(self.writer):
+            return None
+        datakey_name = name + self.datakey_suffix
         path_info = self.path_provider(datakey_name)
-        # Determine number of frames that will be saved per HDF chunk.
-        # On a fresh IOC startup, this is set to zero until the first capture,
-        # so if it is zero, set it to 1.
-        frames_per_chunk = await self.writer.num_frames_chunks.get_value()
-        if frames_per_chunk == 0:
-            frames_per_chunk = 1
-            await self.writer.num_frames_chunks.set(frames_per_chunk)
-        # Setup the HDF writer
-        await asyncio.gather(
-            self.writer.chunk_size_auto.set(True),
-            self.writer.num_extra_dims.set(0),
-            self.writer.lazy_open.set(True),
-            self.writer.swmr_mode.set(True),
-            self.writer.xml_file_name.set(""),
-            self.writer.enable_callbacks.set(EnableDisable.ENABLE),
-            prepare_file_paths(
-                path_info=path_info, file_template="%s%s.h5", writer=self.writer
+        # Size the HDF chunk to hold a flush period of collections, e.g. 400 Hz
+        # (2.5 ms) with a 0.5 s flush period gives 200 frames per chunk (#1309).
+        # Otherwise use the chunk size set on the IOC, forcing a fresh-startup 0
+        # to 1.
+        if flush_period > 0 and collection_period > 0:
+            frames_per_chunk = max(1, round(flush_period / collection_period))
+        else:
+            frames_per_chunk = await self.writer.num_frames_chunks.get_value() or 1
+        main_dataset, ndattribute_dtype_sources = await asyncio.gather(
+            get_ndarray_resource_info(
+                array_description=self.array_description,
+                data_key=datakey_name,
+                parameters={"dataset": "/entry/data/data"},
+                frames_per_chunk=frames_per_chunk,
             ),
-        )
-        # Start capturing
-        await set_and_wait_for_value(
-            self.writer.capture, True, wait_for_set_completion=False
-        )
-        # Return a provider that reflects what we have made
-        main_dataset = await get_ndarray_resource_info(
-            array_description=self.array_description,
-            data_key=datakey_name,
-            parameters={"dataset": "/entry/data/data"},
-            frames_per_chunk=frames_per_chunk,
-        )
-        ndattribute_dtype_sources = await get_ndattribute_dtype_source(
-            (self.driver, *self.plugins) if self.driver else (*self.plugins,)
+            get_ndattribute_dtype_source(
+                (self.driver, *self.plugins) if self.driver else (*self.plugins,)
+            ),
         )
         ndattribute_datasets = [
             StreamResourceInfo(
-                data_key=name,
+                data_key=attr_name,
                 shape=(),
                 # NDAttributes appear to always be configured with
                 # this chunk size
                 chunk_shape=(16384,),
                 dtype_numpy=dtype_numpy,
                 source=source,
-                parameters={"dataset": f"/entry/instrument/NDAttributes/{name}"},
+                parameters={"dataset": f"/entry/instrument/NDAttributes/{attr_name}"},
             )
-            for name, (dtype_numpy, source) in ndattribute_dtype_sources.items()
+            for attr_name, (dtype_numpy, source) in ndattribute_dtype_sources.items()
         ]
+        # Write back the chunk size the main dataset is described with, so the
+        # file matches the chunk_shape in its stream resource either way
+        await self.writer.num_frames_chunks.set(frames_per_chunk)
+        # Setup the HDF writer
+        coros: list[Awaitable] = [
+            self.writer.chunk_size_auto.set(True),
+            self.writer.num_extra_dims.set(0),
+            self.writer.lazy_open.set(True),
+            self.writer.swmr_mode.set(True),
+            self.writer.xml_file_name.set(""),
+            prepare_file_paths(
+                path_info=path_info, file_template="%s%s.h5", writer=self.writer
+            ),
+            self.writer.enable_callbacks.set(EnableDisable.ENABLE),
+        ]
+        await asyncio.gather(*coros)
+        await _start_capture(self.writer)
         return StreamResourceDataProvider(
             uri=f"{path_info.directory_uri}{path_info.filename}.h5",
             resources=[main_dataset] + ndattribute_datasets,
             mimetype="application/x-hdf5",
-            collections_written_signal=self.writer.num_captured,
+            collections_per_event=collections_per_event,
             flush_signal=self.writer.flush_now,
         )
 
-    async def stop(self) -> None:
+    async def ensure_stopped(self) -> None:
         await stop_busy_record(self.writer.capture)
 
-    def get_hinted_fields(self, datakey_name: str) -> Sequence[str]:
-        return [datakey_name] if self.hinted else []
+    def get_hinted_fields(self, name: str) -> Sequence[str]:
+        return [name + self.datakey_suffix] if self.hinted else []
 
 
 @dataclass
-class ADMultipartDataLogic(DetectorDataLogic):
+class ADMultipartDataLogic(UnboundedDataLogic[StreamResourceDataProvider]):
     """Data logic for multipart AreaDetector file writers (e.g. JPEG, TIFF).
 
     :param array_description: Signals describing the NDArray shape and data type.
@@ -241,6 +269,10 @@ class ADMultipartDataLogic(DetectorDataLogic):
         Mimetype for the written files (e.g. "multipart/related;type=image/jpeg").
     :param datakey_suffix: Suffix to append to the data key for the main dataset
     :param hinted: Include the image in hints. Set False for BestEffortCallback.
+    :param always_enable:
+        True serves every scan. False sits out the scans of a stage if the
+        plugin's EnableCallbacks PV is off at the first prepare. Starting
+        switches it on.
     """
 
     array_description: NDArrayDescription
@@ -250,10 +282,29 @@ class ADMultipartDataLogic(DetectorDataLogic):
     mimetype: str
     datakey_suffix: str = ""
     hinted: bool = True
+    always_enable: bool = True
 
-    async def prepare_unbounded(self, datakey_name: str) -> StreamableDataProvider:
-        # Work out where to write
+    def __post_init__(self) -> None:
+        self.collections_written = self.writer.num_captured
+
+    async def start_provider(
+        self,
+        name: str,
+        collections_per_event: int,
+        collection_period: float,
+        flush_period: float,
+    ) -> StreamResourceDataProvider | None:
+        # A multipart writer writes one file per frame, so there is nothing to
+        # size from the periods
+        if not self.always_enable and not await plugin_is_enabled(self.writer):
+            return None
+        datakey_name = name + self.datakey_suffix
         path_info = self.path_provider(datakey_name)
+        main_dataset = await get_ndarray_resource_info(
+            array_description=self.array_description,
+            data_key=datakey_name,
+            parameters={"template": path_info.filename + "_{:06d}" + self.extension},
+        )
         # Setup the file writer
         await asyncio.gather(
             self.writer.lazy_open.set(True),
@@ -262,45 +313,37 @@ class ADMultipartDataLogic(DetectorDataLogic):
                 file_template="%s%s_%6.6d" + self.extension,
                 writer=self.writer,
             ),
+            self.writer.enable_callbacks.set(EnableDisable.ENABLE),
         )
-        # Start capturing
-        await set_and_wait_for_value(
-            self.writer.capture, True, wait_for_set_completion=False
-        )
-        # Return a provider that reflects what we have made
-        main_dataset = await get_ndarray_resource_info(
-            array_description=self.array_description,
-            data_key=datakey_name,
-            parameters={"template": path_info.filename + "_{:06d}" + self.extension},
-        )
+        await _start_capture(self.writer)
         return StreamResourceDataProvider(
             # TODO: remove the type ignore after
             # https://github.com/bluesky/ophyd-async/issues/1186
             uri=path_info.directory_uri,
             resources=[main_dataset],
             mimetype=self.mimetype,
-            collections_written_signal=self.writer.num_captured,
+            collections_per_event=collections_per_event,
         )
 
-    async def stop(self) -> None:
+    async def ensure_stopped(self) -> None:
         await stop_busy_record(self.writer.capture)
 
-    def get_hinted_fields(self, datakey_name: str) -> Sequence[str]:
-        return [datakey_name] if self.hinted else []
+    def get_hinted_fields(self, name: str) -> Sequence[str]:
+        return [name + self.datakey_suffix] if self.hinted else []
 
 
 @dataclass
-class ADWriterFactory(Generic[NDPluginFileIOT]):
-    """Factory that creates a file-writer plugin and its matching data logic.
+class ADDataFactory(Generic[NDPluginBaseIOT]):
+    """Factory that creates a plugin and its matching data logic.
 
-    Construct using the classmethods `hdf`, `jpeg`, or `tiff`, then pass one
+    Construct using the static methods `hdf`, `jpeg` or `tiff`, then pass one
     or more instances to `AreaDetector` as positional `*writer_factories`
-    arguments.  When the detector is initialised `__call__` is invoked with
-    the detector's PV `prefix`, its `driver`, and the flat list of extra
-    `plugins`; it returns the writer device and the corresponding
-    `DetectorDataLogic`.
+    arguments.  When the detector is initialised
+    `__call__` is invoked with the detector's PV `prefix`, its `driver`, and the
+    flat list of extra `plugins`; it returns the writer device and the
+    corresponding data logic.
 
-    :param writer_cls: Concrete `NDPluginFileIO` subclass to instantiate.
+    :param writer_cls: Concrete `NDPluginBaseIO` subclass to instantiate.
     :param writer_suffix: PV suffix appended to *prefix* to form the writer's PV prefix.
     :param writer_name:
         Attribute name under which the writer device is stored on the
@@ -315,11 +358,11 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
         depends on signals that are only available once the driver has been
         constructed (e.g. inside a detector subclass that creates its own driver).
     :param data_logic_factory:
-        Callable ``(writer, array_description, driver, plugins) → DetectorDataLogic``
+        Callable ``(writer, array_description, driver, plugins) → data logic``
         that builds the data logic given the already-constructed writer.
     """
 
-    writer_cls: type[NDPluginFileIOT]
+    writer_cls: type[NDPluginBaseIOT]
     writer_suffix: str
     writer_name: str
     datakey_suffix: str
@@ -327,8 +370,8 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
         NDArrayDescription | Callable[[ADBaseIO], NDArrayDescription] | None
     )
     data_logic_factory: Callable[
-        [NDPluginFileIOT, NDArrayDescription, ADBaseIO, Sequence[NDPluginBaseIO]],
-        DetectorDataLogic,
+        [NDPluginBaseIOT, NDArrayDescription, ADBaseIO, Sequence[NDPluginBaseIO]],
+        BoundedDataLogic | UnboundedDataLogic,
     ]
 
     def __call__(
@@ -336,7 +379,7 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
         prefix: str,
         driver: ADBaseIO,
         plugins: Sequence[NDPluginBaseIO],
-    ) -> tuple[NDPluginFileIOT, DetectorDataLogic]:
+    ) -> tuple[NDPluginBaseIOT, BoundedDataLogic | UnboundedDataLogic]:
         """Instantiate the writer plugin and build the data logic.
 
         :param prefix: EPICS PV prefix for the detector (same as `AreaDetector.prefix`).
@@ -373,7 +416,8 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
         | Callable[[ADBaseIO], NDArrayDescription]
         | None = None,
         hinted: bool = True,
-    ) -> "ADWriterFactory[NDFileHDF5IO]":
+        always_enable: bool = True,
+    ) -> "ADDataFactory[NDFileHDF5IO]":
         """Create a factory for an HDF5 file writer.
 
         :param path_provider: Provides file path information for each acquisition.
@@ -389,8 +433,12 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
             when the shape/type comes from a plugin rather than the main driver
             (e.g. an ROI plugin).
         :param hinted: Include the image in hints. Set False for BestEffortCallback.
+        :param always_enable: True (the default) serves every scan. False sits
+            out the scans of a stage if the plugin's EnableCallbacks PV is off at
+            the first prepare, so another data logic can serve them. Starting
+            switches the plugin on either way.
         """
-        return ADWriterFactory(
+        return ADDataFactory(
             writer_cls=NDFileHDF5IO,
             writer_suffix=writer_suffix,
             writer_name=writer_name,
@@ -404,6 +452,7 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
                 plugins=list(plugins),
                 datakey_suffix=datakey_suffix,
                 hinted=hinted,
+                always_enable=always_enable,
             ),
         )
 
@@ -417,7 +466,8 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
         | Callable[[ADBaseIO], NDArrayDescription]
         | None = None,
         hinted: bool = True,
-    ) -> "ADWriterFactory[NDPluginFileIO]":
+        always_enable: bool = True,
+    ) -> "ADDataFactory[NDPluginFileIO]":
         """Create a factory for a JPEG file writer.
 
         :param path_provider: Provides file path information for each acquisition.
@@ -432,8 +482,12 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
             Pass an `NDArrayDescription` or a callable ``(driver) → NDArrayDescription``
             when the shape/type comes from a plugin.
         :param hinted: Include the image in hints. Set False for BestEffortCallback.
+        :param always_enable: True (the default) serves every scan. False sits
+            out the scans of a stage if the plugin's EnableCallbacks PV is off at
+            the first prepare, so another data logic can serve them. Starting
+            switches the plugin on either way.
         """
-        return ADWriterFactory(
+        return ADDataFactory(
             writer_cls=NDPluginFileIO,
             writer_suffix=writer_suffix,
             writer_name=writer_name,
@@ -448,6 +502,7 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
                     mimetype="multipart/related;type=image/jpeg",
                     datakey_suffix=datakey_suffix,
                     hinted=hinted,
+                    always_enable=always_enable,
                 )
             ),
         )
@@ -462,7 +517,8 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
         | Callable[[ADBaseIO], NDArrayDescription]
         | None = None,
         hinted: bool = True,
-    ) -> "ADWriterFactory[NDPluginFileIO]":
+        always_enable: bool = True,
+    ) -> "ADDataFactory[NDPluginFileIO]":
         """Create a factory for a TIFF file writer.
 
         :param path_provider: Provides file path information for each acquisition.
@@ -477,8 +533,12 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
             Pass an `NDArrayDescription` or a callable ``(driver) → NDArrayDescription``
             when the shape/type comes from a plugin.
         :param hinted: Include the image in hints. Set False for BestEffortCallback.
+        :param always_enable: True (the default) serves every scan. False sits
+            out the scans of a stage if the plugin's EnableCallbacks PV is off at
+            the first prepare, so another data logic can serve them. Starting
+            switches the plugin on either way.
         """
-        return ADWriterFactory(
+        return ADDataFactory(
             writer_cls=NDPluginFileIO,
             writer_suffix=writer_suffix,
             writer_name=writer_name,
@@ -493,6 +553,38 @@ class ADWriterFactory(Generic[NDPluginFileIOT]):
                     mimetype="multipart/related;type=image/tiff",
                     datakey_suffix=datakey_suffix,
                     hinted=hinted,
+                    always_enable=always_enable,
                 )
             ),
         )
+
+
+class ADWriterFactory(ADDataFactory[NDPluginBaseIOT]):
+    """Deprecated name of `ADDataFactory`."""
+
+    def __post_init__(self) -> None:
+        _warn_writer_factory()
+
+    @staticmethod
+    def hdf(*args, **kwargs) -> ADDataFactory[NDFileHDF5IO]:
+        _warn_writer_factory()
+        return ADDataFactory.hdf(*args, **kwargs)
+
+    @staticmethod
+    def jpeg(*args, **kwargs) -> ADDataFactory[NDPluginFileIO]:
+        _warn_writer_factory()
+        return ADDataFactory.jpeg(*args, **kwargs)
+
+    @staticmethod
+    def tiff(*args, **kwargs) -> ADDataFactory[NDPluginFileIO]:
+        _warn_writer_factory()
+        return ADDataFactory.tiff(*args, **kwargs)
+
+
+def _warn_writer_factory() -> None:
+    warnings.warn(
+        DeprecationWarning(
+            "'ADWriterFactory' is deprecated, use 'ADDataFactory' instead"
+        ),
+        stacklevel=3,
+    )

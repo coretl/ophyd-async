@@ -8,6 +8,7 @@ from ophyd_async.core import (
     StaticPathProvider,
     TriggerInfo,
     callback_on_mock_put,
+    get_mock,
     init_devices,
     set_mock_value,
 )
@@ -21,7 +22,7 @@ async def test_adaravis(
 ) -> adaravis.AravisDetector:
     async with init_devices(mock=True):
         detector = adaravis.AravisDetector(
-            "PREFIX:", adcore.ADWriterFactory.hdf(static_path_provider)
+            "PREFIX:", adcore.ADDataFactory.hdf(static_path_provider)
         )
     writer = detector.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
@@ -51,9 +52,22 @@ async def test_deadtime(
     assert deadtime == actual_deadtime
 
 
+async def test_deadtime_inputs_survive_dropping_them_from_configuration(
+    test_adaravis: adaravis.AravisDetector,
+):
+    set_mock_value(test_adaravis.driver.model, "Mako G-125")
+    test_adaravis.driver.set_readable_format(test_adaravis.driver.model, None)
+    test_adaravis.set_readable_format(test_adaravis.driver, None)
+    _, deadtime = await test_adaravis.get_trigger_deadtime()
+    assert deadtime == 70e-6
+
+
 async def test_prepare_external_edge(
     test_adaravis: adaravis.AravisDetector,
 ):
+    await test_adaravis.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_adaravis).reset_mock()
     await test_adaravis.prepare(
         TriggerInfo(
             trigger=DetectorTrigger.EXTERNAL_EDGE,
@@ -77,6 +91,9 @@ async def test_prepare_external_edge(
 async def test_prepare_internal(
     test_adaravis: adaravis.AravisDetector,
 ):
+    await test_adaravis.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_adaravis).reset_mock()
     await test_adaravis.prepare(TriggerInfo(number_of_events=11))
     assert_has_calls(
         test_adaravis.driver,

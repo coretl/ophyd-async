@@ -1,4 +1,11 @@
-from ophyd_async.core import PathProvider, StandardDetector, soft_signal_rw
+from functools import cached_property
+
+from ophyd_async.core import (
+    DetectorLogic,
+    PathProvider,
+    StandardDetector,
+    soft_signal_rw,
+)
 from ophyd_async.fastcs import odin
 from ophyd_async.fastcs.core import fastcs_connector
 
@@ -29,13 +36,19 @@ class JungfrauDetector(StandardDetector):
         self.acquisition_type = soft_signal_rw(
             AcquisitionType, AcquisitionType.STANDARD
         )
-        self.add_detector_logics(
-            JungfrauTriggerLogic(self.detector, self.acquisition_type),
-            JungfrauAcquireLogic(self.detector),
-            odin.OdinDataLogic(
-                path_provider=path_provider,
-                odin=self.odin,
-                detector_bit_depth=self.detector.bit_depth,
-            ),
-        )
+        self._path_provider = path_provider
         super().__init__(name=name)
+
+    @cached_property
+    def logic(self) -> DetectorLogic:
+        return DetectorLogic(
+            trigger=JungfrauTriggerLogic(self.detector, self.acquisition_type),
+            acquire=JungfrauAcquireLogic(self.detector),
+            data=[
+                odin.OdinDataLogic(
+                    path_provider=self._path_provider,
+                    odin=self.odin,
+                    detector_bit_depth=self.detector.bit_depth,
+                )
+            ],
+        )

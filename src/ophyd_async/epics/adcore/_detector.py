@@ -1,16 +1,20 @@
 from collections.abc import Mapping, Sequence
+from functools import cached_property
 from typing import Generic
 
 from ophyd_async.core import (
+    BoundedDataLogic,
     DetectorAcquireLogic,
+    DetectorLogic,
     DetectorTriggerLogic,
     SignalR,
     StandardDetector,
+    UnboundedDataLogic,
 )
 from ophyd_async.core import StandardReadableFormat as Format
 
 from ._acquire_logic import ADContAcqAcquireLogic
-from ._data_logic import ADWriterFactory
+from ._data_logic import ADDataFactory
 from ._io import (
     ADBaseIO,
     ADBaseIOT,
@@ -27,7 +31,7 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
         self,
         driver: ADBaseIOT,
         prefix: str | None = None,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         acquire_logic: DetectorAcquireLogic | None = None,
         trigger_logic: DetectorTriggerLogic | None = None,
         plugins: Mapping[str, NDPluginBaseIO] | None = None,
@@ -37,11 +41,10 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
         self.driver = driver
         if plugins is not None:
             for plugin_name, plugin in plugins.items():
-                setattr(self, plugin_name, plugin)
-        if trigger_logic:
-            self.add_detector_logics(trigger_logic)
-        if acquire_logic:
-            self.add_detector_logics(acquire_logic)
+                self._set_unique(plugin_name, plugin)
+        self._trigger_logic = trigger_logic
+        self._acquire_logic = acquire_logic
+        data_logics: list[BoundedDataLogic | UnboundedDataLogic] = []
         if writer_factories:
             if prefix is None:
                 raise ValueError("prefix is required when writer_factories are given")
@@ -54,8 +57,9 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
             plugin_list = list(plugins.values()) if plugins else []
             for factory in writer_factories:
                 writer, data_logic = factory(prefix, driver, plugin_list)
-                setattr(self, factory.writer_name, writer)
-                self.add_detector_logics(data_logic)
+                self._set_unique(factory.writer_name, writer)
+                data_logics.append(data_logic)
+        self._data_logics = tuple(data_logics)
         # The driver is always wired up, so register it whole and let ADBaseIO
         # declare which of its signals are configuration. Plugins are
         # deliberately *not* registered: a detector normally carries far more
@@ -65,6 +69,22 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
         for signal in config_sigs:
             self.set_readable_format(signal, Format.CONFIG_SIGNAL)
         super().__init__(name=name)
+
+    def _set_unique(self, attr: str, value: NDPluginBaseIO) -> None:
+        if attr in self.__dict__ or hasattr(type(self), attr):
+            raise ValueError(
+                f"Cannot add {type(value).__name__} as attribute '{attr}': "
+                f"{type(self).__name__} already has an attribute with that name"
+            )
+        setattr(self, attr, value)
+
+    @cached_property
+    def logic(self) -> DetectorLogic:
+        return DetectorLogic(
+            trigger=self._trigger_logic,
+            acquire=self._acquire_logic,
+            data=self._data_logics,
+        )
 
     def get_plugin(
         self, name: str, plugin_type: type[NDPluginBaseIOT] = NDPluginBaseIO
@@ -96,6 +116,7 @@ class ContAcqDetector(AreaDetector[ADBaseIOT]):
     :param driver_cls: IO class for the driver, defaults to ADBaseIO
     :param driver_suffix: Suffix for the driver PV, defaults to "cam1:"
     :param cb_suffix: Suffix for the circular buffer plugin PV, defaults to "CB1:"
+    :param cb_plugin_name: Attribute name of the circular buffer plugin
     :param proc_suffix: Suffix for the NDProcessIO plugin PV, if any, defaults to None
     :param plugins: Additional areaDetector plugins to include
     :param config_sigs: Additional signals to include in configuration
@@ -105,17 +126,18 @@ class ContAcqDetector(AreaDetector[ADBaseIOT]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         driver_cls: type[ADBaseIOT] = ADBaseIO,
         driver_suffix: str = "cam1:",
         cb_suffix: str = "CB1:",
+        cb_plugin_name: str = "cb",
         proc_suffix: str | None = None,
         plugins: dict[str, NDPluginBaseIO] | None = None,
         config_sigs: Sequence[SignalR] = (),
         name: str = "",
     ) -> None:
         driver = driver_cls(prefix + driver_suffix)
-        cb_plugin = NDCircularBuffIO(prefix + cb_suffix)
+        cb_plugin = NDCircularBuffIO(prefix + cb_suffix, name=cb_plugin_name)
         proc_plugin = NDProcessIO(prefix + proc_suffix) if proc_suffix else None
         super().__init__(
             driver,
@@ -124,7 +146,7 @@ class ContAcqDetector(AreaDetector[ADBaseIOT]):
             acquire_logic=ADContAcqAcquireLogic(driver, cb_plugin),
             trigger_logic=ADContAcqTriggerLogic(driver, cb_plugin, proc_plugin),
             plugins=(plugins or {})
-            | {"cb": cb_plugin}
+            | {cb_plugin.name: cb_plugin}
             | ({"proc": proc_plugin} if proc_plugin else {}),
             config_sigs=config_sigs,
             name=name,

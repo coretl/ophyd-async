@@ -4,8 +4,10 @@ import warnings
 from collections.abc import (
     Awaitable,
     Callable,
+    Collection,
     Generator,
     Iterator,
+    Mapping,
     MutableMapping,
     Sequence,
 )
@@ -21,7 +23,7 @@ from ._device import Device, DeviceMap, DeviceVector
 from ._protocol import AsyncConfigurable, AsyncReadable, AsyncStageable
 from ._signal import SignalR, walk_devices
 from ._standard_base import _StandardBase
-from ._utils import merge_gathered_dicts
+from ._utils import merge_dicts, merge_gathered_dicts
 
 
 class StandardReadableFormat(Enum):
@@ -115,9 +117,30 @@ class _Readables(MutableMapping[Device, StandardReadableFormat]):
     def __len__(self) -> int:
         return len(self._formats)
 
-    def entries(self) -> list[_ReadableEntry]:
-        """Each child and its format, typed by what `__setitem__` allowed."""
-        return cast(list[_ReadableEntry], list(self._formats.items()))
+    def entries(self, without: Collection[str] = ()) -> list[_ReadableEntry]:
+        """Each child and its format, typed by what `__setitem__` allowed.
+
+        :param without: names of signals to leave out
+        """
+        return [
+            entry
+            for entry in cast(list[_ReadableEntry], list(self._formats.items()))
+            if entry[1] is Format.CHILD or entry[0].name not in without
+        ]
+
+
+def _switched_off_names(suppressed: Mapping[str, DataKey | None]) -> set[str]:
+    """The names that are switched off, which have no replacement."""
+    return {name for name, datakey in suppressed.items() if datakey is None}
+
+
+def _without_fields(hints: Hints, names: Collection[str]) -> Hints:
+    """`hints` with `names` left out of its fields."""
+    fields = hints.get("fields")
+    if isinstance(fields, str) or not isinstance(fields, Sequence):
+        # Absent or malformed: hints reports the malformed ones
+        return hints
+    return cast(Hints, {**hints, "fields": [n for n in fields if n not in names]})
 
 
 class _SealDefaultFormatsMeta(type(_StandardBase)):  # type: ignore[misc]
@@ -205,6 +228,14 @@ class StandardReadable(
         Callable[[], Awaitable[dict[str, DataKey]]], ...
     ] = ()
     _hints_funcs: tuple[Callable[[], Iterator[Hints]], ...] = ()
+    # The names of registered children that are not read for now, by name so a
+    # child's own children are covered. A DataKey means something else provides
+    # that name instead: the child is dropped from read() and describe() after
+    # checking it against the DataKey, and kept in hints. None means the name is
+    # switched off: it is dropped from read(), describe() and hints.
+    _suppressed_datakeys_funcs: tuple[
+        Callable[[], Mapping[str, DataKey | None]], ...
+    ] = ()
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -282,10 +313,21 @@ class StandardReadable(
                     pass
         return await merge_gathered_dicts(coros)
 
+    def _suppressed_datakeys(self) -> dict[str, DataKey | None]:
+        return merge_dicts(func() for func in self._suppressed_datakeys_funcs)
+
     async def __on_describe(self) -> dict[str, DataKey]:
-        """What the registered children contribute to `describe()`."""
+        """What the registered children contribute to `describe()`.
+
+        Every signal with a replacement is described too, to check the
+        replacement can stand in for it.
+        """
         coros = []
-        for entry in self._readables.entries():
+        suppressed = self._suppressed_datakeys()
+        replacements = {
+            name: datakey for name, datakey in suppressed.items() if datakey is not None
+        }
+        for entry in self._readables.entries(without=_switched_off_names(suppressed)):
             match entry:
                 case (device, Format.CHILD):
                     if isinstance(device, AsyncReadable):
@@ -299,12 +341,29 @@ class StandardReadable(
                     coros.append(signal.describe())
                 case (_, Format.CONFIG_SIGNAL):
                     pass
-        return await merge_gathered_dicts(coros)
+        datakeys = await merge_gathered_dicts(coros)
+        # A replacement needs the signal's dtype, and its shape or that shape with
+        # one extra leading dimension, e.g. one per collection of an event
+        mismatched = []
+        for key in sorted(datakeys.keys() & replacements.keys()):
+            signal, data = datakeys[key], replacements[key]
+            same_dtype = signal.get("dtype_numpy") == data.get("dtype_numpy")
+            same_shape = signal["shape"] in (data["shape"], data["shape"][1:])
+            if not (same_dtype and same_shape):
+                mismatched.append(key)
+        if mismatched:
+            raise ValueError(
+                f"{self.name}: duplicate datakeys {mismatched}: registered signals "
+                "with a different shape or dtype from the data that would replace "
+                "them, so rename one of them"
+            )
+        return {k: v for k, v in datakeys.items() if k not in suppressed}
 
     async def __on_read(self) -> dict[str, Reading]:
         """What the registered children contribute to `read()`."""
         coros = []
-        for entry in self._readables.entries():
+        suppressed = self._suppressed_datakeys()
+        for entry in self._readables.entries(without=suppressed):
             match entry:
                 case (device, Format.CHILD):
                     if isinstance(device, AsyncReadable):
@@ -318,15 +377,18 @@ class StandardReadable(
                     coros.append(signal.read(cached=False))
                 case (_, Format.CONFIG_SIGNAL):
                     pass
-        return await merge_gathered_dicts(coros)
+        readings = await merge_gathered_dicts(coros)
+        # entries() leaves out suppressed signals, but not those read by a child
+        return {k: v for k, v in readings.items() if k not in suppressed}
 
     def __on_hints(self) -> Iterator[Hints]:
         """What the registered children contribute to `hints`."""
-        for entry in self._readables.entries():
+        switched_off = _switched_off_names(self._suppressed_datakeys())
+        for entry in self._readables.entries(without=switched_off):
             match entry:
                 case (device, Format.CHILD):
                     if isinstance(device, HasHints):
-                        yield device.hints
+                        yield _without_fields(device.hints, switched_off)
                 case (
                     signal,
                     Format.HINTED_SIGNAL | Format.HINTED_UNCACHED_SIGNAL,
@@ -540,36 +602,6 @@ class StandardReadable(
         )
         for device in devices:
             self.set_readable_format(device, format)
-
-
-def _config_signals(device: Device) -> set[SignalR]:
-    """Return every `Signal` contributing to a Device's `read_configuration()`.
-
-    Recurses into children registered as [](#StandardReadableFormat.CHILD), so
-    a Device that registers a sub-Device whole picks up whatever that
-    sub-Device declares as configuration. A Device that is not a
-    `StandardReadable` contributes nothing.
-
-    Unlike `walk_config_signals` this reads the registry rather than calling
-    `read_configuration()`, so it does no I/O and includes read-only `SignalR`s
-    as well as `SignalRW`s -- `ADBaseIO.model` is a `SignalR`, and it is
-    exactly the signal an areaDetector trigger logic needs for deadtime.
-
-    Deliberately private and unexported: #1367 restructures detector logic, so
-    what the public shape of this should be is not settled yet.
-    """
-    signals: set[SignalR] = set()
-    if not isinstance(device, StandardReadable):
-        return signals
-    for entry in device._readables.entries():  # noqa: SLF001
-        match entry:
-            case (signal, Format.CONFIG_SIGNAL):
-                signals.add(signal)
-            case (child, Format.CHILD):
-                signals |= _config_signals(child)
-            case _:
-                pass
-    return signals
 
 
 #: Reserved key under which [](#store_settings) writes readable formats. Chosen

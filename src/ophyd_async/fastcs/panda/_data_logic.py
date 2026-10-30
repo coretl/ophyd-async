@@ -4,11 +4,12 @@ import logging
 import numpy as np
 
 from ophyd_async.core import (
-    DetectorDataLogic,
+    DEFAULT_TIMEOUT,
     PathProvider,
-    StreamableDataProvider,
     StreamResourceDataProvider,
     StreamResourceInfo,
+    UnboundedDataLogic,
+    wait_for_value,
 )
 
 from ._block import DataBlock, PandaCaptureMode
@@ -16,7 +17,7 @@ from ._block import DataBlock, PandaCaptureMode
 logger = logging.getLogger("ophyd_async")
 
 
-class PandaHDFDataLogic(DetectorDataLogic):
+class PandaHDFDataLogic(UnboundedDataLogic[StreamResourceDataProvider]):
     def __init__(
         self,
         path_provider: PathProvider,
@@ -24,16 +25,26 @@ class PandaHDFDataLogic(DetectorDataLogic):
     ):
         self.path_provider = path_provider
         self.data_block = data_block
+        self.collections_written = self.data_block.num_captured
 
-    async def prepare_unbounded(self, datakey_name: str) -> StreamableDataProvider:
-        # Work out where to write
-        path_info = self.path_provider(datakey_name)
+    async def start_provider(
+        self,
+        name: str,
+        collections_per_event: int,
+        collection_period: float,
+        flush_period: float,
+    ) -> StreamResourceDataProvider:
+        # TODO: size the chunk from `collection_period` once the IOC exposes the
+        # chunk-size signal (see the chunk_shape TODO below).
+        path_info = self.path_provider(name)
         # Set create dir depth first to guarantee that callback when setting
         # directory path has correct value
         await self.data_block.create_directory.set(path_info.create_dir_depth)
-        # Setup the HDF writer
+        # Setup the HDF writer. The PandA flushes on a timer rather than by
+        # chunk size, so it takes the flush period directly; 0 means it flushes
+        # only when its buffer fills.
         await asyncio.gather(
-            self.data_block.flush_period.set(0),
+            self.data_block.flush_period.set(flush_period),
             self.data_block.hdf_directory.set(str(path_info.directory_path)),
             self.data_block.hdf_file_name.set(
                 f"{path_info.filename}.h5",
@@ -48,12 +59,14 @@ class PandaHDFDataLogic(DetectorDataLogic):
             )
         # Start capturing
         await self.data_block.capture.set(True)
-        # Load data from the datasets PV on the panda, update internal
-        # representation of datasets that the panda will write.
+        # Capturing resets NumCaptured, which the detector reads as its baseline
+        await wait_for_value(self.data_block.num_captured, 0, timeout=DEFAULT_TIMEOUT)
+        # The datasets the PandA writes: PandABlocks-ioc only fills the table
+        # once capturing has started
         capture_table = await self.data_block.datasets.get_value()
         if len(capture_table) == 0:
             logger.warning(
-                f"PandA {datakey_name} DATASETS table is empty! "
+                f"PandA {name} DATASETS table is empty! "
                 "No stream resource docs will be generated. "
                 "Make sure captured positions have their corresponding "
                 "*:DATASET PV set to a scientifically relevant name."
@@ -74,8 +87,8 @@ class PandaHDFDataLogic(DetectorDataLogic):
             uri=f"{path_info.directory_uri}{path_info.filename}.h5",
             resources=resources,
             mimetype="application/x-hdf5",
-            collections_written_signal=self.data_block.num_captured,
+            collections_per_event=collections_per_event,
         )
 
-    async def stop(self) -> None:
+    async def ensure_stopped(self) -> None:
         await self.data_block.capture.set(False)

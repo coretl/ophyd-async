@@ -2,14 +2,16 @@ from unittest.mock import ANY
 
 import pytest
 
-from ophyd_async.core import StandardReadableFormat as Format
 from ophyd_async.core import (
+    EnableDisable,
     StaticPathProvider,
+    TransitionError,
     TriggerInfo,
     callback_on_mock_put,
     init_devices,
     set_mock_value,
 )
+from ophyd_async.core import StandardReadableFormat as Format
 from ophyd_async.epics import adaravis, adcore, adsimdetector
 from ophyd_async.epics.core import epics_signal_r
 from ophyd_async.testing import assert_reading
@@ -22,7 +24,7 @@ async def test_step_scan_hdf_detector_with_stats_and_temp(
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             plugins={"stats": stat},
         )
         temp = epics_signal_r(float, "SAMP:TEMP:RBV")
@@ -71,8 +73,7 @@ async def test_step_scan_hdf_detector_with_stats_and_temp(
     assert {"det-driver-acquire_period", "det-driver-acquire_time"} <= config.keys()
     assert config["det-driver-acquire_period"]["value"] == 0.1
     assert config["det-driver-acquire_time"]["value"] == 0.05
-    # Check we need to call prepare or trigger before we can describe
-    with pytest.raises(RuntimeError, match="Prepare not run"):
+    with pytest.raises(TransitionError, match="describe not allowed from STAGED"):
         await det.describe()
     # Need to tell it the path is valid
     set_mock_value(writer.file_path_exists, True)
@@ -188,14 +189,18 @@ async def test_step_scan_hdf_detector_with_stats_and_temp(
         "det-stats-max_value",
     } <= readings.keys()
     docs = [doc async for doc in det.collect_asset_docs()]
-    assert docs == [
+    # Each prepare starts new resources in the same file, the indices carrying on
+    new_sr, sd = docs[:3], docs[3:]
+    assert new_sr == [(name, {**doc, "uid": ANY}) for name, doc in sr]
+    assert {doc["uid"] for _, doc in new_sr}.isdisjoint(doc["uid"] for _, doc in sr)
+    assert sd == [
         (
             "stream_datum",
             {
                 "descriptor": "",
                 "indices": {"start": 1, "stop": 2},
                 "seq_nums": {"start": 0, "stop": 0},
-                "stream_resource": sr[i][1]["uid"],
+                "stream_resource": new_sr[i][1]["uid"],
                 "uid": ANY,
             },
         )
@@ -213,7 +218,7 @@ async def test_step_scan_tiff_detector(
 ):
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
-            "PREFIX:", adcore.ADWriterFactory.tiff(static_path_provider)
+            "PREFIX:", adcore.ADDataFactory.tiff(static_path_provider)
         )
 
     writer = det.get_plugin("tiff", adcore.NDPluginFileIO)
@@ -279,7 +284,7 @@ async def test_step_scan_tiff_detector(
 async def test_flyscan_aravis_detector(static_path_provider: StaticPathProvider):
     async with init_devices(mock=True):
         det = adaravis.AravisDetector(
-            "PREFIX:", adcore.ADWriterFactory.hdf(static_path_provider)
+            "PREFIX:", adcore.ADDataFactory.hdf(static_path_provider)
         )
 
     writer = det.get_plugin("hdf", adcore.NDPluginFileIO)
@@ -341,6 +346,7 @@ async def test_flyscan_aravis_detector(static_path_provider: StaticPathProvider)
     # Make 2 and 1/3 events and check they are produced
     set_mock_value(writer.num_captured, 7)
     docs = [doc async for doc in det.collect_asset_docs()]
+    sr = docs[:1]
     assert docs == [
         (
             "stream_resource",
@@ -386,24 +392,27 @@ async def test_flyscan_aravis_detector(static_path_provider: StaticPathProvider)
     # Check that another kickoff without prepare is not allowed
     with pytest.raises(
         RuntimeError,
-        match="Kickoff requested 15:30, but detector was only prepared up to 15",
+        match="cannot go to FLYING from FLOWN",
     ):
         await det.kickoff()
     # But preparing again is ok
     await det.prepare(TriggerInfo(collections_per_event=3, number_of_events=3))
     await det.kickoff()
-    # Completing adds indexes to the same resource
+    # Completing starts a new resource in the same file, the indices carrying on
     status = det.complete()
     set_mock_value(writer.num_captured, 24)
     docs = [doc async for doc in det.collect_asset_docs()]
-    assert docs == [
+    new_sr = docs[:1]
+    assert new_sr == [(name, {**doc, "uid": ANY}) for name, doc in sr]
+    assert new_sr[0][1]["uid"] != sr[0][1]["uid"]
+    assert docs[1:] == [
         (
             "stream_datum",
             {
                 "descriptor": "",
                 "indices": {"start": 5, "stop": 8},
                 "seq_nums": {"start": 0, "stop": 0},
-                "stream_resource": ANY,
+                "stream_resource": new_sr[0][1]["uid"],
                 "uid": ANY,
             },
         ),
@@ -420,7 +429,7 @@ async def test_2_rois_with_hdf(tmp_path):
     async with init_devices(mock=True):
         det = adaravis.AravisDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(
+            adcore.ADDataFactory.hdf(
                 path_provider,
                 writer_suffix="HDF1:",
                 writer_name="hdf1",
@@ -431,7 +440,7 @@ async def test_2_rois_with_hdf(tmp_path):
                     color_mode_signal=driver.color_mode,
                 ),
             ),
-            adcore.ADWriterFactory.hdf(
+            adcore.ADDataFactory.hdf(
                 path_provider,
                 writer_suffix="HDF2:",
                 writer_name="hdf2",
@@ -590,11 +599,11 @@ async def test_step_scan_keep_numimages(
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             plugins={"stats": stat},
         )
-    # Plugins are not registered automatically; opt this one in
-    det.set_readable_format(stat, Format.CHILD)
+    # Plugins are not registered automatically, and the stats readables give one
+    # value per event so cannot be used with 42 collections per event
 
     set_mock_value(det.driver.acquire_period, 0.1)
     set_mock_value(det.driver.acquire_time, 0.05)
@@ -607,8 +616,8 @@ async def test_step_scan_keep_numimages(
     assert {"det-driver-acquire_period", "det-driver-acquire_time"} <= config.keys()
     assert config["det-driver-acquire_period"]["value"] == 0.1
     assert config["det-driver-acquire_time"]["value"] == 0.05
-    # Check we need to call prepare or trigger before we can describe
-    with pytest.raises(RuntimeError, match="Prepare not run"):
+    await det.stage()
+    with pytest.raises(TransitionError, match="describe not allowed from STAGED"):
         await det.describe()
     # Need to tell it the path is valid
     set_mock_value(writer.file_path_exists, True)
@@ -630,8 +639,7 @@ async def test_step_scan_keep_numimages(
         "source": uri,
     }
     assert "det" in det.hints["fields"]
-    reading = await det.read()
-    assert "det-stats-total" in reading
+    assert await det.read() == {}
     sr, sd = [doc async for doc in det.collect_asset_docs()]
     assert sr == (
         "stream_resource",
@@ -658,26 +666,37 @@ async def test_step_scan_keep_numimages(
         },
     )
 
-    # Check we can prepare and change the exposure
+    # Check we can prepare and change the exposure. Changing the exposure changes
+    # the frame period, which (per ADR 0023) determines the HDF chunk shape, so a
+    # new StreamResource is opened rather than the old file being reused. Here the
+    # chunk shape is unchanged because this writer leaves flush_period unset and so
+    # reads the chunk size back from the IOC, but the period change still starts a
+    # fresh file.
+    # Starting a capture resets the IOC's NumCaptured, which start() waits for
+    callback_on_mock_put(
+        writer.capture, lambda v: set_mock_value(writer.num_captured, 0) if v else None
+    )
     await det.prepare(
         TriggerInfo(collections_per_event=42, livetime=0.01, exposure_timeout=0.1)
     )
     callback_on_mock_put(
-        det.driver.acquire, lambda v: set_mock_value(writer.num_captured, 84)
+        det.driver.acquire, lambda v: set_mock_value(writer.num_captured, 42)
     )
     assert await det.driver.acquire_time.get_value() == 0.01
     await det.trigger()
     readings = await det.read()
-    assert "det-stats-total" in readings
-    docs = [doc async for doc in det.collect_asset_docs()]
-    (doc,) = docs
-    assert doc == (
+    assert "det-stats-total" not in readings
+    new_sr, new_sd = [doc async for doc in det.collect_asset_docs()]
+    assert new_sr[0] == "stream_resource"
+    assert new_sr[1]["uid"] != sr[1]["uid"]
+    assert new_sr[1]["parameters"]["chunk_shape"] == (1, 768, 1024)
+    assert new_sd == (
         "stream_datum",
         {
             "descriptor": "",
-            "indices": {"start": 1, "stop": 2},
+            "indices": {"start": 0, "stop": 1},
             "seq_nums": {"start": 0, "stop": 0},
-            "stream_resource": sr[1]["uid"],
+            "stream_resource": new_sr[1]["uid"],
             "uid": ANY,
         },
     )
@@ -697,7 +716,7 @@ async def test_kinetix_step_scan_with_averaging_filter(
 
         det = adkinetix.KinetixDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             proc_suffix="PROC:",
         )
 
@@ -788,3 +807,78 @@ async def test_kinetix_step_scan_with_averaging_filter(
             },
         ),
     ]
+
+
+# Ruling 1: a once-per-event readable is shadowed by a same-named higher tier at
+# any collections_per_event, and read once per event when nothing shadows it
+
+
+@pytest.mark.parametrize("cpe", [1, 2])
+async def test_readable_with_no_data_logic_is_read_once_per_event(cpe: int):
+    stat = adcore.NDStatsIO("PREFIX:STATS:")
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector("PREFIX:", plugins={"stats": stat}, name="det")
+    det.set_readable_format(stat.total, Format.UNCACHED_SIGNAL)
+    await det.stage()
+    await det.prepare(TriggerInfo(number_of_events=1, collections_per_event=cpe))
+
+    assert (await det.describe())["det-stats-total"]["shape"] == []
+
+
+@pytest.mark.parametrize("on_at_stage", [True, False])
+async def test_hdf_by_settings_follows_its_plugin_at_stage_for_the_whole_stage(
+    tmp_path, on_at_stage: bool
+):
+    """Switching a writer's plugin mid-stage changes nothing until restaged."""
+    path_provider = StaticPathProvider(
+        lambda datakey_name=None: str(datakey_name), tmp_path
+    )
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector(
+            "PREFIX:",
+            *(
+                adcore.ADDataFactory.hdf(
+                    path_provider,
+                    writer_suffix=f"HDF{i}:",
+                    writer_name=f"hdf{i}",
+                    datakey_suffix=f"-roi{i}",
+                    always_enable=False,
+                )
+                for i in (1, 2)
+            ),
+        )
+    set_mock_value(det.driver.array_size_x, 1024)
+    set_mock_value(det.driver.array_size_y, 768)
+    hdf1, hdf2 = (det.get_plugin(f"hdf{i}", adcore.NDFileHDF5IO) for i in (1, 2))
+    for hdf in (hdf1, hdf2):
+        set_mock_value(hdf.file_path_exists, True)
+    set_mock_value(hdf1.enable_callbacks, EnableDisable.ENABLE)
+    frames = 0
+
+    def acquire(value: bool) -> None:
+        nonlocal frames
+        if value:
+            frames += 3
+            for hdf in (hdf1, hdf2):
+                set_mock_value(hdf.num_captured, frames)
+
+    callback_on_mock_put(det.driver.acquire, acquire)
+    served = {"det-roi1", "det-roi2"} if on_at_stage else {"det-roi1"}
+    info = TriggerInfo(number_of_events=3)
+
+    def enable_hdf2(enabled: bool) -> None:
+        value = EnableDisable.ENABLE if enabled else EnableDisable.DISABLE
+        set_mock_value(hdf2.enable_callbacks, value)
+
+    enable_hdf2(on_at_stage)
+    await det.stage()
+    for flip in (False, True):
+        if flip:
+            enable_hdf2(not on_at_stage)
+        await det.prepare(info)
+        await det.kickoff()
+        await det.complete()
+        assert set(await det.describe_collect()) == served
+        # Events since prepare()
+        assert await det.get_index() == info.number_of_events
+    await det.unstage()

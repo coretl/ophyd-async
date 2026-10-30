@@ -22,7 +22,7 @@ from .adcore import (
     ADAcquireLogic,
     ADBaseDataType,
     ADBaseIO,
-    ADWriterFactory,
+    ADDataFactory,
     AreaDetector,
     NDPluginBaseIO,
     NDProcessIO,
@@ -112,9 +112,7 @@ class MerlinTriggerLogic(DetectorTriggerLogic):
         await prepare_filter(self.process_plugin, exposures_per_collection)
 
     async def default_trigger_info(self):
-        return await trigger_info_from_driver(
-            self.driver.num_images, self.process_plugin
-        )
+        return await trigger_info_from_driver(self.driver, self.process_plugin)
 
 
 class MerlinDetector(AreaDetector[MerlinDriverIO]):
@@ -132,7 +130,7 @@ class MerlinDetector(AreaDetector[MerlinDriverIO]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         driver_suffix="cam1:",
         proc_suffix: str | None = None,
         plugins: dict[str, NDPluginBaseIO] | None = None,

@@ -1,6 +1,6 @@
-import asyncio
+from collections.abc import AsyncGenerator
 
-from ophyd_async.core import DetectorAcquireLogic, TriggerInfo
+from ophyd_async.core import AsyncStatus, DetectorAcquireLogic, TriggerInfo
 
 from ._pattern_generator import PatternGenerator
 
@@ -9,23 +9,13 @@ class BlobAcquireLogic(DetectorAcquireLogic):
     def __init__(self, pattern_generator: PatternGenerator):
         self.pattern_generator = pattern_generator
         self.trigger_info: TriggerInfo | None = None
-        self.task: asyncio.Task | None = None
 
-    async def start_acquiring(self):
-        # Start a background process off writing the images to file
-        self.task = asyncio.create_task(self.pattern_generator.write_images_to_file())
-
-    async def wait_for_idle(self):
-        # Wait for the background task to complete
-        if self.task:
-            await self.task
+    async def acquire(self) -> AsyncGenerator[None, None]:
+        # Write the images to file in the background, until done or closed
+        async with AsyncStatus(self.pattern_generator.write_images_to_file()) as status:
+            yield
+            await status
 
     async def ensure_stopped(self):
-        # Stop the background task and wait for it to finish
-        if self.task:
-            task, self.task = self.task, None
-            task.cancel()
-            # An outside cancel while we wait propagates, it is not swallowed
-            await asyncio.wait([task])
-            if not task.cancelled() and (error := task.exception()):
-                raise error
+        # acquire() owns the writing task, so there is nothing else to stop
+        pass
