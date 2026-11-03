@@ -33,6 +33,7 @@ from ._io import (
     NDPluginBaseIO,
     NDPluginBaseIOT,
     NDPluginFileIO,
+    NDROIStatIO,
     NDStatsIO,
     plugin_is_enabled,
 )
@@ -42,7 +43,10 @@ from ._ndattribute import (
     NDAttributeSource,
     ndattributes_to_xml,
 )
-from ._stats_time_series import StatsTimeSeriesDataLogic
+from ._stats_time_series import (
+    ROIStatTimeSeriesDataLogic,
+    StatsTimeSeriesDataLogic,
+)
 
 
 @dataclass
@@ -666,6 +670,31 @@ class ADDataFactory(Generic[NDPluginBaseIOT]):
                 StatsTimeSeriesDataLogic(stats=used)
             ),
             plugin=stats,
+        )
+
+    @staticmethod
+    def roistat_time_series(roistat: NDROIStatIO) -> "ADDataFactory[NDROIStatIO]":
+        """Create a factory for an NDPluginROIStat time series.
+
+        Like `stats_time_series`, but for an ROI stat plugin (see
+        `ROIStatTimeSeriesDataLogic`). Each series is named after its scalar
+        signal, e.g. ``det-roistat-Blue-total``, and the plugin's EnableCallbacks
+        and each channel's Use decide which are published.
+
+        :param roistat: The ROI stat plugin, which must be in the detector's
+            device tree, e.g. in its `plugins`. `AreaDetector` raises if it is
+            not. The same plugin can be listed in ``hdf(ndattribute_sources=)``.
+        """
+        return ADDataFactory(
+            writer_cls=None,
+            writer_suffix="",
+            writer_name="",
+            datakey_suffix="",
+            array_description=None,
+            data_logic_factory=lambda used, desc, driver, plugins: (
+                ROIStatTimeSeriesDataLogic(roistat=used)
+            ),
+            plugin=roistat,
         )
 
 

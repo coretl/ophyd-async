@@ -1606,3 +1606,196 @@ async def test_uc9_prepare_raises_for_a_roistat_channel_used_since_stage(tmp_pat
 
     with pytest.raises(RuntimeError, match=r"changed since stage.*ROISTAT:3:Use_RBV"):
         await det.prepare(TriggerInfo())
+
+
+# Use case 10: the time series of an ROIStat plugin, for a detector that writes no
+# file. Each used channel publishes one array per statistic with a read format,
+# named after the scalar its channel already reads, which it suppresses.
+
+
+async def _roistat_time_series_detector(
+    path_provider: StaticPathProvider | None = None,
+):
+    """Three channels named Blue, Green and Red, all used; with an HDF writer
+    stamping the plugin's NDAttributes if given a path provider."""
+    roistat = adcore.NDROIStatIO("PREFIX:ROISTAT:", num_channels=len(CHANNEL_NAMES))
+    hdf_factories = (
+        [
+            adcore.ADDataFactory.hdf(
+                path_provider, always_enable=False, ndattribute_sources=[roistat]
+            )
+        ]
+        if path_provider
+        else []
+    )
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector(
+            "PREFIX:",
+            *hdf_factories,
+            adcore.ADDataFactory.roistat_time_series(roistat),
+            plugins={"roistat": roistat},
+            name="det",
+        )
+    set_mock_value(roistat.enable_callbacks, EnableDisable.ENABLE)
+    for number, name in CHANNEL_NAMES.items():
+        set_mock_value(roistat.channels[number].name_, name)
+        set_mock_value(roistat.channels[number].use, True)
+    return det, roistat
+
+
+def _fly_roistat_time_series(
+    RE: RunEngine, det, roistat: adcore.NDROIStatIO, points: int, also=lambda: None
+) -> dict[str, list]:
+    """Behave like the IOC: ERASE_START resets the count, acquiring fills each
+    channel's arrays with 10 * channel number + frame number. The timestamps
+    differ per channel, which the IOC's do not, to show which channel's are used."""
+
+    def erase(value):
+        if value == adcore.NDROIStatTSControl.ERASE_START:
+            set_mock_value(roistat.ts_current_point, 0)
+
+    def fill(value):
+        if value:
+            for number, channel in roistat.channels.items():
+                for array in channel.time_series.values():
+                    set_mock_value(
+                        array,  # pyright: ignore[reportArgumentType]
+                        10.0 * number + np.arange(points),
+                    )
+                set_mock_value(
+                    channel.ts_timestamp,  # pyright: ignore[reportArgumentType]
+                    100.0 * number + np.arange(points),
+                )
+            set_mock_value(roistat.ts_current_point, points)
+            also()
+
+    callback_on_mock_put(roistat.ts_control, erase)
+    callback_on_mock_put(det.driver.acquire, fill)
+    docs: dict[str, list] = defaultdict(list)
+    RE(
+        _fly_plan(det, TriggerInfo(number_of_events=points)),
+        lambda name, doc: docs[name].append(doc),
+    )
+    return docs
+
+
+async def test_uc10_roistat_time_series_publishes_each_used_channel(RE: RunEngine):
+    det, roistat = await _roistat_time_series_detector()
+    # Green is not used, and Red publishes only its total
+    set_mock_value(roistat.channels[2].use, False)
+    red = roistat.channels[3]
+    for scalar in (red.min_value, red.max_value, red.mean_value):
+        red.set_readable_format(scalar, None)
+
+    docs = _fly_roistat_time_series(RE, det, roistat, points=3)
+
+    blue_keys = [
+        f"det-roistat-Blue-{stat}"
+        for stat in ("min_value", "max_value", "mean_value", "total")
+    ]
+    keys = [*blue_keys, "det-roistat-Red-total"]
+    (descriptor,) = docs["descriptor"]
+    # The arrays replace the scalars of the same name, and the unused channel is gone
+    assert sorted(descriptor["data_keys"]) == sorted(keys)
+    total = descriptor["data_keys"]["det-roistat-Blue-total"]
+    assert total["source"] == "mock+ca://PREFIX:ROISTAT:1:TSTotal"
+    assert total["shape"] == [1]
+    # The channels hint their scalars, whoever serves them
+    assert descriptor["hints"]["det"]["fields"] == keys
+    assert docs["event"] == []
+    (page,) = docs["event_page"]
+    assert sorted(page["data"]) == sorted(keys)
+    assert page["data"]["det-roistat-Blue-total"] == [[10.0], [11.0], [12.0]]
+    assert page["data"]["det-roistat-Red-total"] == [[30.0], [31.0], [32.0]]
+    # Every array is timed by the first used channel's timestamps
+    assert page["timestamps"]["det-roistat-Red-total"] == [100.0, 101.0, 102.0]
+    # The buffer was sized to the scan, then erased and started, and stopped on
+    # unstage
+    assert get_mock_put(roistat.ts_num_points).call_args_list[-1].args == (3,)
+    assert [
+        call.args[0] for call in get_mock_put(roistat.ts_control).call_args_list
+    ] == [
+        adcore.NDROIStatTSControl.STOP,
+        adcore.NDROIStatTSControl.ERASE_START,
+        adcore.NDROIStatTSControl.STOP,
+    ]
+
+
+@pytest.mark.parametrize(
+    "enable_callbacks,used,serves",
+    [
+        (EnableDisable.ENABLE, True, True),
+        # Switched off at stage: the time series sits out, and the scalars go
+        (EnableDisable.DISABLE, True, False),
+        (EnableDisable.ENABLE, False, False),
+    ],
+)
+async def test_uc10_roistat_time_series_follows_the_switches_at_stage(
+    enable_callbacks: EnableDisable, used: bool, serves: bool
+):
+    det, roistat = await _roistat_time_series_detector()
+    set_mock_value(roistat.enable_callbacks, enable_callbacks)
+    for channel in roistat.channels.values():
+        set_mock_value(channel.use, used)
+    callback_on_mock_put(
+        roistat.ts_control,
+        lambda value: set_mock_value(roistat.ts_current_point, 0),
+    )
+
+    await det.stage()
+    await det.prepare(TriggerInfo(number_of_events=2))
+
+    shapes = {
+        key: datakey["shape"]
+        for key, datakey in (await det.describe()).items()
+        if "roistat" in key
+    }
+    assert shapes == (
+        {
+            f"det-roistat-{name}-{stat}": [1]
+            for name in CHANNEL_NAMES.values()
+            for stat in ("min_value", "max_value", "mean_value", "total")
+        }
+        if serves
+        else {}
+    )
+    erase_starts = [
+        call
+        for call in get_mock_put(roistat.ts_control).call_args_list
+        if call.args[0] == adcore.NDROIStatTSControl.ERASE_START
+    ]
+    assert len(erase_starts) == (1 if serves else 0)
+
+
+@pytest.mark.parametrize("hdf_enabled", [True, False])
+async def test_uc10_the_hdf_switch_picks_the_file_or_the_roistat_time_series(
+    RE: RunEngine,
+    static_path_provider: StaticPathProvider,
+    hdf_enabled: bool,
+):
+    det, roistat = await _roistat_time_series_detector(static_path_provider)
+    hdf = det.get_plugin("hdf", adcore.NDFileHDF5IO)
+    set_mock_value(hdf.file_path_exists, True)
+    set_mock_value(det.driver.array_size_x, 64)
+    set_mock_value(det.driver.array_size_y, 48)
+    set_mock_value(
+        hdf.enable_callbacks,
+        EnableDisable.ENABLE if hdf_enabled else EnableDisable.DISABLE,
+    )
+    for channel in roistat.channels.values():
+        for scalar in (channel.min_value, channel.max_value, channel.mean_value):
+            channel.set_readable_format(scalar, None)
+
+    docs = _fly_roistat_time_series(
+        RE, det, roistat, points=2, also=lambda: set_mock_value(hdf.num_captured, 2)
+    )
+
+    totals = [f"det-roistat-{name}-total" for name in CHANNEL_NAMES.values()]
+    if hdf_enabled:
+        assert docs["event_page"] == []
+        keys = [doc["data_key"] for doc in docs["stream_resource"]]
+        assert keys == ["det", *totals]
+    else:
+        assert docs["stream_resource"] == []
+        (page,) = docs["event_page"]
+        assert list(page["data"]) == totals

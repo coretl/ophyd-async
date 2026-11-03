@@ -75,6 +75,7 @@
 - pyright now runs with `reportMatchNotExhaustive`.
 - `BoundedDataLogic`, `UnboundedDataLogic`, `DetectorLogic`, `DataProvider`, `PageableDataProvider` and `EventPageDataProvider` in `ophyd_async.core`, and `ADDataFactory`, `NDStatsTSAcquireMode` and `exposures_per_collection_from_filter` in `ophyd_async.epics.adcore`.
 - `adcore.StatsTimeSeriesDataLogic` and the `ADDataFactory.stats_time_series(stats)` factory, a `BoundedDataLogic` that publishes an `NDPluginStats` time series as event pages, for an areaDetector that writes no file. It needs a fixed number of collections, as the buffer is sized before acquisition, and sits out when the plugin is switched off at `stage()`, so a detector can switch between its file writer and its stats time series from one stage to the next.
+- `adcore.ROIStatTimeSeriesDataLogic` and the `ADDataFactory.roistat_time_series(roistat)` factory, which publish the time series of an `NDROIStatIO` as event pages in the same way: one array per used channel per scalar with a read format, named after the scalar (e.g. `det-roistat-Blue-total`), which it suppresses. With it come `NDROIStatTSControl`, the `ts_control`, `ts_num_points`, `ts_current_point` and `ts_acquiring` signals of `NDROIStatIO`, the `ts_*` arrays of `NDROIStatNIO`, and `NDROIStatNIO.time_series`, `NDROIStatNIO.get_published_scalars()` and `NDROIStatIO.get_computed_channels()`.
 
 ### Fixed
 

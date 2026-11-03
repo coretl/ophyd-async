@@ -154,7 +154,16 @@ det = adaravis.AravisDetector(
 
 The highest of these that serves a scan replaces the others, and the plugin's hints stay. Which statistics are used is set on the plugin, not in Python: a statistic is used if the plugin's `EnableCallbacks` and its group's compute switch (`compute_statistics` or `compute_centroid`) are on at `stage()`, and it has a read format on the plugin. A scalar whose statistic is off is left out of `read()`, `describe()` and `hints`.
 
-`stage()` records these switches and each plugin's `nd_array_port`, once, and `prepare()` raises if any of them has changed since, so set them before staging, for example in a settings file. The chain of plugins that feeds a plugin is not checked: how it is wired at `stage()` is up to you. The process plugin of a trigger logic and the circular buffer of a continuously acquiring detector are switched on by their logic, so they are not recorded. An [](#adcore.NDROIStatIO) works the same way, with the `use` and `Name` of each channel recorded too: its channels are readable children of the plugin, named `<plugin name>-<Name PV>` at `stage()`, so a channel called Blue has the total `det-roistat-Blue-total`.
+`stage()` records these switches and each plugin's `nd_array_port`, once, and `prepare()` raises if any of them has changed since, so set them before staging, for example in a settings file. The chain of plugins that feeds a plugin is not checked: how it is wired at `stage()` is up to you. The process plugin of a trigger logic and the circular buffer of a continuously acquiring detector are switched on by their logic, so they are not recorded. An [](#adcore.NDROIStatIO) works the same way, with the `use` and `Name` of each channel recorded too: its channels are readable children of the plugin, named `<plugin name>-<Name PV>` at `stage()`, so a channel called Blue has the total `det-roistat-Blue-total`. Its time series ([](#adcore.ADDataFactory.roistat_time_series)) works like the stats time series, publishing each used channel's statistics under the same names.
+
+```python
+roistat = adcore.NDROIStatIO("PREFIX:ROISTAT:", num_channels=3)
+det = adaravis.AravisDetector(
+    prefix,
+    adcore.ADDataFactory.roistat_time_series(roistat),
+    plugins={"roistat": roistat},
+)
+```
 
 ### Multiple HDF writers for different ROIs
 ```python

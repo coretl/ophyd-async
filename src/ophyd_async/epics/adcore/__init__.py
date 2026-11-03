@@ -39,6 +39,7 @@ from ._io import (
     NDProcessIO,
     NDROIStatIO,
     NDROIStatNIO,
+    NDROIStatTSControl,
     NDStatistic,
     NDStatsIO,
     NDStatsTSAcquireMode,
@@ -52,7 +53,7 @@ from ._ndattribute import (
     ndattributes_to_xml,
 )
 from ._plan_stubs import setup_ndattributes
-from ._stats_time_series import StatsTimeSeriesDataLogic
+from ._stats_time_series import ROIStatTimeSeriesDataLogic, StatsTimeSeriesDataLogic
 from ._trigger_logic import (
     ADContAcqTriggerLogic,
     exposures_per_collection_from_filter,
@@ -76,6 +77,7 @@ __all__ = [
     "NDStatsTSAcquireMode",
     "NDROIStatNIO",
     "NDROIStatIO",
+    "NDROIStatTSControl",
     "NDCBFlushOnSoftTrgMode",
     "NDCircularBuffIO",
     "ADFileWriteMode",
@@ -108,6 +110,7 @@ __all__ = [
     "ADDataFactory",
     "ADWriterFactory",
     "StatsTimeSeriesDataLogic",
+    "ROIStatTimeSeriesDataLogic",
     # Detector
     "AreaDetector",
     "ContAcqDetector",

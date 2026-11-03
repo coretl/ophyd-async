@@ -189,9 +189,14 @@ replaced by underscores and the channel number used if the PV is empty, so the s
 names the documents accept and say what the channel measures. Two channels that would be named
 the same raise, and a `Name` PV that changes after that raises at `prepare()` like a switch.
 The plugin is a readable whose channels are its readable children, so a user does not register
-each channel. ophyd-async does not model the plugin's time series yet, so a fly scan collects
-nothing from it: it collects only what the data logics make, and a registered readable is read
-only by `trigger()`.
+each channel. Its time series is published by `ADDataFactory.roistat_time_series(roistat)`
+like the stats time series, one array per used channel per scalar with a read format, named
+after that scalar, so it suppresses the scalar. It differs only where the plugin does: a
+`TSControl` record erases and starts the buffer rather than a busy record, the buffer has no
+circular mode, so it is always fixed length, and every channel has its own timestamp array.
+All used channels are stamped from the same frame, so the first used channel's timestamps
+serve them all. The plugin's `TSNet` array is not published, because `NDROIStatNIO` has no
+`net` scalar to name it after.
 
 ### The detector flies with one `fly()` generator
 

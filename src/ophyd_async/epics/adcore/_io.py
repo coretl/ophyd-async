@@ -473,19 +473,32 @@ class NDROIStatNIO(StandardReadable, EpicsDevice):
         SignalR[float], PvSuffix("MeanValue_RBV"), Format.HINTED_UNCACHED_SIGNAL
     ]
     total: A[SignalR[float], PvSuffix("Total_RBV"), Format.HINTED_UNCACHED_SIGNAL]
+    # Time series of this ROI, filled while the plugin's time series acquires.
+    # These are not registered as readables: the scalars serve read(), and the
+    # arrays are consumed by ROIStatTimeSeriesDataLogic as event pages.
+    ts_min_value: A[SignalR[Array1D[np.float64]], PvSuffix("TSMinValue")]
+    ts_max_value: A[SignalR[Array1D[np.float64]], PvSuffix("TSMaxValue")]
+    ts_mean_value: A[SignalR[Array1D[np.float64]], PvSuffix("TSMeanValue")]
+    ts_total: A[SignalR[Array1D[np.float64]], PvSuffix("TSTotal")]
+    ts_timestamp: A[SignalR[Array1D[np.float64]], PvSuffix("TSTimestamp")]
+
+    def get_published_scalars(self) -> list[SignalR[float]]:
+        """The scalars of this ROI that have a read format."""
+        formats = self.get_readable_formats()
+        return [
+            scalar for scalar in self.params if formats.get(scalar) in _READ_FORMATS
+        ]
 
     def get_ndattributes(self, addr: int) -> list[NDAttributeParam]:
         """Each scalar with a read format, named after it, at asyn address `addr`."""
-        formats = self.get_readable_formats()
         return [
             NDAttributeParam(
                 name=scalar.name,
-                param=param,
+                param=self.params[scalar],
                 datatype=NDAttributeDataType.DOUBLE,
                 addr=addr,
             )
-            for scalar, param in self.params.items()
-            if formats.get(scalar) in _READ_FORMATS
+            for scalar in self.get_published_scalars()
         ]
 
     @cached_property
@@ -497,6 +510,29 @@ class NDROIStatNIO(StandardReadable, EpicsDevice):
             self.mean_value: "ROISTAT_MEAN_VALUE",
             self.total: "ROISTAT_TOTAL",
         }
+
+    @cached_property
+    def time_series(self) -> dict[SignalR[float], SignalR[Array1D[np.float64]]]:
+        """The time series of each scalar signal of this ROI."""
+        return {
+            self.min_value: self.ts_min_value,
+            self.max_value: self.ts_max_value,
+            self.mean_value: self.ts_mean_value,
+            self.total: self.ts_total,
+        }
+
+
+class NDROIStatTSControl(StrictEnum):
+    """What a write to the time series control of an `NDROIStatIO` does.
+
+    Mirrors the ``TSControl`` record in ADCore/db/NDROIStat.template.
+    """
+
+    ERASE_START = "Erase/Start"
+    START = "Start"
+    STOP = "Stop"
+    READ = "Read"
+    ERASE = "Erase"
 
 
 class NDROIStatIO(StandardReadable, NDPluginBaseIO):
@@ -515,6 +551,14 @@ class NDROIStatIO(StandardReadable, NDPluginBaseIO):
     This mirrors the interface provided by ADCore/db/NDROIStat.template.
     See HTML docs at https://areadetector.github.io/areaDetector/ADCore/NDPluginROIStat.html
     """
+
+    # Time series control, shared by every channel. Writing ERASE_START to
+    # ts_control erases the arrays of every channel, resets ts_current_point to 0
+    # and starts acquiring, which stops by itself after ts_num_points frames.
+    ts_control: A[SignalRW[NDROIStatTSControl], PvSuffix("TSControl")]
+    ts_num_points: A[SignalRW[int], PvSuffix("TSNumPoints")]
+    ts_current_point: A[SignalR[int], PvSuffix("TSCurrentPoint")]
+    ts_acquiring: A[SignalR[bool], PvSuffix("TSAcquiring")]
 
     def __init__(self, prefix, num_channels=8, with_pvi=False, name=""):
         with self.add_children_as_readables():
@@ -572,6 +616,12 @@ class NDROIStatIO(StandardReadable, NDPluginBaseIO):
             if not self._is_computed(channel)
             for scalar in channel.params
         }
+
+    def get_computed_channels(self) -> list[NDROIStatNIO]:
+        """The channels whose switches were on when recorded."""
+        return [
+            channel for channel in self.channels.values() if self._is_computed(channel)
+        ]
 
     def get_ndattributes(self) -> list[NDAttributeParam]:
         """The NDAttributes of each channel that is computed, by asyn address."""

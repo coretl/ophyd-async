@@ -15,7 +15,7 @@ from ophyd_async.core import (
 )
 from ophyd_async.epics.core import stop_busy_record
 
-from ._io import NDStatsIO, NDStatsTSAcquireMode
+from ._io import NDROIStatIO, NDROIStatTSControl, NDStatsIO, NDStatsTSAcquireMode
 
 
 @dataclass
@@ -91,3 +91,64 @@ class StatsTimeSeriesDataLogic(BoundedDataLogic[EventPageDataProvider]):
 
     async def ensure_stopped(self) -> None:
         await stop_busy_record(self.stats.ts_acquire)
+
+
+@dataclass
+class ROIStatTimeSeriesDataLogic(BoundedDataLogic[EventPageDataProvider]):
+    """Data logic publishing an `NDPluginROIStat` time series as event pages.
+
+    The ROI stat counterpart of `StatsTimeSeriesDataLogic`, for detectors that
+    write no file. The plugin has one time-series control (`ts_control`,
+    `ts_num_points`) shared by every channel, and each channel has its own arrays,
+    so one logic covers every channel.
+
+    It publishes the time series of each scalar of `NDROIStatNIO.get_published_scalars`
+    of each of `NDROIStatIO.get_computed_channels` under the name of the scalar,
+    so the plugin's EnableCallbacks and each channel's Use decide what is
+    published, and this logic never writes them. It hints nothing. Each channel
+    has its own timestamp array, and the first computed channel's is used.
+
+    The buffer is sized and armed in `start_provider` by writing ERASE_START to
+    ``ts_control``, which erases the arrays and resets the current point; the
+    plugin stops acquiring by itself when the buffer is full.
+
+    :param roistat: the ROI stat plugin whose time series to read
+    """
+
+    roistat: NDROIStatIO
+
+    def __post_init__(self) -> None:
+        self.collections_written = self.roistat.ts_current_point
+
+    async def start_provider(
+        self,
+        name: str,
+        existing_datakeys: Sequence[str],
+        num_collections: int,
+        collections_per_event: int,
+        collection_period: float,
+        flush_period: float,
+    ) -> EventPageDataProvider | None:
+        # The buffer is sized by count, not rate, so neither period is used
+        channels = self.roistat.get_computed_channels()
+        arrays = {
+            scalar.name: channel.time_series[scalar]
+            for channel in channels
+            for scalar in channel.get_published_scalars()
+            if scalar.name not in existing_datakeys
+        }
+        if not arrays:
+            return None
+        # The plugin keeps the current point when resized, so size it first and
+        # then erase and start, which resets the current point to 0
+        await self.roistat.ts_num_points.set(num_collections)
+        await self.roistat.ts_control.set(NDROIStatTSControl.ERASE_START)
+        # The IOC resets the count within the put, but its monitor may arrive
+        # after the put's readback, and the detector reads the count next
+        await wait_for_value(self.roistat.ts_current_point, 0, timeout=DEFAULT_TIMEOUT)
+        timestamps = channels[0].ts_timestamp
+        return EventPageDataProvider(arrays, timestamps, collections_per_event)
+
+    async def ensure_stopped(self) -> None:
+        await self.roistat.ts_control.set(NDROIStatTSControl.STOP)
+        await wait_for_value(self.roistat.ts_acquiring, False, timeout=DEFAULT_TIMEOUT)
