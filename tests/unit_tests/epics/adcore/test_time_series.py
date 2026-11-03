@@ -30,7 +30,7 @@ from ophyd_async.core import StandardReadableFormat as Format
 from ophyd_async.epics import adcore
 from ophyd_async.epics.adcore import (
     NDStatsTSAcquireMode,
-    StatsTimeSeriesDataLogic,
+    TimeSeriesDataLogic,
 )
 from ophyd_async.epics.core import EpicsOptions
 from ophyd_async.testing import assert_has_calls
@@ -40,6 +40,11 @@ from ophyd_async.testing import assert_has_calls
 async def stats() -> adcore.NDStatsIO:
     async with init_devices(mock=True):
         plugin = adcore.NDStatsIO("PREFIX:STATS:", name="det-stats")
+    # The IOC's arrays hold NCHANS points, 2048 by default
+    set_mock_value(plugin.ts_timestamp_nelm, 2048)
+    # Switched on, so it publishes its basic statistics
+    set_mock_value(plugin.enable_callbacks, EnableDisable.ENABLE)
+    set_mock_value(plugin.compute_statistics, True)
     return plugin
 
 
@@ -57,21 +62,44 @@ PUBLISHED = [
 
 
 async def test_start_sizes_and_arms_the_buffer(stats: adcore.NDStatsIO):
-    logic = StatsTimeSeriesDataLogic(stats)
+    set_mock_value(stats.ts_plugin.enable_callbacks, EnableDisable.DISABLE)
+    # Left wrapping by the user, so it would never fill and stop
+    set_mock_value(stats.ts_acquire_mode, NDStatsTSAcquireMode.CIRCULAR_BUFFER)
+    logic = TimeSeriesDataLogic(stats)
     provider = await logic.start_provider("det-stats", [], 5, 5, 0.1, 0)
     assert isinstance(provider, EventPageDataProvider)
     assert await stats.ts_num_points.get_value() == 5
     assert await stats.ts_acquire_mode.get_value() == NDStatsTSAcquireMode.FIXED_LENGTH
     # ts_acquire=1 arms and clears the buffer
     assert await stats.ts_acquire.get_value() is True
+    # The embedded time series plugin is the logic's own, and takes no points
+    # while it is disabled
+    assert await stats.ts_plugin.enable_callbacks.get_value() == EnableDisable.ENABLE
     # Each series is named after its scalar
     datakeys = await provider.make_datakeys()
     assert list(datakeys) == PUBLISHED
     assert datakeys["det-stats-total"]["shape"] == [5]
 
 
-def test_every_time_series_is_a_statistic(stats: adcore.NDStatsIO):
-    """Every ts_* array but the timestamps is in `statistics`, so can be published."""
+@pytest.mark.parametrize("points,raises", [(2048, False), (2049, True)])
+async def test_start_raises_for_a_scan_longer_than_the_buffer(
+    stats: adcore.NDStatsIO, points: int, raises: bool
+):
+    logic = TimeSeriesDataLogic(stats)
+
+    start = logic.start_provider("det", [], points, 1, 0.1, 0)
+
+    if raises:
+        with pytest.raises(
+            ValueError, match="needs 2049 points, but the plugin's arrays hold 2048"
+        ):
+            await start
+    else:
+        assert await start is not None
+
+
+async def test_every_time_series_can_be_published(stats: adcore.NDStatsIO):
+    """Every ts_* array but the timestamps is a param's, so can be published."""
     hints = get_type_hints(adcore.NDStatsIO)
     arrays = {
         signal
@@ -80,22 +108,39 @@ def test_every_time_series_is_a_statistic(stats: adcore.NDStatsIO):
         and attr != "ts_timestamp"
         and hints[attr] == SignalR[Array1D[np.float64]]
     }
-    assert arrays == {stat.time_series for stat in stats.statistics}
+    # Compute every group and give every scalar a read format
+    set_mock_value(stats.compute_centroid, True)
+    for attr, scalar in stats.children():
+        if f"ts_{attr}" in dict(stats.children()):
+            stats.set_readable_format(scalar, Format.UNCACHED_SIGNAL)
+
+    params = await stats.get_enabled_params()
+
+    assert arrays == {param.ts_signal for param in params}
 
 
-async def test_start_leaves_the_progress_counter_at_zero(stats: adcore.NDStatsIO):
+@pytest.mark.parametrize("reset_late", [False, True])
+async def test_start_leaves_the_progress_counter_at_zero(
+    stats: adcore.NDStatsIO, reset_late: bool
+):
     """The count a step point is measured from is 0 once start_provider returns.
 
     A buffer that still holds a previous scan's points reports them until it is
     armed; the IOC resets TSCurrentPoint inside the TSAcquire write (ADCore
-    NDPluginTimeSeries::writeInt32 -> acquireReset), which is what the fake does.
+    NDPluginTimeSeries::writeInt32 -> acquireReset), but its monitor may arrive
+    after the put's readback.
     """
     set_mock_value(stats.ts_current_point, 5)
-    callback_on_mock_put(
-        stats.ts_acquire,
-        lambda value: set_mock_value(stats.ts_current_point, 0) if value else None,
-    )
-    logic = StatsTimeSeriesDataLogic(stats)
+    loop = asyncio.get_running_loop()
+
+    def reset(value: bool):
+        if value and reset_late:
+            loop.call_later(0.01, set_mock_value, stats.ts_current_point, 0)
+        elif value:
+            set_mock_value(stats.ts_current_point, 0)
+
+    callback_on_mock_put(stats.ts_acquire, reset)
+    logic = TimeSeriesDataLogic(stats)
 
     assert await logic.start_provider("det", [], 5, 1, 0.1, 0) is not None
 
@@ -116,7 +161,7 @@ def test_ts_acquire_is_declared_as_a_busy_record():
 
 
 async def test_start_does_not_wait_for_the_buffer_to_fill(stats: adcore.NDStatsIO):
-    logic = StatsTimeSeriesDataLogic(stats)
+    logic = TimeSeriesDataLogic(stats)
     # The put of 1 to TSAcquire does not complete until the buffer is full
     set_mock_put_proceeds(stats.ts_acquire, False)
 
@@ -143,7 +188,7 @@ async def test_start_does_not_wait_for_the_buffer_to_fill(stats: adcore.NDStatsI
         (EnableDisable.DISABLE, True, True, None),
     ],
 )
-async def test_publishes_what_the_switches_recorded_at_stage_leave_on(
+async def test_publishes_what_the_switches_leave_on(
     stats: adcore.NDStatsIO,
     plugin_enabled: EnableDisable,
     compute_statistics: bool,
@@ -154,10 +199,7 @@ async def test_publishes_what_the_switches_recorded_at_stage_leave_on(
     set_mock_value(stats.enable_callbacks, plugin_enabled)
     set_mock_value(stats.compute_statistics, compute_statistics)
     set_mock_value(stats.compute_centroid, compute_centroid)
-    await stats.snapshot()
-    # Switched later, which the recorded switches ignore
-    set_mock_value(stats.compute_statistics, not compute_statistics)
-    logic = StatsTimeSeriesDataLogic(stats)
+    logic = TimeSeriesDataLogic(stats)
 
     made = await logic.start_provider("det", [], 5, 1, 0.1, 0)
 
@@ -194,7 +236,7 @@ async def test_publishes_only_the_arrays_not_already_made(
     existing_datakeys: list[str],
     expected_datakeys: list[str] | None,
 ):
-    logic = StatsTimeSeriesDataLogic(stats)
+    logic = TimeSeriesDataLogic(stats)
 
     made = await logic.start_provider("det", existing_datakeys, 5, 1, 0.1, 0)
 
@@ -208,10 +250,28 @@ async def test_publishes_only_the_arrays_not_already_made(
 
 
 async def test_ensure_stopped_stops_the_time_series(stats: adcore.NDStatsIO):
-    logic = StatsTimeSeriesDataLogic(stats)
+    logic = TimeSeriesDataLogic(stats)
     set_mock_value(stats.ts_acquire, True)
     await logic.ensure_stopped()
     assert await stats.ts_acquire.get_value() is False
+
+
+async def test_ensure_stopped_waits_for_the_roi_stat_time_series_to_stop():
+    async with init_devices(mock=True):
+        roistat = adcore.NDROIStatIO("PREFIX:ROISTAT:", num_channels=1)
+    set_mock_value(roistat.ts_acquiring, True)
+    loop = asyncio.get_running_loop()
+
+    def stop(value: adcore.NDROIStatTSControl):
+        if value == adcore.NDROIStatTSControl.STOP:
+            # The plugin reports it has stopped after the put returns
+            loop.call_later(0.01, set_mock_value, roistat.ts_acquiring, False)
+
+    callback_on_mock_put(roistat.ts_control, stop)
+
+    await TimeSeriesDataLogic(roistat).ensure_stopped()
+
+    assert await roistat.ts_acquiring.get_value() is False
 
 
 class _JustInternal(DetectorTriggerLogic):
@@ -230,8 +290,9 @@ class _FillStatsAcquireLogic(DetectorAcquireLogic):
         self.times = times
 
     async def acquire(self):
-        for stat in self.stats.statistics:
-            set_mock_value(stat.time_series, self.values)
+        for param in await self.stats.get_enabled_params():
+            assert param.ts_signal is not None
+            set_mock_value(param.ts_signal, self.values)
         set_mock_value(self.stats.ts_timestamp, self.times)
         set_mock_value(self.stats.ts_current_point, len(self.values))
         yield
@@ -247,7 +308,7 @@ def stats_detector(stats: adcore.NDStatsIO) -> StandardDetector:
     return DetectorLogic(
         trigger=_JustInternal(),
         acquire=_FillStatsAcquireLogic(stats, values, times),
-        data=[StatsTimeSeriesDataLogic(stats)],
+        data=[TimeSeriesDataLogic(stats)],
     ).with_device("det")
 
 

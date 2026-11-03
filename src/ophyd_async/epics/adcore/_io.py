@@ -3,9 +3,8 @@ import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
-from functools import cached_property
 from typing import Annotated as A
-from typing import Any, TypeVar
+from typing import TypeVar
 
 import numpy as np
 
@@ -15,17 +14,17 @@ from ophyd_async.core import (
     EnableDisable,
     SignalR,
     SignalRW,
+    SignalW,
     StandardReadable,
     StrictEnum,
     SubsetEnum,
     SupersetEnum,
     TriggerableCommand,
+    gather_dict,
     non_zero,
 )
 from ophyd_async.core import StandardReadableFormat as Format
 from ophyd_async.epics.core import EpicsDevice, EpicsOptions, PvSuffix
-
-from ._ndattribute import NDAttributeDataType, NDAttributeParam
 
 # Common classes for drivers and plugins
 
@@ -71,6 +70,8 @@ class NDArrayBaseIO(EpicsDevice):
     port_name: A[SignalR[str], PvSuffix("PortName_RBV")]
     unique_id: A[SignalR[int], PvSuffix("UniqueId_RBV")]
     nd_attributes_file: A[SignalRW[str], PvSuffix("NDAttributesFile")]
+    # The capacity of the NDAttributesFile waveform (the IOC's XMLSIZE)
+    nd_attributes_file_nelm: A[SignalR[int], PvSuffix("NDAttributesFile.NELM")]
 
     # The array_size_x/y/z signals are used when outputting an NDArray
     # (i.e. from a driver)
@@ -167,6 +168,22 @@ class ADBaseIO(StandardReadable, NDArrayBaseIO):
 NDPluginBaseIOT = TypeVar("NDPluginBaseIOT", bound="NDPluginBaseIO")
 
 
+@dataclass(frozen=True)
+class NDParam:
+    """A scalar an NDPlugin computes, in each form the plugin produces it.
+
+    :param signal: the scalar value for the last frame, its name is the datakey
+    :param param: the asyn parameter, the source of an NDAttribute
+    :param addr: the asyn address of the parameter
+    :param ts_signal: the value for each frame of the plugin's time series, if any
+    """
+
+    signal: SignalR[float]
+    param: str
+    addr: int = 0
+    ts_signal: SignalR[Array1D[np.float64]] | None = None
+
+
 class NDPluginBaseIO(NDArrayBaseIO):
     """Base class from which plugins are derived.
 
@@ -179,70 +196,15 @@ class NDPluginBaseIO(NDArrayBaseIO):
     nd_array_address: A[SignalRW[int], PvSuffix.rbv("NDArrayAddress")]
     queue_size: A[SignalRW[int], PvSuffix.rbv("QueueSize")]
 
-    @cached_property
-    def _snapshot(self) -> dict[SignalRW[Any], Any]:
-        return {}
+    async def get_enabled_params(self) -> Sequence[NDParam] | None:
+        """The params this plugin's switches have on, when it is enabled.
 
-    def get_switches(self) -> Sequence[SignalRW[Any]]:
-        """The PVs that switch what this plugin produces on and off."""
-        return [self.enable_callbacks]
-
-    def get_snapshot_signals(self) -> Sequence[SignalRW[Any]]:
-        """The PVs `snapshot()` records: the switches and the NDArrayPort.
-
-        Only this plugin's own NDArrayPort is recorded. The chain of plugins that
-        feeds it, which may cross IOCs, is not walked: the chain as wired at
-        `stage()` is the user's responsibility.
+        `None`, as here, means its switches gate none of its read signals.
+        Otherwise `AreaDetector`'s suppress logic hides the read signals not among
+        them, and `published_params` keeps those with a read format. Only a plugin
+        whose switches no logic writes may gate its read signals.
         """
-        return [*self.get_switches(), self.nd_array_port]
-
-    async def snapshot(self) -> None:
-        """Record the value of each of `get_snapshot_signals()`.
-
-        `AreaDetector` calls this on `stage()`, once. The values stay until
-        `forget_snapshot()`.
-        """
-        signals = self.get_snapshot_signals()
-        values = await asyncio.gather(*(signal.get_value() for signal in signals))
-        self._snapshot.clear()
-        self._snapshot.update(zip(signals, values, strict=True))
-
-    async def get_changed_signals(self) -> list[SignalRW[Any]]:
-        """The recorded signals whose PV has a different value now.
-
-        `AreaDetector` calls this on each `prepare()`.
-        """
-        recorded = list(self._snapshot.items())
-        current = await asyncio.gather(*(signal.get_value() for signal, _ in recorded))
-        return [
-            signal
-            for (signal, value), now in zip(recorded, current, strict=True)
-            if now != value
-        ]
-
-    def forget_snapshot(self) -> None:
-        """Drop the recorded values. `AreaDetector` calls this on `unstage()`."""
-        self._snapshot.clear()
-
-    def switch_is_on(self, switch: SignalRW[Any]) -> bool:
-        """Whether `switch` was on when recorded, True if it was not recorded."""
-        value = self._snapshot.get(switch, True)
-        return value is True or value is EnableDisable.ENABLE
-
-    def get_switched_off_readables(self) -> set[SignalR]:
-        """The readable signals the recorded switches turn off."""
-        return set()
-
-
-async def plugin_is_enabled(plugin: NDPluginBaseIO) -> bool:
-    """Whether a plugin is switched on, so is receiving NDArrays.
-
-    The nearest thing to "is this plugin in the chain": a plugin with callbacks
-    disabled certainly is not, though an enabled one may still have its
-    `nd_array_port` pointed somewhere else. Parsing the whole plugin graph was
-    rejected in ADR 0023 as too large.
-    """
-    return await plugin.enable_callbacks.get_value() is EnableDisable.ENABLE
+        return None
 
 
 class NDROIIO(StandardReadable, NDPluginBaseIO):
@@ -263,6 +225,15 @@ class NDROIIO(StandardReadable, NDPluginBaseIO):
     bin_z: A[SignalRW[int], PvSuffix.rbv("BinZ")]
 
 
+class NDStatsTimeSeriesIO(EpicsDevice):
+    """The NDPluginTimeSeries that NDPluginStats embeds, at the `TS:` sub-prefix.
+
+    Its `enable_callbacks` is separate from the stats plugin's own.
+    """
+
+    enable_callbacks: A[SignalRW[EnableDisable], PvSuffix.rbv("EnableCallbacks")]
+
+
 class NDStatsTSAcquireMode(StrictEnum):
     """Whether an NDPluginStats time series stops when full or wraps around.
 
@@ -272,30 +243,6 @@ class NDStatsTSAcquireMode(StrictEnum):
 
     FIXED_LENGTH = "Fixed length"
     CIRCULAR_BUFFER = "Circ. buffer"
-
-
-# The formats that put a signal in read(), rather than in configuration
-_READ_FORMATS = (
-    Format.HINTED_SIGNAL,
-    Format.UNCACHED_SIGNAL,
-    Format.HINTED_UNCACHED_SIGNAL,
-)
-
-
-@dataclass(frozen=True)
-class NDStatistic:
-    """One statistic of an `NDStatsIO`, in each form the plugin produces it.
-
-    :param scalar: the value for the last frame
-    :param param: the asyn parameter, the source of an NDAttribute
-    :param time_series: the value for each frame of the time series
-    :param compute: the switch for the group of statistics this belongs to
-    """
-
-    scalar: SignalR[float]
-    param: str
-    time_series: SignalR[Array1D[np.float64]]
-    compute: SignalRW[bool]
 
 
 class NDStatsIO(StandardReadable, NDPluginBaseIO):
@@ -331,11 +278,16 @@ class NDStatsIO(StandardReadable, NDPluginBaseIO):
     # prefix while the per-statistic arrays are named by NDStats itself at the
     # plugin's own prefix. ts_num_points sizes the buffer, ts_acquire erases and
     # starts it (writing 1 clears the arrays and resets ts_current_point to 0),
-    # ts_current_point reports progress, each ts_<statistic> holds the series of
-    # that statistic and ts_timestamp holds the per-point acquisition times.
+    # ts_current_point reports progress, writing 1 to ts_read posts the arrays
+    # while acquiring, each ts_<statistic> holds the series of that statistic and
+    # ts_timestamp holds the per-point acquisition times. The embedded plugin
+    # takes no points while ts_plugin.enable_callbacks is Disable, which is the
+    # IOC's default.
     # These are not registered as readables: the scalars serve read(), and the
-    # arrays are consumed by StatsTimeSeriesDataLogic as event pages.
+    # arrays are consumed by TimeSeriesDataLogic as event pages.
+    ts_plugin: A[NDStatsTimeSeriesIO, PvSuffix("TS:")]
     ts_acquire: A[SignalRW[bool], PvSuffix("TS:TSAcquire"), EpicsOptions(wait=non_zero)]
+    ts_read: A[SignalW[bool], PvSuffix("TS:TSRead")]
     ts_num_points: A[SignalRW[int], PvSuffix("TS:TSNumPoints")]
     ts_current_point: A[SignalR[int], PvSuffix("TS:TSCurrentPoint")]
     ts_acquiring: A[SignalR[bool], PvSuffix("TS:TSAcquiring")]
@@ -356,6 +308,8 @@ class NDStatsIO(StandardReadable, NDPluginBaseIO):
     ts_sigma_y: A[SignalR[Array1D[np.float64]], PvSuffix("TSSigmaY")]
     ts_sigma_xy: A[SignalR[Array1D[np.float64]], PvSuffix("TSSigmaXY")]
     ts_timestamp: A[SignalR[Array1D[np.float64]], PvSuffix("TSTimestamp")]
+    # How many points the time series arrays hold (the waveforms' NELM)
+    ts_timestamp_nelm: A[SignalR[int], PvSuffix("TSTimestamp.NELM")]
     # Centroid statistics
     compute_centroid: A[
         SignalRW[bool], PvSuffix.rbv("ComputeCentroid"), Format.CONFIG_SIGNAL
@@ -384,74 +338,39 @@ class NDStatsIO(StandardReadable, NDPluginBaseIO):
     hist_min: A[SignalRW[float], PvSuffix.rbv("HistMin"), Format.CONFIG_SIGNAL]
     hist_max: A[SignalRW[float], PvSuffix.rbv("HistMax"), Format.CONFIG_SIGNAL]
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._suppressed_datakeys_funcs += (self._get_switched_off_datakeys,)
-
-    @cached_property
-    def statistics(self) -> tuple[NDStatistic, ...]:
-        """Each statistic, as ADCore's NDStats.template defines it."""
-        basic = self.compute_statistics
-        centroid = self.compute_centroid
-        return (
-            NDStatistic(self.min_value, "MIN_VALUE", self.ts_min_value, basic),
-            NDStatistic(self.min_x, "MIN_X", self.ts_min_x, basic),
-            NDStatistic(self.min_y, "MIN_Y", self.ts_min_y, basic),
-            NDStatistic(self.max_value, "MAX_VALUE", self.ts_max_value, basic),
-            NDStatistic(self.max_x, "MAX_X", self.ts_max_x, basic),
-            NDStatistic(self.max_y, "MAX_Y", self.ts_max_y, basic),
-            NDStatistic(self.mean_value, "MEAN_VALUE", self.ts_mean_value, basic),
-            NDStatistic(self.sigma, "SIGMA_VALUE", self.ts_sigma, basic),
-            NDStatistic(self.total, "TOTAL", self.ts_total, basic),
-            NDStatistic(self.net, "NET", self.ts_net, basic),
-            NDStatistic(
-                self.centroid_x, "CENTROIDX_VALUE", self.ts_centroid_x, centroid
-            ),
-            NDStatistic(
-                self.centroid_y, "CENTROIDY_VALUE", self.ts_centroid_y, centroid
-            ),
-            NDStatistic(self.sigma_x, "SIGMAX_VALUE", self.ts_sigma_x, centroid),
-            NDStatistic(self.sigma_y, "SIGMAY_VALUE", self.ts_sigma_y, centroid),
-            NDStatistic(self.sigma_xy, "SIGMAXY_VALUE", self.ts_sigma_xy, centroid),
+    async def get_enabled_params(self) -> Sequence[NDParam]:
+        """The statistics of the groups computed."""
+        basic, centroid = await asyncio.gather(
+            self.compute_statistics.get_value(),
+            self.compute_centroid.get_value(),
         )
-
-    def get_switches(self) -> Sequence[SignalRW[Any]]:
-        return [*super().get_switches(), self.compute_statistics, self.compute_centroid]
-
-    def _is_computed(self, statistic: NDStatistic) -> bool:
-        return self.switch_is_on(self.enable_callbacks) and self.switch_is_on(
-            statistic.compute
-        )
-
-    def get_switched_off_readables(self) -> set[SignalR]:
-        return {stat.scalar for stat in self.statistics if not self._is_computed(stat)}
-
-    def _get_switched_off_datakeys(self) -> dict[str, None]:
-        return {signal.name: None for signal in self.get_switched_off_readables()}
-
-    def get_published_statistics(self) -> list[NDStatistic]:
-        """The statistics that are computed and have a read format on this plugin."""
-        read = {
-            device
-            for device, format in self.get_readable_formats()
-            if format in _READ_FORMATS
-        }
-        return [
-            stat
-            for stat in self.statistics
-            if self._is_computed(stat) and stat.scalar in read
-        ]
-
-    def get_ndattributes(self) -> list[NDAttributeParam]:
-        """Each published statistic, named after its scalar signal."""
-        return [
-            NDAttributeParam(
-                name=stat.scalar.name,
-                param=stat.param,
-                datatype=NDAttributeDataType.DOUBLE,
-            )
-            for stat in self.get_published_statistics()
-        ]
+        computed: list[NDParam] = []
+        if basic:
+            computed += [
+                NDParam(self.min_value, "MIN_VALUE", ts_signal=self.ts_min_value),
+                NDParam(self.min_x, "MIN_X", ts_signal=self.ts_min_x),
+                NDParam(self.min_y, "MIN_Y", ts_signal=self.ts_min_y),
+                NDParam(self.max_value, "MAX_VALUE", ts_signal=self.ts_max_value),
+                NDParam(self.max_x, "MAX_X", ts_signal=self.ts_max_x),
+                NDParam(self.max_y, "MAX_Y", ts_signal=self.ts_max_y),
+                NDParam(self.mean_value, "MEAN_VALUE", ts_signal=self.ts_mean_value),
+                NDParam(self.sigma, "SIGMA_VALUE", ts_signal=self.ts_sigma),
+                NDParam(self.total, "TOTAL", ts_signal=self.ts_total),
+                NDParam(self.net, "NET", ts_signal=self.ts_net),
+            ]
+        if centroid:
+            computed += [
+                NDParam(
+                    self.centroid_x, "CENTROIDX_VALUE", ts_signal=self.ts_centroid_x
+                ),
+                NDParam(
+                    self.centroid_y, "CENTROIDY_VALUE", ts_signal=self.ts_centroid_y
+                ),
+                NDParam(self.sigma_x, "SIGMAX_VALUE", ts_signal=self.ts_sigma_x),
+                NDParam(self.sigma_y, "SIGMAY_VALUE", ts_signal=self.ts_sigma_y),
+                NDParam(self.sigma_xy, "SIGMAXY_VALUE", ts_signal=self.ts_sigma_xy),
+            ]
+        return computed
 
 
 class NDROIStatNIO(StandardReadable, EpicsDevice):
@@ -477,34 +396,31 @@ class NDROIStatNIO(StandardReadable, EpicsDevice):
         SignalR[float], PvSuffix("MeanValue_RBV"), Format.HINTED_UNCACHED_SIGNAL
     ]
     total: A[SignalR[float], PvSuffix("Total_RBV"), Format.HINTED_UNCACHED_SIGNAL]
+    net: A[SignalR[float], PvSuffix("Net_RBV")]
+    # Time series of this ROI, filled while the plugin's time series acquires.
+    # These are not registered as readables: the scalars serve read(), and the
+    # arrays are consumed by TimeSeriesDataLogic as event pages.
+    ts_min_value: A[SignalR[Array1D[np.float64]], PvSuffix("TSMinValue")]
+    ts_max_value: A[SignalR[Array1D[np.float64]], PvSuffix("TSMaxValue")]
+    ts_mean_value: A[SignalR[Array1D[np.float64]], PvSuffix("TSMeanValue")]
+    ts_total: A[SignalR[Array1D[np.float64]], PvSuffix("TSTotal")]
+    ts_net: A[SignalR[Array1D[np.float64]], PvSuffix("TSNet")]
+    ts_timestamp: A[SignalR[Array1D[np.float64]], PvSuffix("TSTimestamp")]
+    # How many points the time series arrays hold (the waveforms' NELM)
+    ts_timestamp_nelm: A[SignalR[int], PvSuffix("TSTimestamp.NELM")]
 
-    def get_ndattributes(self, addr: int) -> list[NDAttributeParam]:
-        """Each scalar with a read format, named after it, at asyn address `addr`."""
-        read = {
-            device
-            for device, format in self.get_readable_formats()
-            if format in _READ_FORMATS
-        }
-        return [
-            NDAttributeParam(
-                name=scalar.name,
-                param=param,
-                datatype=NDAttributeDataType.DOUBLE,
-                addr=addr,
-            )
-            for scalar, param in self.params.items()
-            if scalar in read
-        ]
 
-    @cached_property
-    def params(self) -> dict[SignalR[float], str]:
-        """The asyn parameter each scalar signal of this ROI is read from."""
-        return {
-            self.min_value: "ROISTAT_MIN_VALUE",
-            self.max_value: "ROISTAT_MAX_VALUE",
-            self.mean_value: "ROISTAT_MEAN_VALUE",
-            self.total: "ROISTAT_TOTAL",
-        }
+class NDROIStatTSControl(StrictEnum):
+    """What a write to the time series control of an `NDROIStatIO` does.
+
+    Mirrors the `TSControl` record in ADCore/db/NDROIStat.template.
+    """
+
+    ERASE_START = "Erase/Start"
+    START = "Start"
+    STOP = "Stop"
+    READ = "Read"
+    ERASE = "Erase"
 
 
 class NDROIStatIO(StandardReadable, NDPluginBaseIO):
@@ -515,40 +431,39 @@ class NDROIStatIO(StandardReadable, NDPluginBaseIO):
     registered as a [](#StandardReadableFormat.CHILD) readable, so it reads the
     scalars of its own formats.
 
-    When an `AreaDetector` stages, each channel is renamed to
+    `stage()` renames each channel to
     `<plugin name>-<Name PV>`, with characters other than letters, digits and
     underscores in the PV replaced by underscores, or the channel number if the
-    PV is empty. A `Name` PV that changes after that makes `prepare()` raise.
+    PV is empty.
 
     This mirrors the interface provided by ADCore/db/NDROIStat.template.
     See HTML docs at https://areadetector.github.io/areaDetector/ADCore/NDPluginROIStat.html
     """
 
+    # Time series control, shared by every channel. Writing ERASE_START to
+    # ts_control erases the arrays of every channel, resets ts_current_point to 0
+    # and starts acquiring, which stops by itself after ts_num_points frames.
+    ts_control: A[SignalRW[NDROIStatTSControl], PvSuffix("TSControl")]
+    ts_num_points: A[SignalRW[int], PvSuffix("TSNumPoints")]
+    ts_current_point: A[SignalR[int], PvSuffix("TSCurrentPoint")]
+    ts_acquiring: A[SignalR[bool], PvSuffix("TSAcquiring")]
+
     def __init__(self, prefix, num_channels=8, with_pvi=False, name=""):
+        self._stage_funcs += (self.__on_stage,)
         with self.add_children_as_readables():
             self.channels = DeviceVector(
                 {i: NDROIStatNIO(f"{prefix}{i}:") for i in range(1, num_channels + 1)}
             )
         super().__init__(prefix, with_pvi, name)
 
-    def get_switches(self) -> Sequence[SignalRW[Any]]:
-        channel_switches = [channel.use for channel in self.channels.values()]
-        return [*super().get_switches(), *channel_switches]
-
-    def get_snapshot_signals(self) -> Sequence[SignalRW[Any]]:
-        channel_names = [channel.name_ for channel in self.channels.values()]
-        return [*super().get_snapshot_signals(), *channel_names]
-
-    async def snapshot(self) -> None:
-        """Record the signals, and name each channel after its Name PV."""
-        await super().snapshot()
-        self._name_channels()
-
-    def _name_channels(self) -> None:
-        """Name each channel after its recorded Name PV, raising on a clash."""
+    async def __on_stage(self) -> None:
+        """Name each channel after its Name PV, raising if two would clash."""
+        pv_names = await gather_dict(
+            {number: c.name_.get_value() for number, c in self.channels.items()}
+        )
         names = {
-            number: self._channel_name(number, channel)
-            for number, channel in self.channels.items()
+            number: re.sub(r"[^A-Za-z0-9_]", "_", pv_name) if pv_name else str(number)
+            for number, pv_name in pv_names.items()
         }
         counts = Counter(names.values())
         clashes = sorted(name for name, count in counts.items() if count > 1)
@@ -564,30 +479,32 @@ class NDROIStatIO(StandardReadable, NDPluginBaseIO):
                     child_name_separator=self._child_name_separator,
                 )
 
-    def _channel_name(self, number: int, channel: NDROIStatNIO) -> str:
-        pv_name = self._snapshot[channel.name_]
-        return re.sub(r"[^A-Za-z0-9_]", "_", pv_name) if pv_name else str(number)
-
-    def _is_computed(self, channel: NDROIStatNIO) -> bool:
-        return self.switch_is_on(self.enable_callbacks) and self.switch_is_on(
-            channel.use
+    async def get_enabled_params(self) -> Sequence[NDParam]:
+        """The params of each used channel."""
+        uses = await gather_dict(
+            {number: c.use.get_value() for number, c in self.channels.items()}
         )
-
-    def get_switched_off_readables(self) -> set[SignalR]:
-        return {
-            scalar
-            for channel in self.channels.values()
-            if not self._is_computed(channel)
-            for scalar in channel.params
-        }
-
-    def get_ndattributes(self) -> list[NDAttributeParam]:
-        """The NDAttributes of each channel that is computed, by asyn address."""
+        used = [number for number, use in uses.items() if use]
         return [
-            ndattribute
-            for number, channel in self.channels.items()
-            if self._is_computed(channel)
-            for ndattribute in channel.get_ndattributes(addr=number - 1)
+            param
+            for number in used
+            for param in self._channel_params(number, self.channels[number])
+        ]
+
+    def _channel_params(self, number: int, channel: NDROIStatNIO) -> list[NDParam]:
+        """The params of a channel, at its asyn address."""
+        addr = number - 1
+        return [
+            NDParam(channel.min_value, "ROISTAT_MIN_VALUE", addr, channel.ts_min_value),
+            NDParam(channel.max_value, "ROISTAT_MAX_VALUE", addr, channel.ts_max_value),
+            NDParam(
+                channel.mean_value,
+                "ROISTAT_MEAN_VALUE",
+                addr,
+                channel.ts_mean_value,
+            ),
+            NDParam(channel.total, "ROISTAT_TOTAL", addr, channel.ts_total),
+            NDParam(channel.net, "ROISTAT_NET", addr, channel.ts_net),
         ]
 
 

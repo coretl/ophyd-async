@@ -113,7 +113,7 @@ async def test_prepare_exposures(
     ("exposures_per_collection", "filter_type", "expected_filter"),
     [
         # None keeps the filter type pre-configured in the IOC (AVERAGE)
-        (1, None, adcore.NDProcessFilterType.AVERAGE),
+        (2, None, adcore.NDProcessFilterType.AVERAGE),
         (5, adcore.NDProcessFilterType.AVERAGE, adcore.NDProcessFilterType.AVERAGE),
         (10, adcore.NDProcessFilterType.SUM, adcore.NDProcessFilterType.SUM),
         (
@@ -148,6 +148,28 @@ async def test_prepare_filter(
     ]
     assert get_mock(process_plugin).mock_calls == expected_calls
     assert await process_plugin.filter_type.get_value() == expected_filter
+
+
+@pytest.mark.parametrize(
+    ("num_filter", "filter_left_on"),
+    [
+        (5, True),
+        # One exposure needs no filter, and clears an earlier one
+        (1, False),
+    ],
+)
+async def test_prepare_filter_switches_the_plugin_on(
+    process_plugin: adcore.NDProcessIO,
+    num_filter: int,
+    filter_left_on: bool,
+):
+    set_mock_value(process_plugin.enable_callbacks, EnableDisable.DISABLE)
+    set_mock_value(process_plugin.enable_filter, not filter_left_on)
+
+    await adcore.prepare_filter(process_plugin, num_filter)
+
+    assert await process_plugin.enable_callbacks.get_value() is EnableDisable.ENABLE
+    assert await process_plugin.enable_filter.get_value() is filter_left_on
 
 
 async def test_prepare_filter_without_plugin():

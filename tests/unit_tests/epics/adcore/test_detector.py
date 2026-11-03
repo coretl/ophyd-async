@@ -1,5 +1,6 @@
 import pytest
 
+from ophyd_async.core import StandardReadableFormat as Format
 from ophyd_async.core import (
     StaticPathProvider,
     TriggerInfo,
@@ -130,77 +131,82 @@ def test_plugin_named_like_the_driver_raises():
         )
 
 
-def test_area_detector_rejects_an_ndattribute_source_listed_twice(
-    static_path_provider: StaticPathProvider,
-):
+def test_stats_time_series_makes_no_plugin_of_its_own():
     stats = adcore.NDStatsIO("PREFIX:STATS:")
 
-    with pytest.raises(
-        ValueError, match="listed more than once in ndattribute_sources"
-    ):
-        adcore.AreaDetector(
-            adcore.ADBaseIO("PREFIX:DRV:"),
-            "PREFIX:",
-            adcore.ADDataFactory.hdf(
-                static_path_provider, writer_name="hdf1", ndattribute_sources=[stats]
-            ),
-            adcore.ADDataFactory.hdf(
-                static_path_provider, writer_name="hdf2", ndattribute_sources=[stats]
-            ),
-            plugins={"stats": stats},
-            name="det",
-        )
-
-
-def test_area_detector_rejects_an_ndattribute_source_outside_its_device_tree(
-    static_path_provider: StaticPathProvider,
-):
-    stats = adcore.NDStatsIO("PREFIX:STATS:")
-
-    with pytest.raises(ValueError, match="not in the device tree of the detector"):
-        adcore.AreaDetector(
-            adcore.ADBaseIO("PREFIX:DRV:"),
-            "PREFIX:",
-            adcore.ADDataFactory.hdf(static_path_provider, ndattribute_sources=[stats]),
-            name="det",
-        )
-
-
-@pytest.mark.parametrize("in_tree", [False, True])
-def test_stats_time_series_takes_a_plugin_that_is_in_the_device_tree(in_tree: bool):
-    stats = adcore.NDStatsIO("PREFIX:STATS:")
-    plugins = {"stats": stats} if in_tree else {}
-
-    def make_detector():
-        return adcore.AreaDetector(
-            adcore.ADBaseIO("PREFIX:DRV:"),
-            "PREFIX:",
-            adcore.ADDataFactory.stats_time_series(stats),
-            plugins=plugins,
-            name="det",
-        )
-
-    if in_tree:
-        det = make_detector()
-        # It made no plugin of its own
-        assert [name for name, _ in det.children()] == ["driver", "stats"]
-    else:
-        with pytest.raises(ValueError, match="not in the device tree of the detector"):
-            make_detector()
-
-
-def test_a_data_factory_needs_a_writer_class_or_a_plugin():
-    factory = adcore.ADDataFactory(
-        writer_cls=None,
-        writer_suffix="",
-        writer_name="",
-        datakey_suffix="",
-        array_description=None,
-        data_logic_factory=lambda used, desc, driver, plugins: None,  # type: ignore
+    det = adcore.AreaDetector(
+        adcore.ADBaseIO("PREFIX:DRV:"),
+        "PREFIX:",
+        adcore.ADDataFactory.time_series(stats),
+        plugins={"stats": stats},
+        name="det",
     )
 
-    with pytest.raises(ValueError, match="needs a writer_cls or a plugin"):
-        factory("PREFIX:", adcore.ADBaseIO("PREFIX:DRV:"), [])
+    assert [name for name, _ in det.children()] == ["driver", "stats"]
+
+
+def test_the_detector_registers_every_plugin_and_writer_as_a_child_readable(
+    static_path_provider: StaticPathProvider,
+):
+    stats = adcore.NDStatsIO("PREFIX:STATS:")
+
+    det = adcore.ContAcqDetector(
+        "PREFIX:",
+        adcore.ADDataFactory.hdf(static_path_provider),
+        proc_suffix="PROC:",
+        plugins={"stats": stats},
+        name="det",
+    )
+
+    children = [device for device, format in det.get_readable_formats()]
+    assert children == [det.driver, stats, det.proc, det.cb, det.hdf]
+    assert all(format is Format.CHILD for _, format in det.get_readable_formats())
+
+
+def test_the_factories_are_given_the_plugins_of_the_user_and_the_detector(
+    static_path_provider: StaticPathProvider,
+):
+    stats = adcore.NDStatsIO("PREFIX:STATS:")
+    seen = []
+    hdf = adcore.ADDataFactory.hdf(static_path_provider)
+
+    def build(prefix, driver, plugins):
+        seen.extend(plugins)
+        return hdf.build(prefix, driver, plugins)
+
+    det = adcore.ContAcqDetector(
+        "PREFIX:",
+        adcore.ADDataFactory(build=build),
+        proc_suffix="PROC:",
+        plugins={"stats": stats},
+        name="det",
+    )
+
+    assert seen == [stats, det.proc, det.cb]
+
+
+@pytest.mark.parametrize(
+    "make_factory",
+    [
+        lambda path_provider, plugin: adcore.ADDataFactory.hdf(
+            path_provider, ndattribute_sources=[plugin]
+        ),
+        lambda path_provider, plugin: adcore.ADDataFactory.time_series(plugin),
+    ],
+    ids=["hdf-ndattribute-sources", "time-series"],
+)
+def test_a_plugin_taken_by_reference_must_be_in_plugins(
+    static_path_provider: StaticPathProvider, make_factory
+):
+    stats = adcore.NDStatsIO("PREFIX:STATS:", name="stats")
+
+    with pytest.raises(ValueError, match=r"stats is not .* add it to `plugins=`"):
+        adcore.AreaDetector(
+            adcore.ADBaseIO("PREFIX:DRV:"),
+            "PREFIX:",
+            make_factory(static_path_provider, stats),
+            name="det",
+        )
 
 
 def test_area_detector_accepts_an_ndattribute_source_below_a_plugin(

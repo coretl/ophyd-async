@@ -124,9 +124,11 @@ async def test_a_writer_follows_its_plugin_by_default(
     makes_provider: bool,
 ):
     factory = getattr(adcore.ADDataFactory, kind)(static_path_provider)
-    writer, logic = factory("PREFIX:", hdf_det.driver, [])
+    named_writer, logic = factory.build("PREFIX:", hdf_det.driver, [])
+    assert named_writer is not None
+    attr, writer = named_writer
     async with init_devices(mock=True):
-        writer.set_name(kind)
+        writer.set_name(attr)
         await writer.connect(mock=True)
     set_mock_value(writer.file_path_exists, True)
     set_mock_value(writer.enable_callbacks, plugin_enabled)
@@ -235,27 +237,37 @@ async def test_prepare_multipart(
 
 
 @pytest.mark.parametrize(
-    "flush_period,livetime,deadtime,exposures_per_collection,expected_frames_per_chunk",
+    "size_x,size_y,flush_period,livetime,deadtime,exposures_per_collection,"
+    "expected_frames_per_chunk",
     [
         # 0.5s flush / 0.01s period -> 50 frames per chunk (#1309)
-        (0.5, 0.01, 0.0, 1, 50),
+        (256, 16, 0.5, 0.01, 0.0, 1, 50),
         # 0.5s flush / 0.05s period -> 10 frames per chunk
-        (0.5, 0.04, 0.01, 1, 10),
+        (256, 16, 0.5, 0.04, 0.01, 1, 10),
+        # 0.5s flush / 0.03s period -> 16.7 frames, rounded to 17
+        (256, 16, 0.5, 0.03, 0.0, 1, 17),
         # A sub-frame flush period floors to a single frame per chunk
-        (0.001, 0.05, 0.0, 1, 1),
+        (256, 16, 0.001, 0.05, 0.0, 1, 1),
         # 5 exposures of 0.01s make each frame written, so 0.5s holds 10
-        (0.5, 0.01, 0.0, 5, 10),
+        (256, 16, 0.5, 0.01, 0.0, 5, 10),
+        # 1.5 MiB frames: a 4 MiB chunk holds 2 of the 50
+        (1024, 768, 0.5, 0.01, 0.0, 1, 2),
+        # 8 MiB frames: still one per chunk
+        (2048, 2048, 0.5, 0.01, 0.0, 1, 1),
     ],
 )
 async def test_hdf_chunk_sized_from_flush_period(
     static_path_provider: StaticPathProvider,
+    size_x: int,
+    size_y: int,
     flush_period: float,
     livetime: float,
     deadtime: float,
     exposures_per_collection: int,
     expected_frames_per_chunk: int,
 ):
-    """A TriggerInfo flush_period sizes the HDF chunk from the collection period."""
+    """A TriggerInfo flush_period sizes the HDF chunk from the collection period,
+    capped at 4 MiB."""
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
             "PREFIX:",
@@ -263,8 +275,8 @@ async def test_hdf_chunk_sized_from_flush_period(
             # Averages the exposures of each collection into one frame
             proc_suffix="PROC:",
         )
-    set_mock_value(det.driver.array_size_x, 1024)
-    set_mock_value(det.driver.array_size_y, 768)
+    set_mock_value(det.driver.array_size_x, size_x)
+    set_mock_value(det.driver.array_size_y, size_y)
     set_mock_value(det.driver.data_type, adcore.ADBaseDataType.UINT16)
     writer = det.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
@@ -284,8 +296,8 @@ async def test_hdf_chunk_sized_from_flush_period(
     await det.unstage()
     assert sr[1]["parameters"]["chunk_shape"] == (
         expected_frames_per_chunk,
-        768,
-        1024,
+        size_y,
+        size_x,
     )
 
 
@@ -552,6 +564,7 @@ async def test_hdf_writes_the_ndattributes_of_its_sources_and_parses_the_others(
     for stats in (listed, unlisted):
         set_mock_value(stats.enable_callbacks, EnableDisable.ENABLE)
         set_mock_value(stats.compute_statistics, True)
+    set_mock_value(listed.nd_attributes_file_nelm, 2048)
     # Names that the unlisted plugin was told to stamp are kept as they are
     unlisted_attributes = [
         adcore.NDAttributeParam(
@@ -574,3 +587,28 @@ async def test_hdf_writes_the_ndattributes_of_its_sources_and_parses_the_others(
     assert await unlisted.nd_attributes_file.get_value() == (
         adcore.ndattributes_to_xml(unlisted_attributes)
     )
+
+
+async def test_hdf_raises_if_the_ndattributes_xml_does_not_fit_the_plugin(
+    static_path_provider: StaticPathProvider,
+):
+    stats = adcore.NDStatsIO("PREFIX:STATS:")
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector(
+            "PREFIX:",
+            adcore.ADDataFactory.hdf(static_path_provider, ndattribute_sources=[stats]),
+            plugins={"stats": stats},
+            name="det",
+        )
+    set_mock_value(det.get_plugin("hdf", adcore.NDFileHDF5IO).file_path_exists, True)
+    set_mock_value(stats.enable_callbacks, EnableDisable.ENABLE)
+    set_mock_value(stats.compute_statistics, True)
+    set_mock_value(stats.nd_attributes_file_nelm, 100)
+    await det.stage()
+
+    with pytest.raises(
+        ValueError,
+        match=r"PREFIX:STATS:NDAttributesFile is \d+ characters but the waveform "
+        r"holds 100: raise XMLSIZE",
+    ):
+        await det.prepare(TriggerInfo())

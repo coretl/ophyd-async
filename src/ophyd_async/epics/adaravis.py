@@ -101,8 +101,8 @@ class AravisDetector(AreaDetector[AravisDriverIO]):
         If provided, this value is used for deadtime instead of looking up
         based on camera model.
     :param plugins:
-        Additional areaDetector plugins to include. "proc" is reserved: use
-        proc_suffix instead.
+        areaDetector plugins to add, each registered as a readable. "proc" is
+        reserved: use proc_suffix instead.
     :param config_sigs: Additional signals to include in configuration
     :param name: Name for the detector device
     """

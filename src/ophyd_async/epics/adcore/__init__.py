@@ -10,6 +10,7 @@ from ._data_logic import (
     ADMultipartDataLogic,
     ADWriterFactory,
     NDArrayDescription,
+    TimeSeriesDataLogic,
 )
 from ._detector import AreaDetector, ContAcqDetector, plugins_with_proc
 from ._io import (
@@ -32,6 +33,7 @@ from ._io import (
     NDFileHDF5Compression,
     NDFileHDF5IO,
     NDFileIO,
+    NDParam,
     NDPluginBaseIO,
     NDPluginFileIO,
     NDProcessFilterCallbacks,
@@ -39,8 +41,9 @@ from ._io import (
     NDProcessIO,
     NDROIStatIO,
     NDROIStatNIO,
-    NDStatistic,
+    NDROIStatTSControl,
     NDStatsIO,
+    NDStatsTimeSeriesIO,
     NDStatsTSAcquireMode,
 )
 from ._ndattribute import (
@@ -48,11 +51,9 @@ from ._ndattribute import (
     NDAttributeParam,
     NDAttributePv,
     NDAttributePvDbrType,
-    NDAttributeSource,
     ndattributes_to_xml,
 )
 from ._plan_stubs import setup_ndattributes
-from ._stats_time_series import StatsTimeSeriesDataLogic
 from ._trigger_logic import (
     ADContAcqTriggerLogic,
     prepare_exposures,
@@ -70,11 +71,13 @@ __all__ = [
     "ADBaseIO",
     "NDPluginBaseIO",
     "NDROIIO",
-    "NDStatistic",
+    "NDParam",
     "NDStatsIO",
+    "NDStatsTimeSeriesIO",
     "NDStatsTSAcquireMode",
     "NDROIStatNIO",
     "NDROIStatIO",
+    "NDROIStatTSControl",
     "NDCBFlushOnSoftTrgMode",
     "NDCircularBuffIO",
     "ADFileWriteMode",
@@ -105,7 +108,7 @@ __all__ = [
     "ADMultipartDataLogic",
     "ADDataFactory",
     "ADWriterFactory",
-    "StatsTimeSeriesDataLogic",
+    "TimeSeriesDataLogic",
     # Detector
     "AreaDetector",
     "ContAcqDetector",
@@ -115,7 +118,6 @@ __all__ = [
     "NDAttributePvDbrType",
     "NDAttributePv",
     "NDAttributeParam",
-    "NDAttributeSource",
     "ndattributes_to_xml",
     "setup_ndattributes",
 ]
