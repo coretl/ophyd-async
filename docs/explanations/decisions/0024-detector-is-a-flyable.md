@@ -206,10 +206,17 @@ are read: `TSRead` of the stats plugin's embedded time series, or Read on the RO
 plugin's `TSControl`. In both plugins a Read only posts the arrays up to the current point,
 and does not stop or erase an acquiring buffer. The refresh is a callable on the provider
 rather than a step of the data logic, because the provider is what decides when a page is
-read. The buffer is sized before acquiring, and the IOC may clamp the size to the record's
-`DRVH` rather than fail the put (the ROI stat plugin's is its `NCHANS`), which would leave a
-longer scan waiting for a buffer that never fills, so each logic reads the size back and
-raises at `prepare()` if it is smaller than the scan.
+read. A Read put can complete before the plugin's I/O Intr waveform records have processed,
+so the refresh alone does not guarantee that the arrays are up to date. The provider
+therefore observes each array and the timestamps until each holds as many collections as the
+page needs, for at most `ARRAY_WAIT_TIMEOUT` (longer than the one second between the IOC's
+posts), and raises a `TimeoutError` naming the signal if one does not. It slices the values
+it observed, never a later get, so a page never has an array shorter than the count it
+indexes by. The arrays are waveforms of `NCHANS` elements in both plugins, and a post is cut
+to that length, so a scan longer than that could never be served. Each logic reads the
+timestamp waveform's `NELM` in `start_provider` and raises at `prepare()` if it is smaller
+than the scan. The `TSNumPoints` record is not a reliable check: only the ROI stat plugin's
+clamps it to `NCHANS`, the stats plugin's `DRVH` is far larger.
 
 ### The detector flies with one `fly()` generator
 

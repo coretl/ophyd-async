@@ -1,3 +1,6 @@
+import asyncio
+from collections.abc import Callable
+
 import numpy as np
 import pytest
 
@@ -61,3 +64,45 @@ async def test_pages_carry_on_from_the_last():
         [102.0, 103.0],
         None,
     ]
+
+
+def make_lagging_provider(
+    held: int,
+) -> tuple[EventPageDataProvider, Callable[[int], None]]:
+    """Arrays holding the first `held` of 5 collections, and a way to post the rest."""
+    values = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    times = np.array([100.0, 101.0, 102.0, 103.0, 104.0])
+    data, set_data = soft_signal_r_and_setter(Array1D[np.float64], values[:held])
+    timestamps, set_times = soft_signal_r_and_setter(Array1D[np.float64], times[:held])
+
+    def post(count: int) -> None:
+        set_data(values[:count])
+        set_times(times[:count])
+
+    return EventPageDataProvider({"det-stats": data}, timestamps, 1), post
+
+
+async def test_page_waits_for_arrays_shorter_than_the_count():
+    provider, post = make_lagging_provider(held=2)
+
+    async def post_later():
+        await asyncio.sleep(0.1)
+        post(5)
+
+    posting = asyncio.create_task(post_later())
+    page = await provider.make_page(5)
+    await posting
+
+    assert page is not None
+    np.testing.assert_array_equal(
+        page["data"]["det-stats"], [[10.0], [11.0], [12.0], [13.0], [14.0]]
+    )
+    assert page["time"] == [100.0, 101.0, 102.0, 103.0, 104.0]
+
+
+async def test_page_raises_if_the_arrays_never_catch_up(monkeypatch):
+    monkeypatch.setattr("ophyd_async.core._data_providers.ARRAY_WAIT_TIMEOUT", 0.1)
+    provider, _ = make_lagging_provider(held=2)
+
+    with pytest.raises(TimeoutError, match="held 2 collections .* 5 were needed"):
+        await provider.make_page(5)

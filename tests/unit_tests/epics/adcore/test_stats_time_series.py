@@ -40,6 +40,8 @@ from ophyd_async.testing import assert_has_calls
 async def stats() -> adcore.NDStatsIO:
     async with init_devices(mock=True):
         plugin = adcore.NDStatsIO("PREFIX:STATS:", name="det-stats")
+    # The IOC's arrays hold NCHANS points, 2048 by default
+    set_mock_value(plugin.ts_timestamp_nelm, 2048)
     return plugin
 
 
@@ -74,15 +76,13 @@ async def test_start_sizes_and_arms_the_buffer(stats: adcore.NDStatsIO):
 async def test_start_raises_for_a_scan_longer_than_the_buffer(
     stats: adcore.NDStatsIO, points: int, raises: bool
 ):
-    # An IOC whose TSNumPoints has a DRVH clamps the size to it
-    callback_on_mock_put(stats.ts_num_points, lambda value: min(value, 2048))
     logic = StatsTimeSeriesDataLogic(stats)
 
     start = logic.start_provider("det", [], points, 1, 0.1, 0)
 
     if raises:
         with pytest.raises(
-            ValueError, match="needs 2049 points, but the plugin holds at most 2048"
+            ValueError, match="needs 2049 points, but the plugin's arrays hold 2048"
         ):
             await start
     else:

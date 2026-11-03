@@ -359,6 +359,8 @@ class NDStatsIO(StandardReadable, NDPluginBaseIO):
     ts_sigma_y: A[SignalR[Array1D[np.float64]], PvSuffix("TSSigmaY")]
     ts_sigma_xy: A[SignalR[Array1D[np.float64]], PvSuffix("TSSigmaXY")]
     ts_timestamp: A[SignalR[Array1D[np.float64]], PvSuffix("TSTimestamp")]
+    # How many points the time series arrays hold (the waveforms' NELM)
+    ts_timestamp_nelm: A[SignalR[int], PvSuffix("TSTimestamp.NELM")]
     # Centroid statistics
     compute_centroid: A[
         SignalRW[bool], PvSuffix.rbv("ComputeCentroid"), Format.CONFIG_SIGNAL
@@ -486,6 +488,8 @@ class NDROIStatNIO(StandardReadable, EpicsDevice):
     ts_total: A[SignalR[Array1D[np.float64]], PvSuffix("TSTotal")]
     ts_net: A[SignalR[Array1D[np.float64]], PvSuffix("TSNet")]
     ts_timestamp: A[SignalR[Array1D[np.float64]], PvSuffix("TSTimestamp")]
+    # How many points the time series arrays hold (the waveforms' NELM)
+    ts_timestamp_nelm: A[SignalR[int], PvSuffix("TSTimestamp.NELM")]
 
     def get_published_scalars(self) -> list[SignalR[float]]:
         """The scalars of this ROI that have a read format."""

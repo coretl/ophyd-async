@@ -9,8 +9,31 @@ from event_model import ComposeStreamResource, DataKey, StreamRange
 from event_model.documents import PartialEventPage
 
 from ._datatypes import Array1D
-from ._signal import SignalR, SignalW
+from ._signal import SignalR, SignalW, observe_value
 from ._utils import ConfinedModel, error_if_none, gather_dict, get_dtype
+
+ARRAY_WAIT_TIMEOUT = 2.0
+"""How long `EventPageDataProvider` waits for an array to hold the collections
+counted, in seconds. Longer than the one second between the posts of an
+areaDetector time series."""
+
+
+async def _wait_for_length(signal: SignalR[Array1D[Any]], needed: int) -> Array1D[Any]:
+    """Return the first value of `signal` holding at least `needed` collections."""
+    held = 0
+    kept = None
+    try:
+        async for value in observe_value(signal, done_timeout=ARRAY_WAIT_TIMEOUT):
+            held = len(value)
+            if held >= needed:
+                kept = value
+                break
+    except TimeoutError:
+        raise TimeoutError(
+            f"{signal.source} held {held} collections after {ARRAY_WAIT_TIMEOUT}s, "
+            f"but {needed} were needed"
+        ) from None
+    return error_if_none(kept, f"{signal.source} was not observed")
 
 
 class DataProvider(ABC):
@@ -80,7 +103,9 @@ class EventPageDataProvider(PageableDataProvider):
     array of per-collection timestamps: an areaDetector stats time series, or a
     scaler's MCA arrays. Each array is sliced into `collections_per_event`-length
     chunks, one per event, and the last collection of an event supplies that
-    event's timestamp.
+    event's timestamp. A page waits up to `ARRAY_WAIT_TIMEOUT` for each array to
+    hold every collection of its events, and raises `TimeoutError` naming the
+    signal if one does not.
 
     :param data: datakey (already suffixed) to the array signal that backs it
     :param timestamps: the acquisition time of each collection
@@ -128,12 +153,17 @@ class EventPageDataProvider(PageableDataProvider):
         if self.refresh:
             await self.refresh()
         cpe = self.collections_per_event
-        # Read every array and the per-collection timestamps in one parallel batch
+        needed = self._origin + index * cpe
+        # Wait for every array and the per-collection timestamps to hold the
+        # collections counted, all at once
         arrays, stamps = await asyncio.gather(
             gather_dict(
-                {datakey: signal.get_value() for datakey, signal in self.data.items()}
+                {
+                    datakey: _wait_for_length(signal, needed)
+                    for datakey, signal in self.data.items()
+                }
             ),
-            self.timestamps.get_value(),
+            _wait_for_length(self.timestamps, needed),
         )
         starts = [self._origin + event * cpe for event in range(self._published, index)]
         self._published = index

@@ -11,7 +11,6 @@ from ophyd_async.core import (
     BoundedDataLogic,
     EventPageDataProvider,
     SignalR,
-    SignalRW,
     set_and_wait_for_value,
     wait_for_value,
 )
@@ -20,15 +19,13 @@ from ophyd_async.epics.core import stop_busy_record
 from ._io import NDROIStatIO, NDROIStatTSControl, NDStatsIO, NDStatsTSAcquireMode
 
 
-async def _set_buffer_size(num_points: SignalRW[int], num_collections: int) -> None:
-    """Size a time series buffer, raising if the IOC holds fewer points."""
-    await num_points.set(num_collections)
-    # The record clamps a size above its DRVH rather than failing the put
-    size = await num_points.get_value()
-    if size < num_collections:
+async def _check_capacity(capacity: SignalR[int], num_collections: int) -> None:
+    """Raise if the time series arrays hold fewer points than the scan needs."""
+    points = await capacity.get_value()
+    if points < num_collections:
         raise ValueError(
-            f"{num_points.source}: the scan needs {num_collections} points, "
-            f"but the plugin holds at most {size}"
+            f"{capacity.source}: the scan needs {num_collections} points, "
+            f"but the plugin's arrays hold {points}"
         )
 
 
@@ -52,11 +49,11 @@ class StatsTimeSeriesDataLogic(BoundedDataLogic[EventPageDataProvider]):
     again at each step point after the first, by writing 1 to ``ts_acquire``,
     which erases the arrays and resets the current point before the detector's
     acquire logic drives the camera; its frames then feed the time series via
-    NDArray callbacks. `start_provider` raises if the plugin holds fewer points
-    than the scan needs. Before each page it writes 1 to ``ts_read``, so the
-    plugin posts its arrays up to the current point. A detector that writes a
-    file should pull stats into the file as NDAttributes instead (see
-    `ADHDFDataLogic`).
+    NDArray callbacks. `start_provider` raises `ValueError` if the plugin's
+    arrays hold fewer points than the scan needs. Before each page it writes 1 to
+    ``ts_read``, so the plugin posts its arrays up to the current point. A detector
+    that writes a file should pull stats into the file as NDAttributes instead
+    (see `ADHDFDataLogic`).
 
     :param stats: the stats plugin whose time series to read
     """
@@ -90,8 +87,9 @@ class StatsTimeSeriesDataLogic(BoundedDataLogic[EventPageDataProvider]):
         if not arrays:
             return None
         # Size the buffer and put it in fixed-length mode before arming it
+        await _check_capacity(self.stats.ts_timestamp_nelm, num_collections)
         await asyncio.gather(
-            _set_buffer_size(self.stats.ts_num_points, num_collections),
+            self.stats.ts_num_points.set(num_collections),
             self.stats.ts_acquire_mode.set(NDStatsTSAcquireMode.FIXED_LENGTH),
         )
         # Writing 1 to ts_acquire clears the arrays and resets ts_current_point to
@@ -131,9 +129,9 @@ class ROIStatTimeSeriesDataLogic(BoundedDataLogic[EventPageDataProvider]):
     The buffer is sized and armed in `start_provider` by writing ERASE_START to
     ``ts_control``, which erases the arrays and resets the current point; the
     plugin stops acquiring by itself when the buffer is full. `start_provider`
-    raises if the plugin holds fewer points than the scan needs. Before each page
-    it writes READ to ``ts_control``, so the plugin posts its arrays up to the
-    current point.
+    raises `ValueError` if the plugin's arrays hold fewer points than the scan
+    needs. Before each page it writes READ to ``ts_control``, so the plugin posts
+    its arrays up to the current point.
 
     :param roistat: the ROI stat plugin whose time series to read
     """
@@ -164,14 +162,15 @@ class ROIStatTimeSeriesDataLogic(BoundedDataLogic[EventPageDataProvider]):
             return None
         # The plugin keeps the current point when resized, so size it first and
         # then erase and start, which resets the current point to 0
-        await _set_buffer_size(self.roistat.ts_num_points, num_collections)
+        await _check_capacity(channels[0].ts_timestamp_nelm, num_collections)
+        await self.roistat.ts_num_points.set(num_collections)
         await self.roistat.ts_control.set(NDROIStatTSControl.ERASE_START)
         # The IOC resets the count within the put, but its monitor may arrive
         # after the put's readback, and the detector reads the count next
         await wait_for_value(self.roistat.ts_current_point, 0, timeout=DEFAULT_TIMEOUT)
-        timestamps = channels[0].ts_timestamp
         # The plugin posts its arrays about once a second while acquiring, so
         # ask it to post them before each page
+        timestamps = channels[0].ts_timestamp
         refresh = partial(self.roistat.ts_control.set, NDROIStatTSControl.READ)
         return EventPageDataProvider(arrays, timestamps, collections_per_event, refresh)
 

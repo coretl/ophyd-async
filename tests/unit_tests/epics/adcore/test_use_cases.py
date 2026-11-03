@@ -872,6 +872,7 @@ def _fill_time_series(
         )
 
     for plugin in plugins:
+        set_mock_value(plugin.ts_timestamp_nelm, 2048)
         callback_on_mock_put(plugin.ts_acquire, erase)
         callback_on_mock_put(plugin.ts_read, lambda _, plugin=plugin: post(plugin))
     callback_on_mock_put(det.driver.acquire, count)
@@ -1147,6 +1148,7 @@ async def test_readable_stats_total_is_suppressed_by_any_higher_tier(
             "PREFIX:", *factories, plugins={"stats": stats}, name="det"
         )
     _switch_stats(stats, on=True)
+    set_mock_value(stats.ts_timestamp_nelm, 2048)
     hdf = det.get_plugin("hdf", adcore.NDFileHDF5IO)
     set_mock_value(
         hdf.enable_callbacks,
@@ -1645,6 +1647,7 @@ async def _roistat_time_series_detector(
         )
     set_mock_value(roistat.enable_callbacks, EnableDisable.ENABLE)
     for number, name in CHANNEL_NAMES.items():
+        set_mock_value(roistat.channels[number].ts_timestamp_nelm, 2048)
         set_mock_value(roistat.channels[number].name_, name)
         set_mock_value(roistat.channels[number].use, True)
     return det, roistat
@@ -1746,15 +1749,15 @@ async def test_uc10_prepare_raises_for_a_scan_longer_than_the_roistat_buffer(
     points: int, raises: bool
 ):
     det, roistat = await _roistat_time_series_detector()
-    # The IOC clamps the size to DRVH, which is NCHANS
-    callback_on_mock_put(roistat.ts_num_points, lambda value: min(value, 2048))
+    # The arrays hold NCHANS points
+    set_mock_value(roistat.channels[1].ts_timestamp_nelm, 2048)
     await det.stage()
 
     prepare = det.prepare(TriggerInfo(number_of_events=points))
 
     if raises:
         with pytest.raises(
-            ValueError, match="needs 2049 points, but the plugin holds at most 2048"
+            ValueError, match="needs 2049 points, but the plugin's arrays hold 2048"
         ):
             await prepare
     else:
