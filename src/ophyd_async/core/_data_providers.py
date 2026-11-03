@@ -1,6 +1,6 @@
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -85,6 +85,10 @@ class EventPageDataProvider(PageableDataProvider):
     :param data: datakey (already suffixed) to the array signal that backs it
     :param timestamps: the acquisition time of each collection
     :param collections_per_event: how many collections make up one event
+    :param refresh:
+        awaited before each page's arrays are read, for a device that posts its
+        arrays less often than it counts collections: it asks the device to post
+        them, so they hold every collection counted
     """
 
     def __init__(
@@ -92,10 +96,12 @@ class EventPageDataProvider(PageableDataProvider):
         data: Mapping[str, SignalR[Array1D[Any]]],
         timestamps: SignalR[Array1D[np.float64]],
         collections_per_event: int,
+        refresh: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(collections_per_event)
         self.data = dict(data)
         self.timestamps = timestamps
+        self.refresh = refresh
         self.start_new_resources(0)
 
     def start_new_resources(self, origin: int) -> None:
@@ -119,6 +125,8 @@ class EventPageDataProvider(PageableDataProvider):
     async def make_page(self, index: int) -> PartialEventPage | None:
         if index <= self._published:
             return None
+        if self.refresh:
+            await self.refresh()
         cpe = self.collections_per_event
         # Read every array and the per-collection timestamps in one parallel batch
         arrays, stamps = await asyncio.gather(

@@ -15,6 +15,7 @@ from ophyd_async.core import (
     EnableDisable,
     SignalR,
     SignalRW,
+    SignalW,
     StandardReadable,
     StrictEnum,
     SubsetEnum,
@@ -331,11 +332,13 @@ class NDStatsIO(StandardReadable, NDPluginBaseIO):
     # prefix while the per-statistic arrays are named by NDStats itself at the
     # plugin's own prefix. ts_num_points sizes the buffer, ts_acquire erases and
     # starts it (writing 1 clears the arrays and resets ts_current_point to 0),
-    # ts_current_point reports progress, each ts_<statistic> holds the series of
-    # that statistic and ts_timestamp holds the per-point acquisition times.
+    # ts_current_point reports progress, writing 1 to ts_read posts the arrays
+    # while acquiring, each ts_<statistic> holds the series of that statistic and
+    # ts_timestamp holds the per-point acquisition times.
     # These are not registered as readables: the scalars serve read(), and the
     # arrays are consumed by StatsTimeSeriesDataLogic as event pages.
     ts_acquire: A[SignalRW[bool], PvSuffix("TS:TSAcquire"), EpicsOptions(wait=non_zero)]
+    ts_read: A[SignalW[bool], PvSuffix("TS:TSRead")]
     ts_num_points: A[SignalRW[int], PvSuffix("TS:TSNumPoints")]
     ts_current_point: A[SignalR[int], PvSuffix("TS:TSCurrentPoint")]
     ts_acquiring: A[SignalR[bool], PvSuffix("TS:TSAcquiring")]
@@ -473,6 +476,7 @@ class NDROIStatNIO(StandardReadable, EpicsDevice):
         SignalR[float], PvSuffix("MeanValue_RBV"), Format.HINTED_UNCACHED_SIGNAL
     ]
     total: A[SignalR[float], PvSuffix("Total_RBV"), Format.HINTED_UNCACHED_SIGNAL]
+    net: A[SignalR[float], PvSuffix("Net_RBV")]
     # Time series of this ROI, filled while the plugin's time series acquires.
     # These are not registered as readables: the scalars serve read(), and the
     # arrays are consumed by ROIStatTimeSeriesDataLogic as event pages.
@@ -480,6 +484,7 @@ class NDROIStatNIO(StandardReadable, EpicsDevice):
     ts_max_value: A[SignalR[Array1D[np.float64]], PvSuffix("TSMaxValue")]
     ts_mean_value: A[SignalR[Array1D[np.float64]], PvSuffix("TSMeanValue")]
     ts_total: A[SignalR[Array1D[np.float64]], PvSuffix("TSTotal")]
+    ts_net: A[SignalR[Array1D[np.float64]], PvSuffix("TSNet")]
     ts_timestamp: A[SignalR[Array1D[np.float64]], PvSuffix("TSTimestamp")]
 
     def get_published_scalars(self) -> list[SignalR[float]]:
@@ -509,6 +514,7 @@ class NDROIStatNIO(StandardReadable, EpicsDevice):
             self.max_value: "ROISTAT_MAX_VALUE",
             self.mean_value: "ROISTAT_MEAN_VALUE",
             self.total: "ROISTAT_TOTAL",
+            self.net: "ROISTAT_NET",
         }
 
     @cached_property
@@ -519,6 +525,7 @@ class NDROIStatNIO(StandardReadable, EpicsDevice):
             self.max_value: self.ts_max_value,
             self.mean_value: self.ts_mean_value,
             self.total: self.ts_total,
+            self.net: self.ts_net,
         }
 
 

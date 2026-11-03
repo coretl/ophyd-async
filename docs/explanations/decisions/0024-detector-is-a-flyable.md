@@ -195,8 +195,21 @@ after that scalar, so it suppresses the scalar. It differs only where the plugin
 `TSControl` record erases and starts the buffer rather than a busy record, the buffer has no
 circular mode, so it is always fixed length, and every channel has its own timestamp array.
 All used channels are stamped from the same frame, so the first used channel's timestamps
-serve them all. The plugin's `TSNet` array is not published, because `NDROIStatNIO` has no
-`net` scalar to name it after.
+serve them all. Like `NDStatsIO`, `NDROIStatNIO` has a `net` scalar with no read format, so
+its `TSNet` array is published only when a user gives `net` one.
+
+Both plugins count every frame in `TSCurrentPoint` but post their arrays only when the buffer
+is full, on Stop or Read, or from a record that asks for a Read about once a second while
+acquiring. A page collected between those posts would read arrays shorter than the count, so
+each logic gives its `EventPageDataProvider` a refresh that asks for a Read before the arrays
+are read: `TSRead` of the stats plugin's embedded time series, or Read on the ROI stat
+plugin's `TSControl`. In both plugins a Read only posts the arrays up to the current point,
+and does not stop or erase an acquiring buffer. The refresh is a callable on the provider
+rather than a step of the data logic, because the provider is what decides when a page is
+read. The buffer is sized before acquiring, and the IOC may clamp the size to the record's
+`DRVH` rather than fail the put (the ROI stat plugin's is its `NCHANS`), which would leave a
+longer scan waiting for a buffer that never fills, so each logic reads the size back and
+raises at `prepare()` if it is smaller than the scan.
 
 ### The detector flies with one `fly()` generator
 

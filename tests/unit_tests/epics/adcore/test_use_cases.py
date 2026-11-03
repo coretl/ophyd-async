@@ -845,31 +845,36 @@ def _switch_stats(stats: adcore.NDStatsIO, on: bool) -> None:
 def _fill_time_series(
     det, plugins: list[adcore.NDStatsIO], points: int, also=lambda: None
 ):
-    """Behave like the IOC: arming a time series erases it, acquiring fills it."""
+    """Behave like the IOC: arming a time series erases it, acquiring counts the
+    points, and the arrays are posted only when TSRead asks for them, as for a
+    page collected between the plugin's once-a-second posts."""
 
     def erase(value):
         if value:
             for plugin in plugins:
                 set_mock_value(plugin.ts_current_point, 0)
 
-    def fill(value):
+    def count(value):
         if value:
             for plugin in plugins:
-                for stat in plugin.statistics:
-                    set_mock_value(
-                        stat.time_series,  # pyright: ignore[reportArgumentType]
-                        np.arange(points, dtype=np.float64),
-                    )
-                set_mock_value(
-                    plugin.ts_timestamp,  # pyright: ignore[reportArgumentType]
-                    100.0 + np.arange(points),
-                )
                 set_mock_value(plugin.ts_current_point, points)
             also()
 
+    def post(plugin: adcore.NDStatsIO):
+        for stat in plugin.statistics:
+            set_mock_value(
+                stat.time_series,  # pyright: ignore[reportArgumentType]
+                np.arange(points, dtype=np.float64),
+            )
+        set_mock_value(
+            plugin.ts_timestamp,  # pyright: ignore[reportArgumentType]
+            100.0 + np.arange(points),
+        )
+
     for plugin in plugins:
         callback_on_mock_put(plugin.ts_acquire, erase)
-    callback_on_mock_put(det.driver.acquire, fill)
+        callback_on_mock_put(plugin.ts_read, lambda _, plugin=plugin: post(plugin))
+    callback_on_mock_put(det.driver.acquire, count)
 
 
 def _fly_plan(det, info: TriggerInfo):
@@ -986,6 +991,8 @@ def test_uc_b_detector_with_a_stats_time_series(RE: RunEngine):
     assert descriptor["hints"]["det"]["fields"] == STATS_HINTS
     (page,) = docs["event_page"]
     assert page["data"]["det-stats-total"] == [[0.0], [1.0], [2.0]]
+    # The arrays were posted for the page
+    get_mock_put(stats.ts_read).assert_called_once_with(True)
     # It made no plugin of its own
     assert [name for name, _ in det.children() if "stat" in name] == ["stats"]
 
@@ -1646,31 +1653,37 @@ async def _roistat_time_series_detector(
 def _fly_roistat_time_series(
     RE: RunEngine, det, roistat: adcore.NDROIStatIO, points: int, also=lambda: None
 ) -> dict[str, list]:
-    """Behave like the IOC: ERASE_START resets the count, acquiring fills each
-    channel's arrays with 10 * channel number + frame number. The timestamps
-    differ per channel, which the IOC's do not, to show which channel's are used."""
+    """Behave like the IOC: ERASE_START resets the count, acquiring counts the
+    points, and READ posts each channel's arrays, filled with
+    10 * channel number + frame number, as for a page collected between the
+    plugin's once-a-second posts. The timestamps differ per channel, which the
+    IOC's do not, to show which channel's are used."""
 
-    def erase(value):
+    def post():
+        for number, channel in roistat.channels.items():
+            for array in channel.time_series.values():
+                set_mock_value(
+                    array,  # pyright: ignore[reportArgumentType]
+                    10.0 * number + np.arange(points),
+                )
+            set_mock_value(
+                channel.ts_timestamp,  # pyright: ignore[reportArgumentType]
+                100.0 * number + np.arange(points),
+            )
+
+    def control(value):
         if value == adcore.NDROIStatTSControl.ERASE_START:
             set_mock_value(roistat.ts_current_point, 0)
+        elif value == adcore.NDROIStatTSControl.READ:
+            post()
 
-    def fill(value):
+    def count(value):
         if value:
-            for number, channel in roistat.channels.items():
-                for array in channel.time_series.values():
-                    set_mock_value(
-                        array,  # pyright: ignore[reportArgumentType]
-                        10.0 * number + np.arange(points),
-                    )
-                set_mock_value(
-                    channel.ts_timestamp,  # pyright: ignore[reportArgumentType]
-                    100.0 * number + np.arange(points),
-                )
             set_mock_value(roistat.ts_current_point, points)
             also()
 
-    callback_on_mock_put(roistat.ts_control, erase)
-    callback_on_mock_put(det.driver.acquire, fill)
+    callback_on_mock_put(roistat.ts_control, control)
+    callback_on_mock_put(det.driver.acquire, count)
     docs: dict[str, list] = defaultdict(list)
     RE(
         _fly_plan(det, TriggerInfo(number_of_events=points)),
@@ -1681,17 +1694,19 @@ def _fly_roistat_time_series(
 
 async def test_uc10_roistat_time_series_publishes_each_used_channel(RE: RunEngine):
     det, roistat = await _roistat_time_series_detector()
-    # Green is not used, and Red publishes only its total
+    # Green is not used, Red publishes only its total, and Blue its net too
     set_mock_value(roistat.channels[2].use, False)
     red = roistat.channels[3]
     for scalar in (red.min_value, red.max_value, red.mean_value):
         red.set_readable_format(scalar, None)
+    blue = roistat.channels[1]
+    blue.set_readable_format(blue.net, Format.UNCACHED_SIGNAL)
 
     docs = _fly_roistat_time_series(RE, det, roistat, points=3)
 
     blue_keys = [
         f"det-roistat-Blue-{stat}"
-        for stat in ("min_value", "max_value", "mean_value", "total")
+        for stat in ("min_value", "max_value", "mean_value", "total", "net")
     ]
     keys = [*blue_keys, "det-roistat-Red-total"]
     (descriptor,) = docs["descriptor"]
@@ -1700,25 +1715,50 @@ async def test_uc10_roistat_time_series_publishes_each_used_channel(RE: RunEngin
     total = descriptor["data_keys"]["det-roistat-Blue-total"]
     assert total["source"] == "mock+ca://PREFIX:ROISTAT:1:TSTotal"
     assert total["shape"] == [1]
-    # The channels hint their scalars, whoever serves them
-    assert descriptor["hints"]["det"]["fields"] == keys
+    net = descriptor["data_keys"]["det-roistat-Blue-net"]
+    assert net["source"] == "mock+ca://PREFIX:ROISTAT:1:TSNet"
+    # The channels hint their scalars, whoever serves them, and net is not hinted
+    hinted = [key for key in keys if key != "det-roistat-Blue-net"]
+    assert descriptor["hints"]["det"]["fields"] == hinted
     assert docs["event"] == []
     (page,) = docs["event_page"]
     assert sorted(page["data"]) == sorted(keys)
     assert page["data"]["det-roistat-Blue-total"] == [[10.0], [11.0], [12.0]]
+    assert page["data"]["det-roistat-Blue-net"] == [[10.0], [11.0], [12.0]]
     assert page["data"]["det-roistat-Red-total"] == [[30.0], [31.0], [32.0]]
     # Every array is timed by the first used channel's timestamps
     assert page["timestamps"]["det-roistat-Red-total"] == [100.0, 101.0, 102.0]
-    # The buffer was sized to the scan, then erased and started, and stopped on
-    # unstage
+    # The buffer was sized to the scan, then erased and started, its arrays
+    # posted for the page, and stopped on unstage
     assert get_mock_put(roistat.ts_num_points).call_args_list[-1].args == (3,)
     assert [
         call.args[0] for call in get_mock_put(roistat.ts_control).call_args_list
     ] == [
         adcore.NDROIStatTSControl.STOP,
         adcore.NDROIStatTSControl.ERASE_START,
+        adcore.NDROIStatTSControl.READ,
         adcore.NDROIStatTSControl.STOP,
     ]
+
+
+@pytest.mark.parametrize("points,raises", [(2048, False), (2049, True)])
+async def test_uc10_prepare_raises_for_a_scan_longer_than_the_roistat_buffer(
+    points: int, raises: bool
+):
+    det, roistat = await _roistat_time_series_detector()
+    # The IOC clamps the size to DRVH, which is NCHANS
+    callback_on_mock_put(roistat.ts_num_points, lambda value: min(value, 2048))
+    await det.stage()
+
+    prepare = det.prepare(TriggerInfo(number_of_events=points))
+
+    if raises:
+        with pytest.raises(
+            ValueError, match="needs 2049 points, but the plugin holds at most 2048"
+        ):
+            await prepare
+    else:
+        await prepare
 
 
 @pytest.mark.parametrize(
