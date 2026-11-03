@@ -24,8 +24,7 @@ class StatsTimeSeriesDataLogic(BoundedDataLogic[EventPageDataProvider]):
 
     For detectors that write no file: the stats plugin holds each statistic in a
     fixed-length buffer that must be sized before acquisition, so this logic
-    raises for a scan with no fixed number of collections, unless the unbounded
-    data logics already make all its datakeys. One plugin has one time-series
+    sizes it from the scan's number of collections. One plugin has one time-series
     control (`ts_acquire`, `ts_num_points`) shared across many arrays, so one
     logic covers many arrays with the control embedded.
 

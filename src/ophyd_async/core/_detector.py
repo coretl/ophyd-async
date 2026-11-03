@@ -822,10 +822,7 @@ class DetectorLogic(FlyableLogic[TriggerInfo, DetectorCtx]):
                 yield update
 
     async def ensure_stopped(self) -> None:
-        """Stop every data logic and the detector.
-
-        An acquisition armed by `prepare()` and never taken is dropped.
-        """
+        """Stop every data logic and the detector."""
         await asyncio.gather(
             *(dl.ensure_stopped() for dl in self.data),
             *([self.acquire.ensure_stopped()] if self.acquire else []),
@@ -1160,6 +1157,7 @@ class StandardDetector(
         self._describe_funcs += (self.__on_describe,)
         self._hints_funcs += (self.__on_hints,)
         self._suppressed_datakeys_funcs += (self.__on_suppressed_datakeys,)
+        self._unstage_funcs += (self.__on_unstage,)
 
     @cached_property
     def _state(self) -> _StateMachine:
@@ -1173,6 +1171,14 @@ class StandardDetector(
     def logic(self) -> DetectorLogic:
         """The logic that drives this detector."""
         raise NotImplementedError
+
+    async def __on_unstage(self) -> None:
+        # Close an acquisition prepare() armed and nothing took. This does not
+        # stop the detector, the acquire logic's ensure_stopped() does that: it
+        # only ends the generator's tasks now, rather than when it is garbage
+        # collected, which asyncio warns about
+        if self._ctx and self._ctx.external_acquire_gen:
+            await self._ctx.external_acquire_gen.aclose()
 
     def __on_suppressed_datakeys(self) -> Mapping[str, DataKey | None]:
         """The datakeys of the serving providers, which replace registered signals."""

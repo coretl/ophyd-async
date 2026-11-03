@@ -981,10 +981,6 @@ class HeldAcquire(DetectorAcquireLogic):
         self._stopped.set()
 
 
-@pytest.mark.xfail(
-    reason="an armed acquisition never taken is dropped, not closed (Tom 2026-10-22)",
-    strict=True,
-)
 async def test_unstage_closes_the_acquisition_an_external_prepare_armed():
     acquire = HeldAcquire()
     det = make_detector("det", trigger=ExternalTrigger(), acquire=acquire)

@@ -60,13 +60,10 @@ property to be concrete. For an ad-hoc detector in a plan or a test,
 ### One thing the logic cannot get from its own fields
 
 Data logics name their datakeys after the Device, whose name does not exist until
-`init_devices` calls `set_name` on context exit. `StandardFlyable` runs hooks a subclass
-registers with the context as soon as `prepare_to_fly` yields it. `StandardDetector`
-registers one, which writes its name and the description of its registered signals into the
-context, then calls `DetectorLogic.serve_data` with it to choose and start the data
-providers. It passes its name to `get_hinted_fields()` too. The logic holds no reference to
-the Device: `StandardFlyable` calls `prepare_to_fly` with the `TriggerInfo` alone, so the
-context is where the Device leaves what serving needs.
+`init_devices` calls `set_name` on context exit, so the logic cannot be given it when it is
+made. `StandardFlyable` passes the Device's name to `prepare_to_fly` instead; the detector
+keeps it on the context, for the data providers it starts after yielding, and
+`get_hinted_fields()` takes it the same way. The logic holds no reference to the Device.
 
 ### Which collect verb to expose is the Device's business
 
@@ -190,9 +187,11 @@ scalars dropped like a switched-off statistic. The channels are named when the d
 staged, as `<plugin name>-<Name PV>`, with characters other than letters, digits and underscores
 replaced by underscores and the channel number used if the PV is empty, so the scalars have
 names the documents accept and say what the channel measures. Two channels that would be named
-the same raise, and a `Name` PV that changes after that raises at `prepare()` like a switch. The plugin is a
-readable whose channels are its readable children, so a user does not register each channel. There is no ROI stat time series: a fly scan that needs the channels while the
-HDF writer sits out raises at `prepare()`, as a stats plugin only registered as a readable does.
+the same raise, and a `Name` PV that changes after that raises at `prepare()` like a switch.
+The plugin is a readable whose channels are its readable children, so a user does not register
+each channel. ophyd-async does not model the plugin's time series yet, so a fly scan collects
+nothing from it: it collects only what the data logics make, and a registered readable is read
+only by `trigger()`.
 
 ### The detector flies with one `fly()` generator
 
@@ -218,10 +217,11 @@ armed, wait for idle. It owns what it starts (`async with` a status, or cancelli
 `finally`), so closing it at its `yield` ends it. It takes no trigger information: the same
 generator serves both kinds of triggering, and only where it is entered differs. An externally
 triggered detector arms in `prepare()`, so that it is waiting on its trigger source by the time
-`kickoff()` returns; the armed acquisition is held on the logic until `fly` (or `trigger()`)
-takes it and runs it to the end, closing it if cancelled. An internally triggered one is
-entered by `fly` or `trigger()` itself. One still armed at `unstage()` is closed by
-`ensure_stopped`, so its cleanup runs then, not when it is garbage collected after a restage.
+`kickoff()` returns; the armed acquisition is held on the context until `fly` (or
+`trigger()`) takes it and runs it to the end, closing it if cancelled. An internally
+triggered one is entered by `fly` or `trigger()` itself. One still armed at `unstage()` is
+closed then, so its cleanup runs then, not when it is garbage collected after a restage;
+stopping the detector stays the job of `ensure_stopped`.
 A prepared detector cannot be prepared again before it is kicked off or triggered, so no
 `prepare()` replaces an armed acquisition.
 
