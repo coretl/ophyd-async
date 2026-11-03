@@ -6,6 +6,7 @@ import pytest
 
 from ophyd_async.core import (
     DetectorTrigger,
+    EnableDisable,
     StaticPathProvider,
     TriggerInfo,
     callback_on_mock_put,
@@ -143,6 +144,12 @@ async def test_cont_acq_skips_dirty_frames(
     set_mock_value(writer.file_path_exists, True)
     set_mock_value(cb.capture, True)
     set_mock_value(cb.pre_count, 2)
+    if proc_suffix:
+        # The process plugin is the detector's, so it is switched on whatever it was
+        set_mock_value(
+            det.get_plugin("proc", adcore.NDProcessIO).enable_callbacks,
+            EnableDisable.DISABLE,
+        )
 
     async def set_pre_count(value: int) -> int:
         # ADCore refuses PreCount changes while capture is active.
@@ -207,6 +214,9 @@ async def test_cont_acq_skips_dirty_frames(
     await det.unstage()
     assert not await cb.capture.get_value()
     assert await det.driver.acquire.get_value()
+    if proc_suffix:
+        proc = det.get_plugin("proc", adcore.NDProcessIO)
+        assert await proc.enable_callbacks.get_value() is EnableDisable.ENABLE
 
 
 @pytest.mark.parametrize("cancel", [False, True])
@@ -366,17 +376,16 @@ async def test_uc9_continuous_acquisition_step_then_fly_scan(
     await det.unstage()
 
 
-async def test_cont_acq_prepare_again_after_it_switched_the_circular_buffer_on(
+async def test_cont_acq_stage_switches_the_circular_buffer_on(
     cont_acq_detector: adcore.AreaDetector[adcore.ADBaseIO],
 ):
     set_mock_value(cont_acq_detector.cb.enable_callbacks, EnableDisable.DISABLE)
     await cont_acq_detector.stage()
-    # The first trigger prepares, switching the circular buffer on
-    await cont_acq_detector.trigger()
     assert (
         await cont_acq_detector.cb.enable_callbacks.get_value() is EnableDisable.ENABLE
     )
 
-    # That is not a switch changed by someone else since stage()
+    await cont_acq_detector.prepare(TriggerInfo())
+    await cont_acq_detector.trigger()
     await cont_acq_detector.prepare(TriggerInfo())
     await cont_acq_detector.trigger()

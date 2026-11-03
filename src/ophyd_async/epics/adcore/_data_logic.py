@@ -1,7 +1,7 @@
 import asyncio
 import math
 import warnings
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import PureWindowsPath
 from typing import Any
@@ -118,6 +118,30 @@ async def get_ndattribute_dtype_source(
     return {name: value for found in per_element for name, value in found.items()}
 
 
+def _check_in_plugins(
+    used: Sequence[NDPluginBaseIO], plugins: Sequence[NDPluginBaseIO]
+) -> None:
+    """Raise if a plugin taken by reference is not in the detector's `plugins`.
+
+    :param used: the plugins a data logic takes by reference
+    :param plugins: the detector's plugins, whose children also count
+    """
+    in_plugins = list(_device_tree(plugins))
+    for plugin in used:
+        if not any(plugin is device for device in in_plugins):
+            raise ValueError(
+                f"{plugin.name or type(plugin).__name__} is not in the detector's "
+                "plugins: add it to `plugins=`"
+            )
+
+
+def _device_tree(devices: Iterable[Device]) -> Iterator[Device]:
+    """The devices, and the children of each, down the Device tree."""
+    for device in devices:
+        yield device
+        yield from _device_tree(child for _, child in device.children())
+
+
 # The formats that put a signal in read(), rather than in configuration
 _READ_FORMATS = (
     Format.HINTED_SIGNAL,
@@ -174,7 +198,15 @@ async def _write_ndattribute_dtype_source(
         )
         for param in await published_params(source)
     ]
-    await source.nd_attributes_file.set(ndattributes_to_xml(ndattributes))
+    xml = ndattributes_to_xml(ndattributes)
+    capacity = await source.nd_attributes_file_nelm.get_value()
+    if len(xml) > capacity:
+        raise ValueError(
+            f"The NDAttributes XML for {source.nd_attributes_file.source} is "
+            f"{len(xml)} characters but the waveform holds {capacity}: "
+            f"raise XMLSIZE for this plugin in the IOC"
+        )
+    await source.nd_attributes_file.set(xml)
     return {
         ndattribute.name: (ndattribute.datatype.value, "")
         for ndattribute in ndattributes
@@ -274,8 +306,8 @@ class ADHDFDataLogic(UnboundedDataLogic[StreamResourceDataProvider]):
     :param path_provider: Callable that provides path information for file writing.
     :param writer: The NDFileHDFIO plugin instance.
     :param driver: The AreaDetector driver instance to extract NDAttributes from.
-    :param plugins: Additional NDPluginBaseIO instances to parse NDAttributes
-        from, in the XML the user set on each.
+    :param plugins: Every plugin of the detector, including those it creates,
+        to parse NDAttributes from, in the XML the user set on each.
     :param ndattribute_sources: Plugins to write the NDAttributes of, named after
         what they publish. A plugin in `plugins` that is also listed here is
         written, not parsed.
@@ -639,7 +671,8 @@ class ADDataFactory:
 
     :param build:
         Callable `(prefix, driver, plugins) → (named_plugin, data_logic)`,
-        given the detector's PV prefix, its driver and its extra plugins, where
+        given the detector's PV prefix, its driver and every plugin it has,
+        those the user passes and those it creates, where
         `named_plugin` is the attribute name and plugin the logic needs, or
         `None` if the logic takes the plugins it uses by reference.
     """
@@ -683,12 +716,15 @@ class ADDataFactory:
             plugin on at stage, so it serves every scan.
         :param ndattribute_sources: The plugins whose NDAttributes this writer
             writes into the file, as datasets named after what each publishes,
-            e.g. `det-stats-total`. The NDAttributes of the driver and
-            of the detector's `plugins` that are not listed are parsed from
-            their `nd_attributes_file` as the user set it.
+            e.g. `det-stats-total`. Each must be in the detector's `plugins`,
+            else `ValueError` is raised when the detector is made. The
+            NDAttributes of the driver and of the detector's plugins that are
+            not listed are parsed from their `nd_attributes_file` as the user
+            set it.
         """
 
         def build(prefix, driver, plugins):
+            _check_in_plugins(ndattribute_sources, plugins)
             writer = NDFileHDF5IO(prefix + writer_suffix)
             data_logic = ADHDFDataLogic(
                 array_description=_array_description(driver, array_description),
@@ -813,15 +849,16 @@ class ADDataFactory:
         switches decide which are published.
 
         :param plugin: The stats or ROI stat plugin, which must be in the
-            detector's device tree, e.g. in `plugins`. The same plugin can be
-            listed in `hdf(ndattribute_sources=)`.
+            detector's `plugins`, else `ValueError` is raised when the detector
+            is made. The same plugin can be listed in
+            `hdf(ndattribute_sources=)`.
         """
-        return ADDataFactory(
-            build=lambda prefix, driver, plugins: (
-                None,
-                TimeSeriesDataLogic(plugin),
-            )
-        )
+
+        def build(prefix, driver, plugins):
+            _check_in_plugins([plugin], plugins)
+            return None, TimeSeriesDataLogic(plugin)
+
+        return ADDataFactory(build=build)
 
 
 class ADWriterFactory(ADDataFactory):

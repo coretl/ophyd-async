@@ -99,8 +99,8 @@ class KinetixDetector(AreaDetector[KinetixDriverIO]):
     :param driver_suffix: Suffix for the driver PV, defaults to "cam1:"
     :param proc_suffix: If provided, an NDProcessIO plugin is created at this suffix
     :param plugins:
-        Additional areaDetector plugins to include. "proc" is reserved: use
-        proc_suffix instead.
+        areaDetector plugins to add, each registered as a readable. "proc" is
+        reserved: use proc_suffix instead.
     :param config_sigs: Additional signals to include in configuration
     :param name: Name for the detector device
     """
