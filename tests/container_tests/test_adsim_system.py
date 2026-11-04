@@ -505,6 +505,11 @@ def test_roistat_is_served_by_the_hdf_file_or_the_time_series(
             EnableDisable.ENABLE,
             hdf.enable_callbacks,
             EnableDisable.ENABLE if hdf_enabled else EnableDisable.DISABLE,
+            # The ROIStat plugin stamps its NDAttributes on the arrays it passes
+            # on, so the file only receives them downstream of it. The baseline
+            # puts the port back before the next test.
+            hdf.nd_array_port,
+            "DET.ROISTAT",
             left.name_,
             "Left",
             left.use,
