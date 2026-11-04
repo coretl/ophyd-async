@@ -55,3 +55,11 @@ async def test_nd_attributes_plan_stub_gives_correct_error(RE, arg):
         + "Expected NDAttributePv or NDAttributeParam.",
     ):
         RE(adcore.setup_ndattributes(stat, [arg]))
+
+
+def test_empty_description_is_left_out_of_the_xml():
+    param = adcore.NDAttributeParam(
+        name="det-sum", param="sum", datatype=adcore.NDAttributeDataType.DOUBLE
+    )
+    xml = ET.fromstring(adcore.ndattributes_to_xml([param]))
+    assert "description" not in xml[0].attrib

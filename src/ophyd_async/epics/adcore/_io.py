@@ -264,6 +264,15 @@ class NDROIIO(StandardReadable, NDPluginBaseIO):
     bin_z: A[SignalRW[int], PvSuffix.rbv("BinZ")]
 
 
+class NDStatsTimeSeriesIO(EpicsDevice):
+    """The NDPluginTimeSeries that NDPluginStats embeds, at the `TS:` sub-prefix.
+
+    Its `enable_callbacks` is separate from the stats plugin's own.
+    """
+
+    enable_callbacks: A[SignalRW[EnableDisable], PvSuffix.rbv("EnableCallbacks")]
+
+
 class NDStatsTSAcquireMode(StrictEnum):
     """Whether an NDPluginStats time series stops when full or wraps around.
 
@@ -334,9 +343,12 @@ class NDStatsIO(StandardReadable, NDPluginBaseIO):
     # starts it (writing 1 clears the arrays and resets ts_current_point to 0),
     # ts_current_point reports progress, writing 1 to ts_read posts the arrays
     # while acquiring, each ts_<statistic> holds the series of that statistic and
-    # ts_timestamp holds the per-point acquisition times.
+    # ts_timestamp holds the per-point acquisition times. The embedded plugin
+    # takes no points while ts_plugin.enable_callbacks is Disable, which is the
+    # IOC's default.
     # These are not registered as readables: the scalars serve read(), and the
     # arrays are consumed by StatsTimeSeriesDataLogic as event pages.
+    ts_plugin: A[NDStatsTimeSeriesIO, PvSuffix("TS:")]
     ts_acquire: A[SignalRW[bool], PvSuffix("TS:TSAcquire"), EpicsOptions(wait=non_zero)]
     ts_read: A[SignalW[bool], PvSuffix("TS:TSRead")]
     ts_num_points: A[SignalRW[int], PvSuffix("TS:TSNumPoints")]

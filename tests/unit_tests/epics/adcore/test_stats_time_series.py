@@ -66,6 +66,8 @@ async def test_start_sizes_and_arms_the_buffer(stats: adcore.NDStatsIO):
     assert await stats.ts_acquire_mode.get_value() == NDStatsTSAcquireMode.FIXED_LENGTH
     # ts_acquire=1 arms and clears the buffer
     assert await stats.ts_acquire.get_value() is True
+    # The embedded time series plugin takes no points while it is disabled
+    assert await stats.ts_plugin.enable_callbacks.get_value() == EnableDisable.ENABLE
     # Each series is named after its scalar
     datakeys = await provider.make_datakeys()
     assert list(datakeys) == PUBLISHED

@@ -10,7 +10,7 @@ from event_model.documents import PartialEventPage
 
 from ._datatypes import Array1D
 from ._signal import SignalR, SignalW, observe_value
-from ._utils import ConfinedModel, error_if_none, gather_dict, get_dtype
+from ._utils import ConfinedModel, error_if_none, get_dtype
 
 ARRAY_WAIT_TIMEOUT = 2.0
 """How long `EventPageDataProvider` waits for an array to hold the collections
@@ -34,6 +34,22 @@ async def _wait_for_length(signal: SignalR[Array1D[Any]], needed: int) -> Array1
             f"but {needed} were needed"
         ) from None
     return error_if_none(kept, f"{signal.source} was not observed")
+
+
+async def _gather_or_cancel_all(waits: Sequence[Awaitable[Any]]) -> list[Any]:
+    """Await `waits` in parallel.
+
+    If one raises, or this is cancelled, the rest are cancelled and closed before
+    the error propagates, so no wait outlives the call.
+    """
+    tasks = [asyncio.ensure_future(wait) for wait in waits]
+    try:
+        values = await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return values
 
 
 class DataProvider(ABC):
@@ -156,15 +172,13 @@ class EventPageDataProvider(PageableDataProvider):
         needed = self._origin + index * cpe
         # Wait for every array and the per-collection timestamps to hold the
         # collections counted, all at once
-        arrays, stamps = await asyncio.gather(
-            gather_dict(
-                {
-                    datakey: _wait_for_length(signal, needed)
-                    for datakey, signal in self.data.items()
-                }
-            ),
-            _wait_for_length(self.timestamps, needed),
+        *arrays_held, stamps = await _gather_or_cancel_all(
+            [
+                *(_wait_for_length(signal, needed) for signal in self.data.values()),
+                _wait_for_length(self.timestamps, needed),
+            ]
         )
+        arrays = dict(zip(self.data, arrays_held, strict=True))
         starts = [self._origin + event * cpe for event in range(self._published, index)]
         self._published = index
         # One timestamp per event: the acquisition time of its last collection

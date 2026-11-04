@@ -42,6 +42,7 @@ from ._io import (
     NDROIStatTSControl,
     NDStatistic,
     NDStatsIO,
+    NDStatsTimeSeriesIO,
     NDStatsTSAcquireMode,
 )
 from ._ndattribute import (
@@ -74,6 +75,7 @@ __all__ = [
     "NDROIIO",
     "NDStatistic",
     "NDStatsIO",
+    "NDStatsTimeSeriesIO",
     "NDStatsTSAcquireMode",
     "NDROIStatNIO",
     "NDROIStatIO",

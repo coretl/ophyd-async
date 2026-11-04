@@ -9,6 +9,7 @@ from ophyd_async.core import (
     DEFAULT_TIMEOUT,
     Array1D,
     BoundedDataLogic,
+    EnableDisable,
     EventPageDataProvider,
     SignalR,
     set_and_wait_for_value,
@@ -50,10 +51,11 @@ class StatsTimeSeriesDataLogic(BoundedDataLogic[EventPageDataProvider]):
     which erases the arrays and resets the current point before the detector's
     acquire logic drives the camera; its frames then feed the time series via
     NDArray callbacks. `start_provider` raises `ValueError` if the plugin's
-    arrays hold fewer points than the scan needs. Before each page it writes 1 to
-    ``ts_read``, so the plugin posts its arrays up to the current point. A detector
-    that writes a file should pull stats into the file as NDAttributes instead
-    (see `ADHDFDataLogic`).
+    arrays hold fewer points than the scan needs. It also enables the embedded
+    time series plugin, which the IOC starts disabled. Before each page it writes
+    1 to ``ts_read``, so the plugin posts its arrays up to the current point. A
+    detector that writes a file should pull stats into the file as NDAttributes
+    instead (see `ADHDFDataLogic`).
 
     :param stats: the stats plugin whose time series to read
     """
@@ -88,7 +90,9 @@ class StatsTimeSeriesDataLogic(BoundedDataLogic[EventPageDataProvider]):
             return None
         # Size the buffer and put it in fixed-length mode before arming it
         await _check_capacity(self.stats.ts_timestamp_nelm, num_collections)
+        # The embedded time series plugin ignores the stats until it is enabled
         await asyncio.gather(
+            self.stats.ts_plugin.enable_callbacks.set(EnableDisable.ENABLE),
             self.stats.ts_num_points.set(num_collections),
             self.stats.ts_acquire_mode.set(NDStatsTSAcquireMode.FIXED_LENGTH),
         )
