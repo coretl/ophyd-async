@@ -157,6 +157,7 @@ obj_ignore = [
     "ophyd_async.core._standard_base._StandardBase",
     "ophyd_async.core._flyable.PrepareT",
     "ophyd_async.core._flyable.CtxT",
+    "ophyd_async.core._detector.ProviderT",
     "ophyd_async.core._utils.P",
     "ophyd_async.core._utils.P.args",
     "ophyd_async.core._utils.P.kwargs",
@@ -171,9 +172,11 @@ obj_ignore = [
     "ophyd_async.epics.adcore._io.ADBaseIOT",
     "ophyd_async.epics.adcore._io.NDPluginBaseIOT",
     "ophyd_async.epics.adcore._io.NDPluginFileIOT",
-    "ophyd_async.epics.motor.MotorFlyCtx",
+    "ophyd_async.epics.motor.MotorPrepareCtx",
     "ophyd_async.epics.motor.MotorFlyableMovableLogic",
-    "ophyd_async.epics.pmac._pmac_trajectory.PmacFlyCtx",
+    "ophyd_async.epics.pmac._pmac_trajectory.PmacPrepareCtx",
+    "ophyd_async.sim._motor.SimMotorLogic",
+    "ophyd_async.sim._motor.SimMotorPrepareCtx",
     "ophyd_async.tango.core._base_device.T",
     "ophyd_async.tango.core._tango_transport.P",
     "ophyd_async.tango.core._tango_transport.R",
@@ -191,6 +194,16 @@ obj_ignore = [
     "0.001",
     "1.0",
     "bluesky.protocols.T_co",
+    # TypeVars documented on StandardFlyable, added in #1359
+    "PrepareT",
+    "CtxT",
+    # event_model publishes no intersphinx entry for this TypedDict
+    "event_model.documents.PartialEventPage",
+    # TypeVar for the plugin an ADDataFactory builds a data logic around
+    # The context DetectorLogic threads from prepare to unstage, private
+    # because nothing outside StandardDetector constructs or inspects one
+    "ophyd_async.core._detector.DetectorCtx",
+    "ophyd_async.core._detector._DetectorData",
 ]
 nitpick_ignore = []
 for var in obj_ignore:

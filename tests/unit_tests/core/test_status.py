@@ -413,3 +413,35 @@ async def test_forward_watcher_updates(moves: dict[str, list], combine: bool):
         # Updates from different children interleave, but each child's stay in order
         for name, values in moves.items():
             assert [u["current"] for u in updates if u["name"] == name] == values
+
+
+async def test_a_watcher_that_raises_is_logged_and_does_not_fail_the_status(
+    caplog: pytest.LogCaptureFixture,
+):
+    closed = False
+
+    async def updates():
+        nonlocal closed
+        try:
+            for value in range(3):
+                yield WatcherUpdate(current=value, initial=0, target=2, name="x")
+                await asyncio.sleep(0)
+        finally:
+            closed = True
+
+    status = WatchableAsyncStatus(updates())
+    bad = Mock(side_effect=ValueError("bad watcher"))
+    good = Mock()
+    status.watch(bad)
+    status.watch(good)
+
+    await status
+
+    assert status.success
+    assert closed
+    # Every update still reached both, and each failure was logged
+    assert bad.call_count == good.call_count == 3
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 3
+    assert errors[0].exc_info is not None
+    assert str(errors[0].exc_info[1]) == "bad watcher"

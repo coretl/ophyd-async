@@ -64,6 +64,7 @@ from ophyd_async.testing import (
     assert_reading,
     assert_value,
     partial_reading,
+    wait_for_pending_wakeups,
 )
 
 _array_vals = {
@@ -320,10 +321,15 @@ async def test_status_of_set_and_wait_for_value():
     set_signal = epics_signal_rw(int, "pva://signal")
     match_signal = epics_signal_rw(int, "pva://match_signal")
 
+    # Open by default; closed around one call to hold its set running after the
+    # match, so "status not done yet" does not depend on loop timing
+    set_may_finish = asyncio.Event()
+    set_may_finish.set()
+
     async def set_match_signal_after_delay(value: Any, **kwargs):
         await asyncio.sleep(0.2)
         await match_signal.set(value / 2)
-        await asyncio.sleep(0.001)
+        await set_may_finish.wait()
 
     await set_signal.connect(mock=True)
     await match_signal.connect(mock=True)
@@ -344,10 +350,12 @@ async def test_status_of_set_and_wait_for_value():
     status = await set_and_wait_for_other_value(set_signal, 32, match_signal, 16)
     assert status.done
 
+    set_may_finish.clear()
     status = await set_and_wait_for_other_value(
         set_signal, 30, match_signal, 15, wait_for_set_completion=False
     )
     assert not status.done
+    set_may_finish.set()
     await status
 
     with pytest.raises(asyncio.TimeoutError):
@@ -1344,3 +1352,36 @@ async def test_soft_signal_r_and_setter_with_poll_period():
 async def test_soft_signal_r_and_setter_poll_period_without_getter_raises():
     with pytest.raises(ValueError, match="poll_period requires a getter"):
         soft_signal_r_and_setter(float, poll_period=0.1)
+
+
+async def test_set_and_wait_for_other_value_cancelled_before_first_value():
+    set_signal = epics_signal_rw(int, "pva://signal", name="s")
+    match_signal = epics_signal_rw(int, "pva://match_signal", name="m")
+    await set_signal.connect(mock=True)
+    await match_signal.connect(mock=True)
+
+    async def never_yields(signal):
+        await asyncio.sleep(1000)
+        yield  # pragma: no cover - unreachable, just makes this a generator
+
+    with patch("ophyd_async.core._signal.observe_value", never_yields):
+        task = asyncio.create_task(
+            set_and_wait_for_other_value(set_signal, 1, match_signal, 20, timeout=None)
+        )
+        await wait_for_pending_wakeups()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    # The match wait it started must not outlive it
+    assert asyncio.all_tasks() == {asyncio.current_task()}
+
+
+async def test_wait_for_value_unsubscribes_before_it_returns():
+    signal = soft_signal_rw(int, initial_value=1)
+    await signal.connect()
+    with patch.object(
+        SignalR, "clear_sub", autospec=True, side_effect=SignalR.clear_sub
+    ) as clear_sub:
+        await wait_for_value(signal, 1, timeout=1)
+        # Not left for the abandoned generators to do when they are finalised
+        clear_sub.assert_called_once()

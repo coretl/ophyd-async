@@ -5,11 +5,11 @@ https://github.com/areaDetector/ADCore
 
 from ._acquire_logic import ADAcquireLogic, ADContAcqAcquireLogic
 from ._data_logic import (
+    ADDataFactory,
     ADHDFDataLogic,
     ADMultipartDataLogic,
     ADWriterFactory,
     NDArrayDescription,
-    PluginSignalDataLogic,
 )
 from ._detector import AreaDetector, ContAcqDetector
 from ._io import (
@@ -39,18 +39,25 @@ from ._io import (
     NDProcessIO,
     NDROIStatIO,
     NDROIStatNIO,
+    NDROIStatTSControl,
+    NDStatistic,
     NDStatsIO,
+    NDStatsTimeSeriesIO,
+    NDStatsTSAcquireMode,
 )
 from ._ndattribute import (
     NDAttributeDataType,
     NDAttributeParam,
     NDAttributePv,
     NDAttributePvDbrType,
+    NDAttributeSource,
     ndattributes_to_xml,
 )
-from ._plan_stubs import setup_ndattributes, setup_ndstats_sum
+from ._plan_stubs import setup_ndattributes
+from ._stats_time_series import ROIStatTimeSeriesDataLogic, StatsTimeSeriesDataLogic
 from ._trigger_logic import (
     ADContAcqTriggerLogic,
+    exposures_per_collection_from_filter,
     prepare_exposures,
     prepare_filter,
     trigger_info_from_driver,
@@ -66,9 +73,13 @@ __all__ = [
     "ADBaseIO",
     "NDPluginBaseIO",
     "NDROIIO",
+    "NDStatistic",
     "NDStatsIO",
+    "NDStatsTimeSeriesIO",
+    "NDStatsTSAcquireMode",
     "NDROIStatNIO",
     "NDROIStatIO",
+    "NDROIStatTSControl",
     "NDCBFlushOnSoftTrgMode",
     "NDCircularBuffIO",
     "ADFileWriteMode",
@@ -90,15 +101,18 @@ __all__ = [
     "prepare_filter",
     "ADContAcqTriggerLogic",
     "trigger_info_from_driver",
+    "exposures_per_collection_from_filter",
     # AcquireLogic
     "ADAcquireLogic",
     "ADContAcqAcquireLogic",
     # DataLogic
     "NDArrayDescription",
-    "PluginSignalDataLogic",
     "ADHDFDataLogic",
     "ADMultipartDataLogic",
+    "ADDataFactory",
     "ADWriterFactory",
+    "StatsTimeSeriesDataLogic",
+    "ROIStatTimeSeriesDataLogic",
     # Detector
     "AreaDetector",
     "ContAcqDetector",
@@ -107,7 +121,7 @@ __all__ = [
     "NDAttributePvDbrType",
     "NDAttributePv",
     "NDAttributeParam",
+    "NDAttributeSource",
     "ndattributes_to_xml",
     "setup_ndattributes",
-    "setup_ndstats_sum",
 ]

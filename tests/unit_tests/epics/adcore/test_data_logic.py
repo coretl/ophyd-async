@@ -1,3 +1,4 @@
+import asyncio
 import os
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from unittest.mock import ANY, call
@@ -10,10 +11,16 @@ from ophyd_async.core import (
     StaticFilenameProvider,
     StaticPathProvider,
     TriggerInfo,
+    get_mock,
     init_devices,
     set_mock_value,
 )
 from ophyd_async.epics import adcore, adsimdetector
+from ophyd_async.epics.adcore import (
+    ADHDFDataLogic,
+    ADMultipartDataLogic,
+    NDArrayDescription,
+)
 from ophyd_async.testing import assert_has_calls
 
 
@@ -24,7 +31,7 @@ async def hdf_det(
     async with init_devices(mock=True):
         detector = adsimdetector.SimDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             plugins={"stats": adcore.NDStatsIO("PREFIX:STATS:")},
         )
     set_mock_value(detector.driver.array_size_x, 1024)
@@ -33,7 +40,76 @@ async def hdf_det(
     return detector
 
 
+async def test_start_provider_opens_the_file_and_starts_capture(
+    hdf_det: adcore.AreaDetector[adcore.ADBaseIO],
+    static_path_provider: StaticPathProvider,
+):
+    writer = hdf_det.get_plugin("hdf", adcore.NDFileHDF5IO)
+    set_mock_value(writer.file_path_exists, True)
+    logic = ADHDFDataLogic(
+        array_description=NDArrayDescription(
+            shape_signals=[hdf_det.driver.array_size_y, hdf_det.driver.array_size_x],
+            data_type_signal=hdf_det.driver.data_type,
+            color_mode_signal=hdf_det.driver.color_mode,
+        ),
+        path_provider=static_path_provider,
+        driver=hdf_det.driver,
+        writer=writer,
+    )
+
+    assert await writer.capture.get_value() is False
+
+    made = await logic.start_provider("det", 1, 0.1, 0)
+    assert made is not None
+    assert await writer.capture.get_value() is True
+    assert await writer.file_name.get_value() != ""
+
+
+@pytest.mark.parametrize(
+    "always_enable,plugin_enabled,makes_provider",
+    [
+        # The default serves, whatever the plugin was set to
+        (True, EnableDisable.DISABLE, True),
+        # Following the plugin, a disabled one writes nothing...
+        (False, EnableDisable.DISABLE, False),
+        # ...and an enabled one still writes
+        (False, EnableDisable.ENABLE, True),
+    ],
+)
+async def test_hdf_follows_the_plugin_when_not_enabling_it(
+    hdf_det: adcore.AreaDetector[adcore.ADBaseIO],
+    static_path_provider: StaticPathProvider,
+    always_enable: bool,
+    plugin_enabled: EnableDisable,
+    makes_provider: bool,
+):
+    writer = hdf_det.get_plugin("hdf", adcore.NDFileHDF5IO)
+    set_mock_value(writer.file_path_exists, True)
+    set_mock_value(writer.enable_callbacks, plugin_enabled)
+    logic = ADHDFDataLogic(
+        array_description=NDArrayDescription(
+            shape_signals=[hdf_det.driver.array_size_y, hdf_det.driver.array_size_x],
+            data_type_signal=hdf_det.driver.data_type,
+            color_mode_signal=hdf_det.driver.color_mode,
+        ),
+        path_provider=static_path_provider,
+        driver=hdf_det.driver,
+        writer=writer,
+        always_enable=always_enable,
+    )
+
+    await logic.ensure_ready()
+    made = await logic.start_provider("det", 1, 0.1, 0)
+    assert (made is not None) is makes_provider
+    # Staging switches the plugin on only if told to, and sitting out writes nothing
+    assert await writer.capture.get_value() is makes_provider
+    assert await writer.enable_callbacks.get_value() is (
+        EnableDisable.ENABLE if makes_provider else EnableDisable.DISABLE
+    )
+
+
 async def test_hdf_writer_file_not_found(hdf_det: adcore.AreaDetector[adcore.ADBaseIO]):
+    await hdf_det.stage()
     with pytest.raises(
         FileNotFoundError, match=r"Path .* doesn't exist or not writable!"
     ):
@@ -46,7 +122,7 @@ async def test_hdf_writer_passes_parent_name_to_path_provider(tmp_path: Path):
     )
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
-            "PREFIX:", adcore.ADWriterFactory.hdf(pp), name="sim_detector"
+            "PREFIX:", adcore.ADDataFactory.hdf(pp), name="sim_detector"
         )
 
     writer = det.get_plugin("hdf", adcore.NDPluginFileIO)
@@ -65,6 +141,9 @@ async def test_prepare_hdf(
 ):
     writer = hdf_det.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
+    await hdf_det.stage()
+    # Only the calls after stage() are of interest
+    get_mock(hdf_det).reset_mock()
     await hdf_det.prepare(TriggerInfo(number_of_events=3))
     assert_has_calls(
         hdf_det,
@@ -78,7 +157,6 @@ async def test_prepare_hdf(
             call.hdf.lazy_open.put(True),
             call.hdf.swmr_mode.put(True),
             call.hdf.xml_file_name.put(""),
-            call.hdf.enable_callbacks.put(EnableDisable.ENABLE),
             call.hdf.create_directory.put(0),
             call.hdf.file_path.put(f"{static_path_provider().directory_path}{os.sep}"),
             call.hdf.file_name.put("ophyd_async_tests"),
@@ -95,8 +173,8 @@ async def test_prepare_hdf(
 @pytest.mark.parametrize(
     "factory_cls,extension",
     [
-        (adcore.ADWriterFactory.jpeg, ".jpg"),
-        (adcore.ADWriterFactory.tiff, ".tiff"),
+        (adcore.ADDataFactory.jpeg, ".jpg"),
+        (adcore.ADDataFactory.tiff, ".tiff"),
     ],
 )
 async def test_prepare_multipart(
@@ -107,6 +185,9 @@ async def test_prepare_multipart(
     name = factory_cls.__name__
     writer = det.get_plugin(name, adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
+    await det.stage()
+    # Only the calls after stage() are of interest
+    get_mock(det).reset_mock()
     await det.prepare(TriggerInfo(number_of_events=3))
     assert_has_calls(
         writer,
@@ -126,11 +207,66 @@ async def test_prepare_multipart(
 
 
 @pytest.mark.parametrize(
+    "flush_period,livetime,deadtime,exposures_per_collection,expected_frames_per_chunk",
+    [
+        # 0.5s flush / 0.01s period -> 50 frames per chunk (#1309)
+        (0.5, 0.01, 0.0, 1, 50),
+        # 0.5s flush / 0.05s period -> 10 frames per chunk
+        (0.5, 0.04, 0.01, 1, 10),
+        # A sub-frame flush period floors to a single frame per chunk
+        (0.001, 0.05, 0.0, 1, 1),
+        # 5 exposures of 0.01s make each frame written, so 0.5s holds 10
+        (0.5, 0.01, 0.0, 5, 10),
+    ],
+)
+async def test_hdf_chunk_sized_from_flush_period(
+    static_path_provider: StaticPathProvider,
+    flush_period: float,
+    livetime: float,
+    deadtime: float,
+    exposures_per_collection: int,
+    expected_frames_per_chunk: int,
+):
+    """A TriggerInfo flush_period sizes the HDF chunk from the collection period."""
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector(
+            "PREFIX:",
+            adcore.ADDataFactory.hdf(static_path_provider),
+            # Averages the exposures of each collection into one frame
+            proc_suffix="PROC:",
+        )
+    set_mock_value(det.driver.array_size_x, 1024)
+    set_mock_value(det.driver.array_size_y, 768)
+    set_mock_value(det.driver.data_type, adcore.ADBaseDataType.UINT16)
+    writer = det.get_plugin("hdf", adcore.NDPluginFileIO)
+    set_mock_value(writer.file_path_exists, True)
+    await det.stage()
+    await det.prepare(
+        TriggerInfo(
+            livetime=livetime,
+            deadtime=deadtime,
+            exposures_per_collection=exposures_per_collection,
+            number_of_events=3,
+            flush_period=flush_period,
+        )
+    )
+    assert await writer.num_frames_chunks.get_value() == expected_frames_per_chunk
+    await det.kickoff()
+    (sr, *_) = [doc async for doc in det.collect_asset_docs(3)]
+    await det.unstage()
+    assert sr[1]["parameters"]["chunk_shape"] == (
+        expected_frames_per_chunk,
+        768,
+        1024,
+    )
+
+
+@pytest.mark.parametrize(
     "factory_cls,is_hdf",
     [
-        (adcore.ADWriterFactory.hdf, True),
-        (adcore.ADWriterFactory.jpeg, False),
-        (adcore.ADWriterFactory.tiff, False),
+        (adcore.ADDataFactory.hdf, True),
+        (adcore.ADDataFactory.jpeg, False),
+        (adcore.ADDataFactory.tiff, False),
     ],
 )
 async def test_can_specify_different_uri_and_path(
@@ -151,7 +287,9 @@ async def test_can_specify_different_uri_and_path(
     set_mock_value(writer.file_path_exists, True)
     await det.stage()
     await det.prepare(TriggerInfo())
+    await det.kickoff()
     docs = [doc async for doc in det.collect_asset_docs(1)]
+    await det.unstage()
 
     # Make sure we set the write path to the directory_path attr from our path info
     assert await writer.file_path.get_value() == str(tmp_path) + os.sep
@@ -185,9 +323,9 @@ async def test_can_specify_different_uri_and_path(
 @pytest.mark.parametrize(
     "factory_cls,is_hdf",
     [
-        (adcore.ADWriterFactory.hdf, True),
-        (adcore.ADWriterFactory.jpeg, False),
-        (adcore.ADWriterFactory.tiff, False),
+        (adcore.ADDataFactory.hdf, True),
+        (adcore.ADDataFactory.jpeg, False),
+        (adcore.ADDataFactory.tiff, False),
     ],
 )
 async def test_can_override_uri_with_different_path_semantics(
@@ -208,7 +346,9 @@ async def test_can_override_uri_with_different_path_semantics(
     set_mock_value(writer.file_path_exists, True)
     await det.stage()
     await det.prepare(TriggerInfo())
+    await det.kickoff()
     docs = [doc async for doc in det.collect_asset_docs(1)]
+    await det.unstage()
 
     assert await writer.file_path.get_value() == f"{write_path}{expected_separator}"
     assert len(docs) == 2
@@ -241,6 +381,7 @@ async def test_stats_describe_raises_error_with_dbr_native(
 </Attributes>
 """,
     )
+    await hdf_det.stage()
     with pytest.raises(
         RuntimeError,
         match="NDAttribute mydetector-Temperature has dbrtype DBR_NATIVE,"
@@ -270,6 +411,7 @@ async def test_describe_different_color_modes(
     writer = hdf_det.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
     set_mock_value(hdf_det.driver.color_mode, color_mode)
+    await hdf_det.stage()
     if shape is RuntimeError:
         # Expected to fail for this mode
         with pytest.raises(
@@ -282,14 +424,12 @@ async def test_describe_different_color_modes(
         # Expected to give the right shape in the descriptor
         await hdf_det.prepare(TriggerInfo())
         describe = await hdf_det.describe()
-        assert describe == {
-            "detector": {
-                "dtype": "array",
-                "dtype_numpy": "<u2",
-                "external": "STREAM:",
-                "shape": shape,
-                "source": ANY,
-            },
+        assert describe["detector"] == {
+            "dtype": "array",
+            "dtype_numpy": "<u2",
+            "external": "STREAM:",
+            "shape": shape,
+            "source": ANY,
         }
 
 
@@ -297,14 +437,112 @@ async def test_3d_dataset_shape(hdf_det: adcore.AreaDetector[adcore.ADBaseIO]):
     writer = hdf_det.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
     set_mock_value(hdf_det.driver.array_size_z, 10)
+    await hdf_det.stage()
     await hdf_det.prepare(TriggerInfo())
     describe = await hdf_det.describe()
-    assert describe == {
-        "detector": {
-            "dtype": "array",
-            "dtype_numpy": "<u2",
-            "external": "STREAM:",
-            "shape": [1, 10, 768, 1024],
-            "source": ANY,
-        },
+    assert describe["detector"] == {
+        "dtype": "array",
+        "dtype_numpy": "<u2",
+        "external": "STREAM:",
+        "shape": [1, 10, 768, 1024],
+        "source": ANY,
     }
+
+
+async def _start_waits_for_a_zero_counter(logic, counter, previous: int = 5) -> None:
+    set_mock_value(counter, previous)
+    starting = asyncio.create_task(logic.start_provider("det", 1, 0.1, 0))
+    await asyncio.sleep(0.1)
+    # The IOC has not yet reset NumCaptured, so the detector's baseline would
+    # be the previous scan's count
+    assert not starting.done()
+    set_mock_value(counter, 0)
+    assert await asyncio.wait_for(starting, timeout=1) is not None
+
+
+async def test_hdf_start_waits_for_num_captured_to_read_zero(
+    hdf_det: adcore.AreaDetector[adcore.ADBaseIO],
+    static_path_provider: StaticPathProvider,
+):
+    writer = hdf_det.get_plugin("hdf", adcore.NDFileHDF5IO)
+    set_mock_value(writer.file_path_exists, True)
+    logic = ADHDFDataLogic(
+        array_description=NDArrayDescription(
+            shape_signals=[hdf_det.driver.array_size_y, hdf_det.driver.array_size_x],
+            data_type_signal=hdf_det.driver.data_type,
+            color_mode_signal=hdf_det.driver.color_mode,
+        ),
+        path_provider=static_path_provider,
+        driver=hdf_det.driver,
+        writer=writer,
+    )
+    await _start_waits_for_a_zero_counter(logic, writer.num_captured)
+
+
+async def test_multipart_start_waits_for_num_captured_to_read_zero(
+    static_path_provider: StaticPathProvider,
+):
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector(
+            "PREFIX:", adcore.ADDataFactory.tiff(static_path_provider)
+        )
+    writer = det.get_plugin("tiff", adcore.NDPluginFileIO)
+    set_mock_value(writer.file_path_exists, True)
+    logic = ADMultipartDataLogic(
+        array_description=NDArrayDescription(
+            shape_signals=[det.driver.array_size_y, det.driver.array_size_x],
+            data_type_signal=det.driver.data_type,
+            color_mode_signal=det.driver.color_mode,
+        ),
+        path_provider=static_path_provider,
+        writer=writer,
+        extension=".tiff",
+        mimetype="multipart/related;type=image/tiff",
+    )
+    await _start_waits_for_a_zero_counter(logic, writer.num_captured)
+
+
+async def test_hdf_writes_the_ndattributes_of_its_sources_and_parses_the_others(
+    static_path_provider: StaticPathProvider,
+):
+    listed = adcore.NDStatsIO("PREFIX:LISTED:")
+    unlisted = adcore.NDStatsIO("PREFIX:UNLISTED:")
+    async with init_devices(mock=True):
+        det = adsimdetector.SimDetector(
+            "PREFIX:",
+            adcore.ADDataFactory.hdf(
+                static_path_provider, ndattribute_sources=[listed]
+            ),
+            plugins={"listed": listed, "unlisted": unlisted},
+            name="det",
+        )
+    set_mock_value(det.driver.array_size_x, 1024)
+    set_mock_value(det.driver.array_size_y, 768)
+    set_mock_value(det.get_plugin("hdf", adcore.NDFileHDF5IO).file_path_exists, True)
+    # Opt the unlisted plugin out of being read, so only the file could name it
+    det.set_readable_format(unlisted, None)
+    for stats in (listed, unlisted):
+        set_mock_value(stats.enable_callbacks, EnableDisable.ENABLE)
+        set_mock_value(stats.compute_statistics, True)
+    # Names that the unlisted plugin was told to stamp are kept as they are
+    unlisted_attributes = [
+        adcore.NDAttributeParam(
+            name="free-form", param="TOTAL", datatype=adcore.NDAttributeDataType.DOUBLE
+        )
+    ]
+    set_mock_value(
+        unlisted.nd_attributes_file, adcore.ndattributes_to_xml(unlisted_attributes)
+    )
+    await det.stage()
+    await det.prepare(TriggerInfo())
+
+    datakeys = set(await det.describe())
+
+    assert "det-listed-total" in datakeys
+    assert "free-form" in datakeys
+    assert not [key for key in datakeys if key.startswith("det-unlisted")]
+    # The listed plugin's file was written, the unlisted plugin's left as set
+    assert "det-listed-total" in await listed.nd_attributes_file.get_value()
+    assert await unlisted.nd_attributes_file.get_value() == (
+        adcore.ndattributes_to_xml(unlisted_attributes)
+    )

@@ -5,20 +5,19 @@ import numpy as np
 
 from ophyd_async.core import (
     DEFAULT_TIMEOUT,
-    DetectorDataLogic,
     PathProvider,
     SignalR,
     SignalRW,
-    StreamableDataProvider,
     StreamResourceDataProvider,
     StreamResourceInfo,
+    UnboundedDataLogic,
     wait_for_value,
 )
 
 from ._io import OdinIO
 
 
-class OdinDataLogic(DetectorDataLogic):
+class OdinDataLogic(UnboundedDataLogic[StreamResourceDataProvider]):
     def __init__(
         self,
         path_provider: PathProvider,
@@ -30,10 +29,19 @@ class OdinDataLogic(DetectorDataLogic):
         self.odin = odin
         self.detector_bit_depth = detector_bit_depth
         self.pixel_mask = pixel_mask
+        self.collections_written = self.odin.fp.frames_written
 
-    async def prepare_unbounded(self, datakey_name: str) -> StreamableDataProvider:
+    async def start_provider(
+        self,
+        name: str,
+        collections_per_event: int,
+        collection_period: float,
+        flush_period: float,
+    ) -> StreamResourceDataProvider:
+        # Odin sizes its own chunks and writes for as long as it is told to, so
+        # the periods are not used here yet.
         # Work out where to write
-        path_info = self.path_provider(datakey_name)
+        path_info = self.path_provider(name)
         # Get the current bit depth
         datatype = f"uint{await self.detector_bit_depth.get_value()}"
         # Setup the HDF writer
@@ -62,12 +70,13 @@ class OdinDataLogic(DetectorDataLogic):
         # Must ensure frames_written reset
         # See issue: https://github.com/DiamondLightSource/fastcs-odin/issues/107
         await wait_for_value(self.odin.fp.frames_written, 0, timeout=DEFAULT_TIMEOUT)
-        # Return a provider that reflects what we have made
+        # The frame shape is only readable from the file processor once it is
+        # writing
         data_shape = await asyncio.gather(
             self.odin.fp.data_dims_0.get_value(), self.odin.fp.data_dims_1.get_value()
         )
         resource = StreamResourceInfo(
-            data_key=datakey_name,
+            data_key=name,
             shape=data_shape,
             chunk_shape=(1, *data_shape),
             dtype_numpy=np.dtype(datatype).str,
@@ -78,15 +87,15 @@ class OdinDataLogic(DetectorDataLogic):
             uri=f"{path_info.directory_uri}{filename}_000001.h5",
             resources=[resource],
             mimetype="application/x-hdf5",
-            collections_written_signal=self.odin.fp.frames_written,
+            collections_per_event=collections_per_event,
         )
 
-    async def stop(self) -> None:
+    async def ensure_stopped(self) -> None:
         await asyncio.gather(
             self.odin.fp.stop_writing.trigger(),
             self.odin.mw.stop_.trigger(),
         )
 
-    def get_hinted_fields(self, datakey_name: str) -> Sequence[str]:
+    def get_hinted_fields(self, name: str) -> Sequence[str]:
         # The main dataset is always hinted
-        return [datakey_name]
+        return [name]

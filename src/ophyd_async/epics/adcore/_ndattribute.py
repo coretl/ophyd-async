@@ -1,11 +1,12 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
+from typing import Protocol, runtime_checkable
 from xml.etree import ElementTree as ET
 
 import numpy as np
 
-from ophyd_async.core import SignalR
+from ophyd_async.core import SignalR, SignalRW
 
 
 class NDAttributeDataType(Enum):
@@ -45,6 +46,21 @@ class NDAttributeParam:
     description: str = ""  # A description that appears in the HDF file as an attribute
 
 
+@runtime_checkable
+class NDAttributeSource(Protocol):
+    """A plugin that says which NDAttributes it stamps on each frame.
+
+    An HDF writer that lists it in `ADDataFactory.hdf(ndattribute_sources=)`
+    writes them to the plugin's `nd_attributes_file` and makes a dataset of each.
+    """
+
+    nd_attributes_file: SignalRW[str]
+
+    def get_ndattributes(self) -> Sequence[NDAttributeParam]:
+        """The NDAttributes to stamp on each frame of this scan."""
+        ...
+
+
 def ndattributes_to_xml(
     ndattributes: Sequence[NDAttributeParam | NDAttributePv],
 ) -> str:
@@ -52,31 +68,30 @@ def ndattributes_to_xml(
     root = ET.Element("Attributes")
     for ndattribute in ndattributes:
         if isinstance(ndattribute, NDAttributeParam):
-            ET.SubElement(
-                root,
-                "Attribute",
-                name=ndattribute.name,
-                type="PARAM",
-                source=ndattribute.param,
-                addr=str(ndattribute.addr),
-                datatype=ndattribute.datatype.name,
-                description=ndattribute.description,
-            )
+            fields = {
+                "name": ndattribute.name,
+                "type": "PARAM",
+                "source": ndattribute.param,
+                "addr": str(ndattribute.addr),
+                "datatype": ndattribute.datatype.name,
+            }
         elif isinstance(ndattribute, NDAttributePv):
-            ET.SubElement(
-                root,
-                "Attribute",
-                name=ndattribute.name,
-                type="EPICS_PV",
+            fields = {
+                "name": ndattribute.name,
+                "type": "EPICS_PV",
                 # Strip protocol prefix if present
-                source=ndattribute.signal.source.split("://")[-1],
-                dbrtype=ndattribute.dbrtype.name,
-                description=ndattribute.description,
-            )
+                "source": ndattribute.signal.source.split("://")[-1],
+                "dbrtype": ndattribute.dbrtype.name,
+            }
         else:
             raise ValueError(
                 f"Invalid type for ndattributes: {type(ndattribute)}. "
                 "Expected NDAttributePv or NDAttributeParam."
             )
+        # An empty description is left out: the plugin's XML waveform is only
+        # 256 to 1024 characters, and each one costs 15 of them
+        if ndattribute.description:
+            fields["description"] = ndattribute.description
+        ET.SubElement(root, "Attribute", fields)
     xml_text = ET.tostring(root, encoding="unicode")
     return xml_text

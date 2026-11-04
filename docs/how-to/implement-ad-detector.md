@@ -28,19 +28,24 @@ Implement methods for each trigger mode your detector supports:
 
 Only implement the prepare methods for trigger modes your detector actually supports. The detector will automatically report which trigger types are available based on which methods are implemented.
 
-If the detector has configuration values that should be captured in the scan then implement:
-- `config_sigs()` - Return the set of signals that should appear in read_configuration()
+Configuration values that should be captured in the scan are declared on the IO class,
+with [](#StandardReadableFormat.CONFIG_SIGNAL), exactly as on any other
+[](#StandardReadable) — the trigger logic does not nominate them.
 
 If you support external triggering you should also implement:
-- `get_deadtime(config_values)` - Calculate the minimum time between exposures based on configuration values
+- `get_deadtime(config_values)` - Calculate the minimum time between exposures. It is
+  given the value of *every* signal the detector reports as configuration, so a signal
+  it needs must be declared with [](#StandardReadableFormat.CONFIG_SIGNAL).
 
 To preserve hardware state in plans like [`bp.count`](#bluesky.plans.count) and
 [`bps.trigger_and_read`](#bluesky.plan_stubs.trigger_and_read) that call `trigger()`
 without a preceding `prepare()`, implement:
 - `default_trigger_info()` - Return the [](#TriggerInfo) to use for the implicit
-  prepare. For AD detectors call `await trigger_info_from_driver(self.driver.num_images)` to
-  read back the current `num_images` from the driver rather than resetting it to 1. You should also pass a process 
-  plugin to `trigger_info_from_driver()` if your detector uses one to produce multiple exposures per collection.
+  prepare. For AD detectors call `await trigger_info_from_driver(self.driver)` to
+  read back the current `num_images`, `acquire_time` and `acquire_period` from the
+  driver rather than resetting them. Also pass the process plugin,
+  `trigger_info_from_driver(self.driver, self.process_plugin)`, if your detector uses
+  one to produce multiple exposures per collection.
 
 
 
@@ -61,8 +66,7 @@ For example, for ADAravis:
 ## Use ADAcquireLogic or create custom Acquire Logic
 
 Most areaDetectors can use the standard [](#adcore.ADAcquireLogic) which handles starting and stopping acquisition via the driver's `acquire` signal. If your detector requires custom acquisition behaviour (e.g., waiting for a specific ready signal), create a [](#DetectorAcquireLogic) subclass with:
-- `start_acquiring()` - Start acquisition
-- `wait_for_idle()` - Wait until acquisition is complete
+- `acquire()` - An async generator that starts acquisition, yields once armed, then waits until acquisition is complete
 - `ensure_stopped()` - Stop acquisition
 - `ensure_ready()` - (optional) Override if stage-time reset differs from `ensure_stopped`
 
@@ -75,7 +79,7 @@ Now you need to make an [](#adcore.AreaDetector) subclass that uses your IO and 
 
 The constructor parameters should include:
 - `prefix`: The PV prefix for the driver and plugins
-- `*writer_factories`: Zero or more [](#adcore.ADWriterFactory) instances (e.g. `ADWriterFactory.hdf(path_provider)`); omit entirely to skip file writing
+- `*writer_factories`: Zero or more [](#adcore.ADDataFactory) instances (e.g. `ADDataFactory.hdf(path_provider)`); omit entirely to skip file writing
 - `driver_suffix`: A PV suffix for the driver, defaulting to `"cam1:"`
 - `plugins`: An optional mapping of {`name`: [](#adcore.NDPluginBaseIO)} for additional plugins
 - `config_sigs`: Additional signals to report in configuration (beyond the standard acquire_time and acquire_period)
@@ -90,10 +94,10 @@ For example, for ADAravis:
 
 The `AreaDetector` baseclass will:
 - Store the driver as `self.driver`
-- Call `add_detector_logics()` to register your trigger and arm logic
+- Build a [](#DetectorLogic) from your trigger and arm logic and return it from `logic`
 - Create and register a data logic for file writing for each factory in `writer_factories`
 - Add configuration signals (driver.acquire_time, driver.acquire_period, and any you specify)
-- Store any plugins as attributes on the detector
+- Store any plugins as attributes on the detector, and register each as a readable, so the signals it declares appear in `read()`, `read_configuration()` and `hints` (opt one out with `det.set_readable_format(plugin, None)`)
 
 ## Declare the public interface
 
@@ -112,15 +116,53 @@ For example, for ADAravis:
 
 ## Add multiple data streams (optional)
 
-The composition-based architecture makes it possible to add multiple data outputs to a detector. After creating the detector, you can call `add_detector_logics()` to add additional data sources:
+The composition-based architecture makes it possible to give a detector several data outputs. The file writer factories ([](#adcore.ADDataFactory.hdf), `jpeg` and `tiff`) take `always_enable`: `True` (the default) switches the plugin on at `stage()`, `False` follows the plugin's `EnableCallbacks` PV, so a writer whose plugin is off sits out and another output can serve the scan. A stats time series has no `always_enable`: its plugin's switches decide, as below. A writer you leave `always_enable=True` is switched on once, at `stage()`; the factory does not write `EnableCallbacks` again at `prepare()`.
 
 ### Reading stats plugins alongside file writing
-```python
-from ophyd_async.epics.adcore import PluginSignalDataLogic
+A plugin in `plugins` is registered as a readable, so a detector with a stats plugin needs no
+data logic to read it: the plugin declares which of its signals are read and hinted, and they
+appear in `read()` alongside whatever the file writer produces.
 
-det = adaravis.AravisDetector(prefix, path_provider)
-# Add stats total as a readable signal in events
-det.add_detector_logics(adcore.PluginSignalDataLogic(det.driver, det.stats.total))
+```python
+from ophyd_async.core import StandardReadableFormat as Format
+
+stats = adcore.NDStatsIO("PREFIX:STATS:")
+det = adaravis.AravisDetector(
+    prefix, adcore.ADDataFactory.hdf(path_provider), plugins={"stats": stats}
+)
+# Read a statistic the plugin does not read by default
+det.set_readable_format(stats.sigma, Format.UNCACHED_SIGNAL)
+```
+
+Each statistic of an [](#adcore.NDStatsIO) has one name, that of its scalar signal (`det-stats-total` here), however it is published:
+
+- as the scalar, read once per event, when nothing else serves it
+- as a stats time series ([](#adcore.ADDataFactory.stats_time_series)), for a detector that writes no file
+- as an NDAttribute in the HDF file, for each plugin listed in the `ndattribute_sources` of [](#adcore.ADDataFactory.hdf)
+
+The time series and the HDF writer take the plugin by reference, so make it first and put it in `plugins`. Only the factories of file writers make a plugin of their own.
+
+```python
+stats = adcore.NDStatsIO("PREFIX:STATS:")
+det = adaravis.AravisDetector(
+    prefix,
+    adcore.ADDataFactory.hdf(path_provider, ndattribute_sources=[stats]),
+    adcore.ADDataFactory.stats_time_series(stats),
+    plugins={"stats": stats},
+)
+```
+
+The highest of these that serves a scan replaces the others, and the plugin's hints stay. Which statistics are used is set on the plugin, not in Python: a statistic is used if the plugin's `EnableCallbacks` and its group's compute switch (`compute_statistics` or `compute_centroid`) are on at `stage()`, and it has a read format on the plugin. A scalar whose statistic is off is left out of `read()`, `describe()` and `hints`.
+
+`stage()` records these switches and each plugin's `nd_array_port`, once, and `prepare()` raises if any of them has changed since, so set them before staging, for example in a settings file. The chain of plugins that feeds a plugin is not checked: how it is wired at `stage()` is up to you. The process plugin of a trigger logic and the circular buffer of a continuously acquiring detector are switched on by their logic, so they are not recorded. An [](#adcore.NDROIStatIO) works the same way, with the `use` and `Name` of each channel recorded too: its channels are readable children of the plugin, named `<plugin name>-<Name PV>` at `stage()`, so a channel called Blue has the total `det-roistat-Blue-total`. Its time series ([](#adcore.ADDataFactory.roistat_time_series)) works like the stats time series, publishing each used channel's statistics under the same names.
+
+```python
+roistat = adcore.NDROIStatIO("PREFIX:ROISTAT:", num_channels=3)
+det = adaravis.AravisDetector(
+    prefix,
+    adcore.ADDataFactory.roistat_time_series(roistat),
+    plugins={"roistat": roistat},
+)
 ```
 
 ### Multiple HDF writers for different ROIs
@@ -129,7 +171,7 @@ roi1 = adcore.NDROIIO("PREFIX:ROI1:")
 roi2 = adcore.NDROIIO("PREFIX:ROI2:")
 det = adaravis.AravisDetector(
     "PREFIX:",
-    adcore.ADWriterFactory.hdf(
+    adcore.ADDataFactory.hdf(
         path_provider,
         writer_suffix="HDF1:",
         writer_name="hdf1",
@@ -140,7 +182,7 @@ det = adaravis.AravisDetector(
             color_mode_signal=driver.color_mode,
         ),
     ),
-    adcore.ADWriterFactory.hdf(
+    adcore.ADDataFactory.hdf(
         path_provider,
         writer_suffix="HDF2:",
         writer_name="hdf2",
@@ -175,10 +217,11 @@ Example implementation:
 driver = adcore.ADBaseIO("PREFIX:DRV:")
 cb_plugin = adcore.NDCircularBuffIO("PREFIX:CB1:")
 det = adcore.AreaDetector(
-    driver=driver,
+    driver,
+    "PREFIX:",
+    adcore.ADDataFactory.hdf(path_provider),
     acquire_logic=adcore.ADContAcqAcquireLogic(driver, cb_plugin),
     trigger_logic=adcore.ADContAcqTriggerLogic(driver, cb_plugin),
-    path_provider=path_provider,
     plugins={"cb1": cb_plugin},
 )
 ```

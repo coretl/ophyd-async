@@ -22,7 +22,7 @@ from ophyd_async.epics.core import PvSuffix
 from .adcore import (
     ADAcquireLogic,
     ADBaseIO,
-    ADWriterFactory,
+    ADDataFactory,
     AreaDetector,
     NDPluginBaseIO,
     NDProcessIO,
@@ -99,9 +99,6 @@ class VimbaTriggerLogic(DetectorTriggerLogic):
     process_plugin: NDProcessIO | None
     override_deadtime: float | None = None
 
-    def config_sigs(self) -> set[SignalR]:
-        return {self.driver.model}
-
     def get_deadtime(self, config_values: SignalDict) -> float:
         return get_camera_deadtime(
             model=config_values[self.driver.model],
@@ -136,9 +133,7 @@ class VimbaTriggerLogic(DetectorTriggerLogic):
         await prepare_filter(self.process_plugin, exposures_per_collection)
 
     async def default_trigger_info(self):
-        return await trigger_info_from_driver(
-            self.driver.num_images, self.process_plugin
-        )
+        return await trigger_info_from_driver(self.driver, self.process_plugin)
 
 
 class VimbaDetector(AreaDetector[VimbaDriverIO]):
@@ -159,7 +154,7 @@ class VimbaDetector(AreaDetector[VimbaDriverIO]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         driver_suffix="cam1:",
         override_deadtime: float | None = None,
         proc_suffix: str | None = None,
