@@ -273,4 +273,4 @@ The detector will now support:
 - Step scanning with `trigger()` 
 - Fly scanning with `kickoff()` and `complete()`
 - Automatic handling of file writing and StreamAsset document emission
-- Configuration signal reporting based on your trigger logic
+- Configuration signal reporting from the signals declared with `StandardReadableFormat.CONFIG_SIGNAL` on the IO classes
