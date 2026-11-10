@@ -5,9 +5,9 @@ Date: 2026-01-20
 
 Accepted
 
-Partly superseded by [ADR 0023](0023-runtime-readable-format.md), which made
-`StandardDetector` a `StandardReadable` and removed the `prepare_single` tier along with
-`ReadableDataProvider`.
+Partly superseded by [ADR 0024](0024-standard-detector-is-a-standard-readable.md), which
+made `StandardDetector` a `StandardReadable` and removed the `prepare_single` tier along
+with `ReadableDataProvider`.
 
 ## Context
 
