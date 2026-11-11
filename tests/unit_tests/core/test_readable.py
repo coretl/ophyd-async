@@ -155,7 +155,7 @@ def test_standard_readable_add_children_context_manager():
     # Can't use assert_called_once_with() as the order of items returned from
     # internal dict comprehension is not guaranteed
     mock.assert_called_once()
-    assert set(mock.call_args.args[0]) == {sr.a, sr.b, sr.c}
+    assert set(mock.call_args.args[0]) == {sr.a, sr.b, sr.c}  # pyright: ignore[reportAttributeAccessIssue]
 
 
 @pytest.mark.parametrize(
@@ -198,7 +198,7 @@ def test_standard_readable_add_children_cm_filters_non_devices():
     # Can't use assert_called_once_with() as the order of items returned from
     # internal dict comprehension is not guaranteed
     mock.assert_called_once()
-    assert set(mock.call_args.args[0]) == {sr.a, sr.b}
+    assert set(mock.call_args.args[0]) == {sr.a, sr.b}  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def assert_sr_has_attrs(sr: StandardReadable, expected_attrs: dict[str, tuple]):
@@ -302,7 +302,7 @@ def test_standard_readable_hinted_signal():
     assert sr._read_funcs == (signal_r.read,)
     assert sr._stage_funcs == (signal_r.stage,)
     assert sr._unstage_funcs == (signal_r.unstage,)
-    assert sr._has_hints[0].device == signal_r
+    assert sr._has_hints[0].device == signal_r  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def test_standard_readable_uncached_signal():
@@ -310,7 +310,7 @@ def test_standard_readable_uncached_signal():
     sr = StandardReadable()
     sr.add_readables([signal_r], Format.UNCACHED_SIGNAL)
     assert sr._describe_funcs == (signal_r.describe,)
-    assert sr._read_funcs[0].signal == signal_r
+    assert sr._read_funcs[0].signal == signal_r  # pyright: ignore[reportFunctionMemberAccess]
 
 
 def test_standard_readable_hinted_uncached_signal():
@@ -318,8 +318,8 @@ def test_standard_readable_hinted_uncached_signal():
     sr = StandardReadable()
     sr.add_readables([signal_r], Format.HINTED_UNCACHED_SIGNAL)
     assert sr._describe_funcs == (signal_r.describe,)
-    assert sr._read_funcs[0].signal == signal_r
-    assert sr._has_hints[0].device == signal_r
+    assert sr._read_funcs[0].signal == signal_r  # pyright: ignore[reportFunctionMemberAccess]
+    assert sr._has_hints[0].device == signal_r  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def test_standard_readable_add_children_multi_nested():
