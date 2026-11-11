@@ -188,7 +188,7 @@ async def test_error_handling_value_errors(caplog):
 
 class BadDatatypeDevice(Device):
     def __init__(self, name: str = "") -> None:
-        self.sig = epics_signal_rw(object, "", "")
+        self.sig = epics_signal_rw(object, "", "")  # pyright: ignore[reportArgumentType]
         super().__init__(name)
 
 
@@ -328,13 +328,13 @@ async def test_format_error_string_input():
         RuntimeError,
         match=("Unexpected type `<class 'int'>` expected `str` or `dict`"),
     ):
-        not_connected = NotConnectedError(123)
+        not_connected = NotConnectedError(123)  # pyright: ignore[reportArgumentType]
         str(not_connected)
 
     with pytest.raises(
         RuntimeError, match=("Unexpected type `<class 'int'>`, expected an Exception")
     ):
-        not_connected = NotConnectedError({"test": 123})
+        not_connected = NotConnectedError({"test": 123})  # pyright: ignore[reportArgumentType]
         str(not_connected)
 
 
@@ -452,7 +452,7 @@ async def test_cancelled_error_message_for_gather_is_populated_on_timeout(
 
 
 def _contains_message(e: BaseException, expected_message: str) -> bool:
-    return (
+    return bool(
         expected_message is None
         or (e.args and re.search(expected_message, e.args[0]))
         or (e.__cause__ and _contains_message(e.__cause__, expected_message))
