@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from collections.abc import (
-    AsyncIterator,
+    AsyncGenerator,
     Awaitable,
     Callable,
     Iterable,
@@ -13,7 +13,7 @@ from collections.abc import (
 )
 from dataclasses import dataclass
 from enum import Enum, EnumMeta, StrEnum
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from typing import (
     Any,
     Generic,
@@ -232,7 +232,7 @@ def cached_get_origin(tp: Any) -> Any:
     return get_origin(tp)
 
 
-def get_dtype(datatype: type) -> np.dtype:
+def get_dtype(datatype: Any) -> np.dtype:
     """Get the runtime dtype from a numpy ndarray type annotation.
 
     ```python
@@ -307,8 +307,11 @@ def get_enum_cls(datatype: type | None) -> type[EnumTypes] | None:
     return None
 
 
-def get_unique(values: dict[str, T], types: str) -> T:
+def get_unique(values: Mapping[str, T], types: str) -> T:
     """If all values are the same, return that value, otherwise raise TypeError.
+
+    :param values: the values by label
+    :param types: what the values are, for the error message
 
     ```python
     >>> get_unique({"a": 1, "b": 1}, "integers")
@@ -339,9 +342,20 @@ async def merge_gathered_dicts(
     combined_read = await merge_gathered_dicts(s.read() for s in signals)
     ```
     """
+    return merge_dicts(await asyncio.gather(*coros))
+
+
+def merge_dicts(dicts: Iterable[Mapping[str, T]]) -> dict[str, T]:
+    """Merge dictionaries, raising if any key appears in more than one.
+
+    :example:
+    ```python
+    merged = merge_dicts([{"a": 1}, {"b": 2}])
+    ```
+    """
     ret: dict[str, T] = {}
     duplicates: list[str] = []
-    for result in await asyncio.gather(*coros):
+    for result in dicts:
         for key in result:
             if key in ret:
                 duplicates.append(key)
@@ -437,9 +451,68 @@ def non_zero(value):
     return int(value) != 0
 
 
-async def _wait_for(coro: Awaitable[T], timeout: float | None, source: str) -> T:
+def abstract_cached_property(func: Callable[[Any], T]) -> cached_property[T]:
+    """A `cached_property` that `ABCMeta` treats as abstract.
+
+    Stack it on `@abstractmethod`. pyright reads the `@abstractmethod`, but
+    `functools.cached_property` does not forward its `__isabstractmethod__`, so at
+    runtime the class would stay instantiable. Setting the flag on the descriptor
+    makes the metaclass collect it, so a subclass that does not implement it
+    raises `TypeError` at instantiation.
+
+    :param func: The abstract property body.
+    """
+    prop = cached_property(func)
+    prop.__isabstractmethod__ = True  # type: ignore[attr-defined]
+    return prop
+
+
+async def cancel_and_wait(*tasks: asyncio.Task[Any]) -> None:
+    """Cancel `tasks`, wait for all of them to end, then raise the first error.
+
+    The first error is that of the first task, in the order given, that ended
+    with one. If the caller is cancelled while waiting, it keeps waiting until
+    every task has ended, then raises its own `CancelledError` instead.
+
+    :param tasks: The tasks to cancel.
+    """
+    for task in tasks:
+        task.cancel()
+    caller_cancel: asyncio.CancelledError | None = None
+    while not all(task.done() for task in tasks):
+        try:
+            await asyncio.wait(tasks)
+        except asyncio.CancelledError as cancel:
+            caller_cancel = cancel
+    # Retrieve every error, even when re-raising a cancel, so asyncio never logs
+    # "Task exception was never retrieved"
+    errors = [task.exception() for task in tasks if not task.cancelled()]
+    first_error = next((error for error in errors if error is not None), None)
+    if caller_cancel is not None:
+        raise caller_cancel
+    if first_error is not None:
+        raise first_error
+
+
+async def _gather_or_cancel_all(waits: Sequence[Awaitable[Any]]) -> list[Any]:
+    """Await `waits` in parallel.
+
+    If one raises, or this is cancelled, the rest are cancelled and waited for
+    before the error propagates, so no wait outlives the call.
+    """
+    tasks = [asyncio.ensure_future(wait) for wait in waits]
     try:
-        return await asyncio.wait_for(coro, timeout)
+        values = await asyncio.gather(*tasks)
+    finally:
+        await cancel_and_wait(*tasks)
+    return values
+
+
+async def _wait_for(coro: Awaitable[T], timeout: float | None, source: str) -> T:
+    """Await `coro`, raising `TimeoutError(source)` if it takes over `timeout`."""
+    try:
+        async with asyncio.timeout(timeout):
+            return await coro
     except TimeoutError as exc:
         raise TimeoutError(source) from exc
 
@@ -449,7 +522,7 @@ async def simulate_move(
     new_position: float,
     velocity: float,
     acceleration_time: float,
-) -> AsyncIterator[float]:
+) -> AsyncGenerator[float, None]:
     """Yield positions at 10Hz along a trapezoidal velocity profile.
 
     :param old_position: Where the move starts.

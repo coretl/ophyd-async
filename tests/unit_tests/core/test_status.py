@@ -413,3 +413,27 @@ async def test_forward_watcher_updates(moves: dict[str, list], combine: bool):
         # Updates from different children interleave, but each child's stay in order
         for name, values in moves.items():
             assert [u["current"] for u in updates if u["name"] == name] == values
+
+
+@pytest.mark.parametrize("with_stop", [False, True])
+async def test_a_watcher_that_raises_fails_the_status_and_closes_the_iterator(
+    with_stop: bool,
+):
+    closed = False
+
+    async def updates():
+        nonlocal closed
+        try:
+            yield WatcherUpdate(current=0, initial=0, target=2, name="x")
+        finally:
+            closed = True
+
+    stop = asyncio.get_running_loop().create_future() if with_stop else None
+    status = WatchableAsyncStatus(updates(), stop=stop)
+    status.watch(Mock(side_effect=ValueError("bad watcher")))
+
+    with pytest.raises(ValueError, match="bad watcher"):
+        await status
+
+    assert not status.success
+    assert closed
