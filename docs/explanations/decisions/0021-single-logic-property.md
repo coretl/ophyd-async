@@ -8,6 +8,9 @@ Accepted
 
 Supersedes part of ADR 0017, which introduced `movable_logic`.
 
+`StandardDetector` has since become a `StandardFlyable` whose `logic` is a `DetectorLogic`
+(see [ADR 0026](0026-detector-is-a-flyable.md)).
+
 ## Context
 
 A Device that both moves and flies had to expose the same logic object twice. `Motor`

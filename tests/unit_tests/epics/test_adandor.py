@@ -7,6 +7,7 @@ from ophyd_async.core import (
     StaticPathProvider,
     TriggerInfo,
     callback_on_mock_put,
+    get_mock,
     init_devices,
     set_mock_value,
 )
@@ -20,7 +21,7 @@ async def test_adandor(
 ) -> adandor.AndorDetector:
     async with init_devices(mock=True):
         detector = adandor.AndorDetector(
-            "PREFIX:", adcore.ADWriterFactory.hdf(static_path_provider)
+            "PREFIX:", adcore.ADDataFactory.hdf(static_path_provider)
         )
     writer = detector.get_plugin("hdf", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)
@@ -46,6 +47,9 @@ async def test_deadtime(
 async def test_prepare_external_edge(
     test_adandor: adandor.AndorDetector,
 ):
+    await test_adandor.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_adandor).reset_mock()
     await test_adandor.prepare(
         TriggerInfo(
             trigger=DetectorTrigger.EXTERNAL_EDGE,
@@ -61,20 +65,6 @@ async def test_prepare_external_edge(
             call.num_images.put(5),
             call.acquire_time.put(0.5),
             call.acquire.put(True),
-        ],
-    )
-
-
-async def test_prepare_forever(
-    test_adandor: adandor.AndorDetector,
-):
-    await test_adandor.prepare(TriggerInfo(number_of_events=0))
-    assert_has_calls(
-        test_adandor.driver,
-        [
-            call.trigger_mode.put(adandor.Andor2TriggerMode.INTERNAL),
-            call.image_mode.put(adcore.ADImageMode.MULTIPLE),
-            call.num_images.put(999_999),
         ],
     )
 

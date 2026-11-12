@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from ophyd_async.core import PathProvider, StandardDetector
+from functools import cached_property
+
+from ophyd_async.core import DetectorLogic, PathProvider, StandardDetector
 from ophyd_async.fastcs.core import fastcs_connector
 
 from ._acquire_logic import PandaAcquireLogic
@@ -23,9 +25,13 @@ class HDFPanda(CommonPandaBlocks, StandardDetector):
         error_hint = f"Is PandABlocks-ioc at least version {MINIMUM_PANDA_IOC}?"
         # This has to be first so we make self.pcap
         connector = fastcs_connector(prefix, self, error_hint)
-        self.add_detector_logics(
-            PandaTriggerLogic(self.pcap),
-            PandaAcquireLogic(self.pcap),
-            PandaHDFDataLogic(path_provider, self.data),
-        )
+        self._path_provider = path_provider
         super().__init__(name=name, connector=connector)
+
+    @cached_property
+    def logic(self) -> DetectorLogic:
+        return DetectorLogic(
+            trigger=PandaTriggerLogic(self.pcap),
+            acquire=PandaAcquireLogic(self.pcap),
+            data=[PandaHDFDataLogic(self._path_provider, self.data)],
+        )
