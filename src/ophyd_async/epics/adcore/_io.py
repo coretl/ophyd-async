@@ -1,16 +1,26 @@
+import asyncio
+import re
+from collections import Counter
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Annotated as A
 from typing import TypeVar
 
+import numpy as np
+
 from ophyd_async.core import (
+    Array1D,
     DeviceVector,
     EnableDisable,
     SignalR,
     SignalRW,
+    SignalW,
     StandardReadable,
     StrictEnum,
     SubsetEnum,
     SupersetEnum,
     TriggerableCommand,
+    gather_dict,
     non_zero,
 )
 from ophyd_async.core import StandardReadableFormat as Format
@@ -60,6 +70,8 @@ class NDArrayBaseIO(EpicsDevice):
     port_name: A[SignalR[str], PvSuffix("PortName_RBV")]
     unique_id: A[SignalR[int], PvSuffix("UniqueId_RBV")]
     nd_attributes_file: A[SignalRW[str], PvSuffix("NDAttributesFile")]
+    # The capacity of the NDAttributesFile waveform (the IOC's XMLSIZE)
+    nd_attributes_file_nelm: A[SignalR[int], PvSuffix("NDAttributesFile.NELM")]
 
     # The array_size_x/y/z signals are used when outputting an NDArray
     # (i.e. from a driver)
@@ -156,6 +168,22 @@ class ADBaseIO(StandardReadable, NDArrayBaseIO):
 NDPluginBaseIOT = TypeVar("NDPluginBaseIOT", bound="NDPluginBaseIO")
 
 
+@dataclass(frozen=True)
+class NDParam:
+    """A scalar an NDPlugin computes, in each form the plugin produces it.
+
+    :param signal: the scalar value for the last frame, its name is the datakey
+    :param param: the asyn parameter, the source of an NDAttribute
+    :param addr: the asyn address of the parameter
+    :param ts_signal: the value for each frame of the plugin's time series, if any
+    """
+
+    signal: SignalR[float]
+    param: str
+    addr: int = 0
+    ts_signal: SignalR[Array1D[np.float64]] | None = None
+
+
 class NDPluginBaseIO(NDArrayBaseIO):
     """Base class from which plugins are derived.
 
@@ -168,16 +196,15 @@ class NDPluginBaseIO(NDArrayBaseIO):
     nd_array_address: A[SignalRW[int], PvSuffix.rbv("NDArrayAddress")]
     queue_size: A[SignalRW[int], PvSuffix.rbv("QueueSize")]
 
+    async def get_enabled_params(self) -> Sequence[NDParam] | None:
+        """The params this plugin's switches have on, when it is enabled.
 
-async def plugin_is_enabled(plugin: NDPluginBaseIO) -> bool:
-    """Whether a plugin is switched on, so is receiving NDArrays.
-
-    The nearest thing to "is this plugin in the chain": a plugin with callbacks
-    disabled certainly is not, though an enabled one may still have its
-    `nd_array_port` pointed somewhere else. Parsing the whole plugin graph was
-    rejected in ADR 0023 as too large.
-    """
-    return await plugin.enable_callbacks.get_value() is EnableDisable.ENABLE
+        `None`, as here, means its switches gate none of its read signals.
+        Otherwise `AreaDetector`'s suppress logic hides the read signals not among
+        them, and `published_params` keeps those with a read format. Only a plugin
+        whose switches no logic writes may gate its read signals.
+        """
+        return None
 
 
 class NDROIIO(StandardReadable, NDPluginBaseIO):
@@ -196,6 +223,26 @@ class NDROIIO(StandardReadable, NDPluginBaseIO):
     bin_x: A[SignalRW[int], PvSuffix.rbv("BinX")]
     bin_y: A[SignalRW[int], PvSuffix.rbv("BinY")]
     bin_z: A[SignalRW[int], PvSuffix.rbv("BinZ")]
+
+
+class NDStatsTimeSeriesIO(EpicsDevice):
+    """The NDPluginTimeSeries that NDPluginStats embeds, at the `TS:` sub-prefix.
+
+    Its `enable_callbacks` is separate from the stats plugin's own.
+    """
+
+    enable_callbacks: A[SignalRW[EnableDisable], PvSuffix.rbv("EnableCallbacks")]
+
+
+class NDStatsTSAcquireMode(StrictEnum):
+    """Whether an NDPluginStats time series stops when full or wraps around.
+
+    Mirrors the `TSAcquireMode` record in
+    ADCore/db/NDPluginTimeSeries.template.
+    """
+
+    FIXED_LENGTH = "Fixed length"
+    CIRCULAR_BUFFER = "Circ. buffer"
 
 
 class NDStatsIO(StandardReadable, NDPluginBaseIO):
@@ -226,6 +273,43 @@ class NDStatsIO(StandardReadable, NDPluginBaseIO):
     sigma: A[SignalR[float], PvSuffix("Sigma_RBV")]
     total: A[SignalR[float], PvSuffix("Total_RBV"), Format.HINTED_UNCACHED_SIGNAL]
     net: A[SignalR[float], PvSuffix("Net_RBV")]
+    # Time series. NDStats delegates its time series to an embedded
+    # NDPluginTimeSeries instance, so the controls live under an inner "TS:"
+    # prefix while the per-statistic arrays are named by NDStats itself at the
+    # plugin's own prefix. ts_num_points sizes the buffer, ts_acquire erases and
+    # starts it (writing 1 clears the arrays and resets ts_current_point to 0),
+    # ts_current_point reports progress, writing 1 to ts_read posts the arrays
+    # while acquiring, each ts_<statistic> holds the series of that statistic and
+    # ts_timestamp holds the per-point acquisition times. The embedded plugin
+    # takes no points while ts_plugin.enable_callbacks is Disable, which is the
+    # IOC's default.
+    # These are not registered as readables: the scalars serve read(), and the
+    # arrays are consumed by TimeSeriesDataLogic as event pages.
+    ts_plugin: A[NDStatsTimeSeriesIO, PvSuffix("TS:")]
+    ts_acquire: A[SignalRW[bool], PvSuffix("TS:TSAcquire"), EpicsOptions(wait=non_zero)]
+    ts_read: A[SignalW[bool], PvSuffix("TS:TSRead")]
+    ts_num_points: A[SignalRW[int], PvSuffix("TS:TSNumPoints")]
+    ts_current_point: A[SignalR[int], PvSuffix("TS:TSCurrentPoint")]
+    ts_acquiring: A[SignalR[bool], PvSuffix("TS:TSAcquiring")]
+    ts_acquire_mode: A[SignalRW[NDStatsTSAcquireMode], PvSuffix.rbv("TS:TSAcquireMode")]
+    ts_min_value: A[SignalR[Array1D[np.float64]], PvSuffix("TSMinValue")]
+    ts_min_x: A[SignalR[Array1D[np.float64]], PvSuffix("TSMinX")]
+    ts_min_y: A[SignalR[Array1D[np.float64]], PvSuffix("TSMinY")]
+    ts_max_value: A[SignalR[Array1D[np.float64]], PvSuffix("TSMaxValue")]
+    ts_max_x: A[SignalR[Array1D[np.float64]], PvSuffix("TSMaxX")]
+    ts_max_y: A[SignalR[Array1D[np.float64]], PvSuffix("TSMaxY")]
+    ts_mean_value: A[SignalR[Array1D[np.float64]], PvSuffix("TSMeanValue")]
+    ts_sigma: A[SignalR[Array1D[np.float64]], PvSuffix("TSSigma")]
+    ts_total: A[SignalR[Array1D[np.float64]], PvSuffix("TSTotal")]
+    ts_net: A[SignalR[Array1D[np.float64]], PvSuffix("TSNet")]
+    ts_centroid_x: A[SignalR[Array1D[np.float64]], PvSuffix("TSCentroidX")]
+    ts_centroid_y: A[SignalR[Array1D[np.float64]], PvSuffix("TSCentroidY")]
+    ts_sigma_x: A[SignalR[Array1D[np.float64]], PvSuffix("TSSigmaX")]
+    ts_sigma_y: A[SignalR[Array1D[np.float64]], PvSuffix("TSSigmaY")]
+    ts_sigma_xy: A[SignalR[Array1D[np.float64]], PvSuffix("TSSigmaXY")]
+    ts_timestamp: A[SignalR[Array1D[np.float64]], PvSuffix("TSTimestamp")]
+    # How many points the time series arrays hold (the waveforms' NELM)
+    ts_timestamp_nelm: A[SignalR[int], PvSuffix("TSTimestamp.NELM")]
     # Centroid statistics
     compute_centroid: A[
         SignalRW[bool], PvSuffix.rbv("ComputeCentroid"), Format.CONFIG_SIGNAL
@@ -254,6 +338,40 @@ class NDStatsIO(StandardReadable, NDPluginBaseIO):
     hist_min: A[SignalRW[float], PvSuffix.rbv("HistMin"), Format.CONFIG_SIGNAL]
     hist_max: A[SignalRW[float], PvSuffix.rbv("HistMax"), Format.CONFIG_SIGNAL]
 
+    async def get_enabled_params(self) -> Sequence[NDParam]:
+        """The statistics of the groups computed."""
+        basic, centroid = await asyncio.gather(
+            self.compute_statistics.get_value(),
+            self.compute_centroid.get_value(),
+        )
+        computed: list[NDParam] = []
+        if basic:
+            computed += [
+                NDParam(self.min_value, "MIN_VALUE", ts_signal=self.ts_min_value),
+                NDParam(self.min_x, "MIN_X", ts_signal=self.ts_min_x),
+                NDParam(self.min_y, "MIN_Y", ts_signal=self.ts_min_y),
+                NDParam(self.max_value, "MAX_VALUE", ts_signal=self.ts_max_value),
+                NDParam(self.max_x, "MAX_X", ts_signal=self.ts_max_x),
+                NDParam(self.max_y, "MAX_Y", ts_signal=self.ts_max_y),
+                NDParam(self.mean_value, "MEAN_VALUE", ts_signal=self.ts_mean_value),
+                NDParam(self.sigma, "SIGMA_VALUE", ts_signal=self.ts_sigma),
+                NDParam(self.total, "TOTAL", ts_signal=self.ts_total),
+                NDParam(self.net, "NET", ts_signal=self.ts_net),
+            ]
+        if centroid:
+            computed += [
+                NDParam(
+                    self.centroid_x, "CENTROIDX_VALUE", ts_signal=self.ts_centroid_x
+                ),
+                NDParam(
+                    self.centroid_y, "CENTROIDY_VALUE", ts_signal=self.ts_centroid_y
+                ),
+                NDParam(self.sigma_x, "SIGMAX_VALUE", ts_signal=self.ts_sigma_x),
+                NDParam(self.sigma_y, "SIGMAY_VALUE", ts_signal=self.ts_sigma_y),
+                NDParam(self.sigma_xy, "SIGMAXY_VALUE", ts_signal=self.ts_sigma_xy),
+            ]
+        return computed
+
 
 class NDROIStatNIO(StandardReadable, EpicsDevice):
     """Defines the parameters for a single ROI used for statistics calculation.
@@ -278,23 +396,116 @@ class NDROIStatNIO(StandardReadable, EpicsDevice):
         SignalR[float], PvSuffix("MeanValue_RBV"), Format.HINTED_UNCACHED_SIGNAL
     ]
     total: A[SignalR[float], PvSuffix("Total_RBV"), Format.HINTED_UNCACHED_SIGNAL]
+    net: A[SignalR[float], PvSuffix("Net_RBV")]
+    # Time series of this ROI, filled while the plugin's time series acquires.
+    # These are not registered as readables: the scalars serve read(), and the
+    # arrays are consumed by TimeSeriesDataLogic as event pages.
+    ts_min_value: A[SignalR[Array1D[np.float64]], PvSuffix("TSMinValue")]
+    ts_max_value: A[SignalR[Array1D[np.float64]], PvSuffix("TSMaxValue")]
+    ts_mean_value: A[SignalR[Array1D[np.float64]], PvSuffix("TSMeanValue")]
+    ts_total: A[SignalR[Array1D[np.float64]], PvSuffix("TSTotal")]
+    ts_net: A[SignalR[Array1D[np.float64]], PvSuffix("TSNet")]
+    ts_timestamp: A[SignalR[Array1D[np.float64]], PvSuffix("TSTimestamp")]
+    # How many points the time series arrays hold (the waveforms' NELM)
+    ts_timestamp_nelm: A[SignalR[int], PvSuffix("TSTimestamp.NELM")]
 
 
-class NDROIStatIO(NDPluginBaseIO):
+class NDROIStatTSControl(StrictEnum):
+    """What a write to the time series control of an `NDROIStatIO` does.
+
+    Mirrors the `TSControl` record in ADCore/db/NDROIStat.template.
+    """
+
+    ERASE_START = "Erase/Start"
+    START = "Start"
+    STOP = "Stop"
+    READ = "Read"
+    ERASE = "Erase"
+
+
+class NDROIStatIO(StandardReadable, NDPluginBaseIO):
     """Plugin for calculating basic statistics for multiple ROIs.
 
     Each ROI is implemented as an instance of NDROIStatNIO,
-    and the collection of ROIs is held as a DeviceVector.
+    and the collection of ROIs is held as a DeviceVector. Each channel is
+    registered as a [](#StandardReadableFormat.CHILD) readable, so it reads the
+    scalars of its own formats.
+
+    `stage()` renames each channel to
+    `<plugin name>-<Name PV>`, with characters other than letters, digits and
+    underscores in the PV replaced by underscores, or the channel number if the
+    PV is empty.
 
     This mirrors the interface provided by ADCore/db/NDROIStat.template.
     See HTML docs at https://areadetector.github.io/areaDetector/ADCore/NDPluginROIStat.html
     """
 
+    # Time series control, shared by every channel. Writing ERASE_START to
+    # ts_control erases the arrays of every channel, resets ts_current_point to 0
+    # and starts acquiring, which stops by itself after ts_num_points frames.
+    ts_control: A[SignalRW[NDROIStatTSControl], PvSuffix("TSControl")]
+    ts_num_points: A[SignalRW[int], PvSuffix("TSNumPoints")]
+    ts_current_point: A[SignalR[int], PvSuffix("TSCurrentPoint")]
+    ts_acquiring: A[SignalR[bool], PvSuffix("TSAcquiring")]
+
     def __init__(self, prefix, num_channels=8, with_pvi=False, name=""):
-        self.channels = DeviceVector(
-            {i: NDROIStatNIO(f"{prefix}{i}:") for i in range(1, num_channels + 1)}
-        )
+        self._stage_funcs += (self.__on_stage,)
+        with self.add_children_as_readables():
+            self.channels = DeviceVector(
+                {i: NDROIStatNIO(f"{prefix}{i}:") for i in range(1, num_channels + 1)}
+            )
         super().__init__(prefix, with_pvi, name)
+
+    async def __on_stage(self) -> None:
+        """Name each channel after its Name PV, raising if two would clash."""
+        pv_names = await gather_dict(
+            {number: c.name_.get_value() for number, c in self.channels.items()}
+        )
+        names = {
+            number: re.sub(r"[^A-Za-z0-9_]", "_", pv_name) if pv_name else str(number)
+            for number, pv_name in pv_names.items()
+        }
+        counts = Counter(names.values())
+        clashes = sorted(name for name, count in counts.items() if count > 1)
+        if clashes:
+            raise ValueError(
+                f"{self.name}: more than one channel is named {clashes}, "
+                "so change the Name PV of all but one"
+            )
+        if self.name:
+            for number, name in names.items():
+                self.channels[number].set_name(
+                    f"{self.name}{self._child_name_separator}{name}",
+                    child_name_separator=self._child_name_separator,
+                )
+
+    async def get_enabled_params(self) -> Sequence[NDParam]:
+        """The params of each used channel."""
+        uses = await gather_dict(
+            {number: c.use.get_value() for number, c in self.channels.items()}
+        )
+        used = [number for number, use in uses.items() if use]
+        return [
+            param
+            for number in used
+            for param in self._channel_params(number, self.channels[number])
+        ]
+
+    def _channel_params(self, number: int, channel: NDROIStatNIO) -> list[NDParam]:
+        """The params of a channel, at its asyn address."""
+        addr = number - 1
+        return [
+            NDParam(channel.min_value, "ROISTAT_MIN_VALUE", addr, channel.ts_min_value),
+            NDParam(channel.max_value, "ROISTAT_MAX_VALUE", addr, channel.ts_max_value),
+            NDParam(
+                channel.mean_value,
+                "ROISTAT_MEAN_VALUE",
+                addr,
+                channel.ts_mean_value,
+            ),
+            NDParam(channel.total, "ROISTAT_TOTAL", addr, channel.ts_total),
+            NDParam(channel.net, "ROISTAT_NET", addr, channel.ts_net),
+        ]
 
 
 class NDCBFlushOnSoftTrgMode(StrictEnum):

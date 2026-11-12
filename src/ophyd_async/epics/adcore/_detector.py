@@ -1,4 +1,6 @@
-from collections.abc import Mapping, Sequence
+import asyncio
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from functools import cached_property
 from typing import Generic
 
@@ -6,15 +8,18 @@ from ophyd_async.core import (
     BoundedDataLogic,
     DetectorAcquireLogic,
     DetectorLogic,
+    DetectorSuppressLogic,
     DetectorTriggerLogic,
+    ReadableEntry,
     SignalR,
     StandardDetector,
+    StandardReadable,
     UnboundedDataLogic,
 )
 from ophyd_async.core import StandardReadableFormat as Format
 
 from ._acquire_logic import ADContAcqAcquireLogic
-from ._data_logic import ADDataFactory
+from ._data_logic import ADDataFactory, _read_signals, plugin_is_enabled
 from ._io import (
     ADBaseIO,
     ADBaseIOT,
@@ -26,7 +31,62 @@ from ._io import (
 from ._trigger_logic import ADContAcqTriggerLogic
 
 
+def _readable_plugins(
+    entries: Iterator[ReadableEntry],
+) -> Iterator[NDPluginBaseIO]:
+    """The plugins registered as CHILD readables, down the readable tree."""
+    for entry in entries:
+        match entry:
+            case (StandardReadable() as child, Format.CHILD):
+                if isinstance(child, NDPluginBaseIO):
+                    yield child
+                yield from _readable_plugins(child.get_readable_formats())
+            case _:
+                pass
+
+
+@dataclass(frozen=True)
+class _PluginSuppressLogic(DetectorSuppressLogic):
+    """Hides the read signals of each readable plugin that its switches have off.
+
+    :param get_readable_formats: the detector's, the top of the readable tree
+        that holds the plugins to ask
+    """
+
+    get_readable_formats: Callable[[], Iterator[ReadableEntry]]
+
+    async def hidden_datakeys(self) -> set[str]:
+        plugins = set(_readable_plugins(self.get_readable_formats()))
+        hidden = await asyncio.gather(*(_hidden(plugin) for plugin in plugins))
+        return set().union(*hidden)
+
+
+async def _hidden(plugin: NDPluginBaseIO) -> set[str]:
+    """All the read signals of a disabled plugin, else those not enabled."""
+    enabled, params = await asyncio.gather(
+        plugin_is_enabled(plugin), plugin.get_enabled_params()
+    )
+    read = {signal.name for signal in _read_signals(plugin)}
+    if not enabled:
+        hidden = read
+    elif params is None:
+        hidden = set()
+    else:
+        hidden = read - {param.signal.name for param in params}
+    return hidden
+
+
 class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
+    """An areaDetector driver, with its plugins and the data logics that serve it.
+
+    Every plugin of the detector is an attribute and registered as a `CHILD`
+    readable, as is each writer a factory makes. The factories are given all the
+    plugins, to parse their NDAttributes.
+
+    :param plugins: All the detector's plugins by attribute name, those the
+        caller passes and those the detector creates, such as its process plugin.
+    """
+
     def __init__(
         self,
         driver: ADBaseIOT,
@@ -44,28 +104,34 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
                 self._set_unique(plugin_name, plugin)
         self._trigger_logic = trigger_logic
         self._acquire_logic = acquire_logic
+        plugin_list = list(plugins.values()) if plugins else []
+        writers: list[NDPluginBaseIO] = []
         data_logics: list[BoundedDataLogic | UnboundedDataLogic] = []
         if writer_factories:
             if prefix is None:
                 raise ValueError("prefix is required when writer_factories are given")
-            names = [f.writer_name for f in writer_factories]
+            made = [
+                factory.build(prefix, driver, plugin_list)
+                for factory in writer_factories
+            ]
+            named_writers = [named for named, _ in made if named is not None]
+            names = [attr for attr, _ in named_writers]
             if len(names) != len(set(names)):
                 duplicates = sorted({n for n in names if names.count(n) > 1})
                 raise ValueError(
                     f"Duplicate writer_name(s) in writer_factories: {duplicates}"
                 )
-            plugin_list = list(plugins.values()) if plugins else []
-            for factory in writer_factories:
-                writer, data_logic = factory(prefix, driver, plugin_list)
-                self._set_unique(factory.writer_name, writer)
-                data_logics.append(data_logic)
+            for attr, writer in named_writers:
+                self._set_unique(attr, writer)
+                writers.append(writer)
+            data_logics = [data_logic for _, data_logic in made]
         self._data_logics = tuple(data_logics)
         # The driver is always wired up, so register it whole and let ADBaseIO
-        # declare which of its signals are configuration. Plugins are
-        # deliberately *not* registered: a detector normally carries far more
-        # plugins than are wired into the chain, so opt in per plugin with
-        # `set_readable_format(det.stats, Format.CHILD)` instead.
+        # declare which of its signals are configuration. So is each of the
+        # plugins and writers, whose own formats declare what they read.
         self.set_readable_format(self.driver, Format.CHILD)
+        for plugin in (*plugin_list, *writers):
+            self.set_readable_format(plugin, Format.CHILD)
         for signal in config_sigs:
             self.set_readable_format(signal, Format.CONFIG_SIGNAL)
         super().__init__(name=name)
@@ -84,6 +150,7 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
             trigger=self._trigger_logic,
             acquire=self._acquire_logic,
             data=self._data_logics,
+            suppress=_PluginSuppressLogic(self.get_readable_formats),
         )
 
     def get_plugin(
@@ -144,8 +211,8 @@ class ContAcqDetector(AreaDetector[ADBaseIOT]):
     :param num_frames_to_skip:
         Incoming frames to skip before each CB gate opening, defaults to 0
     :param plugins:
-        Additional areaDetector plugins to include. "proc" is reserved: use
-        proc_suffix instead. So is the name cb_plugin_name.
+        areaDetector plugins to add, each registered as a readable. "proc" is
+        reserved: use proc_suffix instead. So is the name cb_plugin_name.
     :param config_sigs: Additional signals to include in configuration
     :param name: Name for the detector device
     """

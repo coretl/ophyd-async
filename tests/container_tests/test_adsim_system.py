@@ -28,13 +28,17 @@ live here rather than under tests/system_tests - see this directory's conftest.
 
 import os
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 from unittest.mock import ANY, patch
+from urllib.parse import urlparse
 
 import bluesky.plan_stubs as bps
 import bluesky.plans as bp
 import bluesky.preprocessors as bpp
+import h5py
+import numpy as np
 import pytest
 from aioca import purge_channel_caches
 from bluesky.run_engine import RunEngine
@@ -50,6 +54,7 @@ from event_model.documents import (
 )
 
 from ophyd_async.core import (
+    EnableDisable,
     StaticFilenameProvider,
     StaticPathProvider,
     TriggerInfo,
@@ -67,6 +72,9 @@ from ophyd_async.plan_stubs import (
 )
 
 TIMEOUT = 60.0  # allow extra time for docker compose
+
+# The ROIStat plugin is on its own prefix in example-services' bl01t-di-cam-01 IOC
+ROISTAT_PREFIX = "BL01T-EA-TST-02:"
 
 # Applies to every test here, not just the one that used to carry it: they all
 # need the IOC, and the IOC needs services that are not set up on Windows.
@@ -114,6 +122,59 @@ def adsim(RE: RunEngine, shared_tmp_path: Path) -> AreaDetector:
         )
 
     return adsim
+
+
+@pytest.fixture
+def adsimstat(RE: RunEngine) -> AreaDetector:
+    """A writer-less SimDetector whose only data logic is the STAT time series.
+
+    The stats plugin is given to the factory by reference, and listed in `plugins`
+    so it is in the detector's tree. It writes no file: the NDPluginStats time
+    series is a fixed-length buffer read back as event pages, so this exercises
+    the bounded data-logic tier against a real IOC (the
+    `ADDataFactory.time_series` factory and NDStatsIO's `TS:*` signals).
+    """
+    stats = adcore.NDStatsIO("BL01T-DI-CAM-01:STAT:")
+    with init_devices():
+        adsimstat = SimDetector(
+            "BL01T-DI-CAM-01:",
+            adcore.ADDataFactory.time_series(stats),
+            driver_suffix="DET:",
+            plugins={"stats": stats},
+        )
+
+    return adsimstat
+
+
+@pytest.fixture
+def adsimroi(RE: RunEngine, shared_tmp_path: Path) -> AreaDetector:
+    """A SimDetector with an HDF writer and the ROIStat time series.
+
+    The ROIStat plugin is in `plugins` so it is in the detector's tree, and is
+    given to both factories by reference: the writer stamps its NDAttributes into
+    the file as `ndattribute_sources`, and the time series reads its `TS*` arrays.
+    Which of them serves the statistics is decided by the HDF plugin's
+    EnableCallbacks at the first prepare() (`always_enable=False`). Note its prefix
+    is not the camera's: example-services puts the ROIStat plugin on
+    BL01T-EA-TST-02.
+    """
+    provider = StaticPathProvider(StaticFilenameProvider("adsimroi"), shared_tmp_path)
+    roistat = adcore.NDROIStatIO(f"{ROISTAT_PREFIX}ROISTAT:", num_channels=4)
+    with init_devices():
+        adsimroi = SimDetector(
+            "BL01T-DI-CAM-01:",
+            adcore.ADDataFactory.hdf(
+                provider,
+                writer_suffix="HDF5:",
+                always_enable=False,
+                ndattribute_sources=[roistat],
+            ),
+            adcore.ADDataFactory.time_series(roistat),
+            driver_suffix="DET:",
+            plugins={"roistat": roistat},
+        )
+
+    return adsimroi
 
 
 @pytest.fixture(autouse=True)
@@ -358,6 +419,184 @@ def test_software_triggering(
             num_events={"primary": 2},
         ),
     ]
+
+
+@pytest.mark.timeout(TIMEOUT + 15.0)
+def test_stats_time_series_step_scan(
+    RE: RunEngine, adsimstat: SimDetector, bl01t_di_cam_01: None
+) -> None:
+    """A writer-less stats detector arms the TS buffer, acquires, and reads the
+    per-frame Total series back as a single event holding the whole array.
+
+    This drives the real STAT plugin's `TS:*` records end to end: prepare sizes
+    and arms `TS:TSNumPoints`/`TS:TSAcquire`, the sim driver takes the frames,
+    and read() slices `TSTotal` (timestamped by `TSTimestamp`) into a
+    single 5-element reading named after the `Total_RBV` scalar.
+    """
+    collections = 5
+    stats = adsimstat.get_plugin("stats", adcore.NDStatsIO)
+    # The plugin's switches at the first prepare() decide which statistics are published
+    RE(
+        bps.mv(
+            stats.enable_callbacks,
+            EnableDisable.ENABLE,
+            stats.compute_statistics,
+            True,
+        )
+    )
+
+    @bpp.stage_decorator([adsimstat])
+    @bpp.run_decorator()
+    def prepare_then_count() -> MsgGenerator[None]:
+        # prepare() must come after stage(), which resets the detector
+        yield from bps.prepare(
+            adsimstat,
+            TriggerInfo(collections_per_event=collections, livetime=0.1),
+            wait=True,
+        )
+        yield from bps.trigger_and_read([adsimstat])
+
+    named_docs: list[tuple[str, DocumentType]] = []
+    RE(prepare_then_count(), lambda name, doc: named_docs.append((name, doc)))
+
+    # A bounded logic exposes collect_pages, never collect_asset_docs.
+    assert hasattr(adsimstat, "collect_pages")
+    assert not hasattr(adsimstat, "collect_asset_docs")
+
+    descriptor = next(doc for name, doc in named_docs if name == "descriptor")
+    data_key = descriptor["data_keys"]["adsimstat-stats-total"]
+    assert data_key["shape"] == [collections]
+    assert data_key["dtype"] == "array"
+    assert data_key["dtype_numpy"] == "<f8"
+
+    event = next(doc for name, doc in named_docs if name == "event")
+    # read() derives one reading whose value is the whole TS:TSTotal buffer.
+    values = event["data"]["adsimstat-stats-total"]
+    assert len(values) == collections
+    assert all(isinstance(v, float) for v in values)
+    # The reading is timestamped from TS:TSTimestamp, so it is populated.
+    assert event["timestamps"]["adsimstat-stats-total"] >= 0
+
+
+@pytest.mark.timeout(TIMEOUT + 30.0)
+@pytest.mark.parametrize("hdf_enabled", [True, False])
+def test_roistat_is_served_by_the_hdf_file_or_the_time_series(
+    RE: RunEngine, adsimroi: SimDetector, bl01t_di_cam_01: None, hdf_enabled: bool
+) -> None:
+    """The HDF plugin's EnableCallbacks picks who serves the ROIStat statistics.
+
+    On, the HDF writer stamps each used channel's NDAttributes into the file and
+    the time series sits out: the documents are stream resources and datums, with
+    no event pages. Off, the time series serves them as event pages and there is
+    no file. Either way a key is `<plugin name>-<Name PV>-<stat>` for each used
+    channel, and an unused channel publishes nothing.
+
+    Relies on ADCore/db/NDROIStat.template and NDROIStatN.template (read, not run
+    here): `Name`, `Use`, `MinX`.. are per channel; `TSControl` Erase/Start sizes
+    and arms a fixed-length buffer of `TSNumPoints` that the plugin fills one
+    point per array it processes; `TSControl` Read posts the arrays so far.
+    """
+    frames = 5
+    roistat = adsimroi.get_plugin("roistat", adcore.NDROIStatIO)
+    hdf = adsimroi.get_plugin("hdf", adcore.NDFileHDF5IO)
+    # The switches at the first prepare() decide who serves, and the Name PVs name
+    # the keys, so
+    # all of it is settled before the stage that records it. Channel 3 is unused.
+    left, centre, unused = (roistat.channels[number] for number in (1, 2, 3))
+    RE(
+        bps.mv(
+            roistat.enable_callbacks,
+            EnableDisable.ENABLE,
+            hdf.enable_callbacks,
+            EnableDisable.ENABLE if hdf_enabled else EnableDisable.DISABLE,
+            # The ROIStat plugin stamps its NDAttributes on the arrays it passes
+            # on, so the file only receives them downstream of it. The baseline
+            # puts the port back before the next test.
+            hdf.nd_array_port,
+            "DET.ROISTAT",
+            left.name_,
+            "Left",
+            left.use,
+            True,
+            left.min_x,
+            0,
+            left.min_y,
+            0,
+            left.size_x,
+            512,
+            left.size_y,
+            1024,
+            centre.name_,
+            "Centre",
+            centre.use,
+            True,
+            centre.min_x,
+            256,
+            centre.min_y,
+            256,
+            centre.size_x,
+            512,
+            centre.size_y,
+            512,
+            unused.use,
+            False,
+            roistat.channels[4].use,
+            False,
+        )
+    )
+    pixels = {"Left": 512 * 1024, "Centre": 512 * 512}
+    stats = ("min_value", "max_value", "mean_value", "total")
+    keys = [f"adsimroi-roistat-{name}-{stat}" for name in pixels for stat in stats]
+
+    @bpp.stage_decorator([adsimroi])
+    @bpp.run_decorator()
+    def fly() -> MsgGenerator[None]:
+        yield from bps.prepare(
+            adsimroi, TriggerInfo(number_of_events=frames, livetime=0.1), wait=True
+        )
+        yield from bps.declare_stream(adsimroi, name="primary", collect=True)
+        yield from bps.kickoff(adsimroi, wait=True)
+        yield from bps.collect_while_completing(
+            flyers=[adsimroi], dets=[adsimroi], flush_period=0.5
+        )
+
+    docs: dict[str, list[Any]] = defaultdict(list)
+    RE(fly(), lambda name, doc: docs[name].append(doc))
+
+    assert docs["stop"][0]["exit_status"] == "success"
+    (descriptor,) = docs["descriptor"]
+    if hdf_enabled:
+        # The file serves them: stream resources, in the file, one value a frame
+        assert docs["event_page"] == []
+        resources = {doc["data_key"]: doc for doc in docs["stream_resource"]}
+        assert sorted(resources) == sorted(["adsimroi", *keys])
+        frames_indexed = max(doc["indices"]["stop"] for doc in docs["stream_datum"])
+        assert frames_indexed == frames
+        (path,) = {urlparse(doc["uri"]).path for doc in resources.values()}
+        with h5py.File(path) as hdf_file:
+            for key in keys:
+                dataset = hdf_file[resources[key]["parameters"]["dataset"]]
+                assert isinstance(dataset, h5py.Dataset)
+                values = np.asarray(dataset[:])
+                assert values.shape == (frames,)
+                assert np.isfinite(values).all()
+    else:
+        # The time series serves them: pages of one reading per frame, no file
+        assert docs["stream_resource"] == []
+        assert sorted(descriptor["data_keys"]) == sorted(keys)
+        assert docs["event"] == []
+        pages = docs["event_page"]
+        assert sum(len(page["seq_num"]) for page in pages) == frames
+        series = {
+            key: np.concatenate([np.ravel(page["data"][key]) for page in pages])
+            for key in keys
+        }
+        for name, size in pixels.items():
+            prefix = f"adsimroi-roistat-{name}-"
+            smallest, largest, mean, total = (series[prefix + stat] for stat in stats)
+            assert (smallest <= mean).all()
+            assert (mean <= largest).all()
+            assert total == pytest.approx(mean * size, rel=1e-3)
 
 
 def run_plan_and_get_documents(
