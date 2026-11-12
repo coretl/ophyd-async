@@ -28,11 +28,14 @@ Implement methods for each trigger mode your detector supports:
 
 Only implement the prepare methods for trigger modes your detector actually supports. The detector will automatically report which trigger types are available based on which methods are implemented.
 
-If the detector has configuration values that should be captured in the scan then implement:
-- `config_sigs()` - Return the set of signals that should appear in read_configuration()
+Configuration values that should be captured in the scan are declared on the IO class,
+with [](#StandardReadableFormat.CONFIG_SIGNAL), exactly as on any other
+[](#StandardReadable). The trigger logic does not nominate them.
 
 If you support external triggering you should also implement:
-- `get_deadtime(config_values)` - Calculate the minimum time between exposures based on configuration values
+- `get_deadtime(config_values)` - Calculate the minimum time between exposures. It is
+  given the value of *every* signal the detector reports as configuration, so a signal
+  it needs must be declared with [](#StandardReadableFormat.CONFIG_SIGNAL).
 
 To preserve hardware state in plans like [`bp.count`](#bluesky.plans.count) and
 [`bps.trigger_and_read`](#bluesky.plan_stubs.trigger_and_read) that call `trigger()`
@@ -116,12 +119,15 @@ For example, for ADAravis:
 The composition-based architecture makes it possible to add multiple data outputs to a detector. After creating the detector, you can call `add_detector_logics()` to add additional data sources:
 
 ### Reading stats plugins alongside file writing
-```python
-from ophyd_async.epics.adcore import PluginSignalDataLogic
+A plugin scalar needs no data logic: a detector is a [](#StandardReadable), so register
+the signal and it appears in `read()` alongside whatever the file writer produces.
 
-det = adaravis.AravisDetector(prefix, path_provider)
-# Add stats total as a readable signal in events
-det.add_detector_logics(adcore.PluginSignalDataLogic(det.driver, det.stats.total))
+```python
+from ophyd_async.core import StandardReadableFormat as Format
+
+det = adaravis.AravisDetector(prefix, path_provider, plugins={"stats": stats})
+# Add stats total as a hinted signal in events
+det.set_readable_format(det.stats.total, Format.HINTED_UNCACHED_SIGNAL)
 ```
 
 ### Multiple HDF writers for different ROIs
@@ -267,4 +273,4 @@ The detector will now support:
 - Step scanning with `trigger()` 
 - Fly scanning with `kickoff()` and `complete()`
 - Automatic handling of file writing and StreamAsset document emission
-- Configuration signal reporting based on your trigger logic
+- Configuration signal reporting from the signals declared with `StandardReadableFormat.CONFIG_SIGNAL` on the IO classes
