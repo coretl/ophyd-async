@@ -178,51 +178,39 @@ async def test_observe_value_uses_correct_timeout():
 @pytest.mark.timeout(3)
 async def test_observe_signals_value_timeout_message():
     """
-    Test creates a queue of 2 signals which update with
-    different rate and observe with smaller timeout.
+    Test observes 2 signals, each producing one update after their default
+    value, then times out once nothing further is produced.
     """
     sig1 = soft_signal_rw(float)
     sig2 = soft_signal_rw(float)
     recv1 = []
     recv2 = []
-    time_delay_sec1 = 0.3
-    time_delay_sec2 = 0.5
     time_delay = 0.1
-    n_updates = 2
 
-    async def tick1():
-        for i in range(n_updates):
-            sig1.set(i + 10.0)
-            await asyncio.sleep(time_delay_sec1)
+    watcher = observe_signals_value(sig1, sig2, timeout=time_delay, done_timeout=None)
 
-    async def tick2():
-        for i in range(n_updates):
-            sig2.set(i + 100.0)
-            await asyncio.sleep(time_delay_sec2)
+    async def next_value():
+        signal, value = await anext(watcher)
+        if signal is sig1:
+            recv1.append(value)
+        elif signal is sig2:
+            recv2.append(value)
 
-    async def watch(timeout, done_timeout):
-        async for signal, value in observe_signals_value(
-            sig1, sig2, timeout=timeout, done_timeout=done_timeout
-        ):
-            if signal is sig1:
-                recv1.append(value)
-            if signal is sig2:
-                recv2.append(value)
+    # Subscribing queues each signal's current value synchronously, so these
+    # can never race the timeout.
+    await next_value()  # sig1 default
+    await next_value()  # sig2 default
 
-    async def main_test(tmo):
-        # Run the tickers as explicit tasks so that, once `watch` times out,
-        # we can cancel them rather than sleeping out their remaining delays.
-        # (`asyncio.gather` propagates `watch`'s TimeoutError but leaves the
-        # tickers running as orphaned tasks, which filterwarnings=error would
-        # escalate to a failure if they were garbage collected while pending.)
-        tickers = [asyncio.create_task(tick1()), asyncio.create_task(tick2())]
-        try:
-            await watch(timeout=tmo, done_timeout=None)
-        finally:
-            for ticker in tickers:
-                ticker.cancel()
-            await asyncio.gather(*tickers, return_exceptions=True)
+    # A soft signal backend notifies its subscribers synchronously from
+    # within `put`, so `set` only returns once its value has already reached
+    # the observer's queue - requesting the next value below is therefore
+    # guaranteed to find it there rather than racing the timeout.
+    await sig1.set(10.0)
+    await next_value()
+    await sig2.set(100.0)
+    await next_value()
 
+    # Nothing further is ever set, so the timeout is guaranteed to fire.
     with pytest.raises(
         asyncio.TimeoutError,
         match=re.escape(
@@ -231,7 +219,7 @@ async def test_observe_signals_value_timeout_message():
             "Last observed signal and value were"
         ),
     ):
-        await main_test(time_delay)
+        await next_value()
 
     # Assert first default and set values only
     assert recv1 == [0.0, 10.0]
