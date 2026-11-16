@@ -327,7 +327,7 @@ async def test_status_of_set_and_wait_for_value():
 
     await set_signal.connect(mock=True)
     await match_signal.connect(mock=True)
-    callback_on_mock_put(set_signal, set_match_signal_after_delay)  # type: ignore
+    callback_on_mock_put(set_signal, set_match_signal_after_delay)
     before = asyncio.all_tasks()
 
     status = await set_and_wait_for_value(set_signal, 2)
@@ -377,7 +377,7 @@ async def test_set_and_wait_for_other_value_keeps_the_set_running_past_the_match
 
     await set_signal.connect(mock=True)
     await match_signal.connect(mock=True)
-    callback_on_mock_put(set_signal, set_slower_than_the_match_timeout)  # type: ignore
+    callback_on_mock_put(set_signal, set_slower_than_the_match_timeout)
     before = asyncio.all_tasks()
 
     with pytest.raises(asyncio.TimeoutError):
@@ -403,7 +403,7 @@ async def test_callable_match_value_set_and_wait_for_value():
 
     await set_signal.connect(mock=True)
     await match_signal.connect(mock=True)
-    callback_on_mock_put(set_signal, set_match_signal_after_delay)  # type: ignore
+    callback_on_mock_put(set_signal, set_match_signal_after_delay)
     before = asyncio.all_tasks()
 
     def _equals_x(value, x):
@@ -1178,14 +1178,11 @@ def test_notify_with_reading(signal_cache):
     mock_function.assert_called_once_with({"test_signal": partial_reading(42)})
 
 
-async def test_notify_runtime_error(signal_cache: _SignalCache[Any]) -> None:
+def test_notify_runtime_error(signal_cache: _SignalCache[Any]) -> None:
     function = MagicMock()
 
     with pytest.raises(RuntimeError, match="Monitor not working"):
-        await asyncio.wait_for(
-            signal_cache._notify(function),
-            timeout=1.0,
-        )
+        signal_cache._notify(function)
 
 
 def test_signal_backend_throws_type_error() -> None:
@@ -1269,7 +1266,7 @@ async def test_soft_signal_rw_with_getter():
 
 
 async def test_soft_signal_rw_with_setter():
-    store = [0.0]
+    store: list[Any] = [0.0]
     signal = soft_signal_rw(float, setter=lambda v: store.__setitem__(0, v))
     await signal.connect()
     await signal.set(7.0)
@@ -1277,7 +1274,7 @@ async def test_soft_signal_rw_with_setter():
 
 
 async def test_soft_signal_rw_with_getter_and_setter():
-    store = [0.0]
+    store: list[Any] = [0.0]
     signal = soft_signal_rw(
         float,
         setter=lambda v: store.__setitem__(0, v),
@@ -1319,7 +1316,9 @@ async def test_soft_signal_r_and_setter_with_getter():
     assert await signal.get_value() == pytest.approx(42.0)
     # set_value still works independently of the getter
     set_value(99.0)
-    assert signal._connector.backend.reading["value"] == pytest.approx(99.0)
+    backend = signal._connector.backend
+    assert isinstance(backend, SoftSignalBackend)
+    assert backend.reading["value"] == pytest.approx(99.0)
 
 
 async def test_soft_signal_r_and_setter_with_poll_period():
