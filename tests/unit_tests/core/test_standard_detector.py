@@ -71,6 +71,10 @@ class AllTriggerTypesLogic(DetectorTriggerLogic):
         self.trigger = DetectorTrigger.INTERNAL
         self.num, self.livetime, self.deadtime = num, livetime, deadtime
 
+    async def prepare_start(self, num: int, livetime: float, deadtime: float):
+        self.trigger = DetectorTrigger.EXTERNAL_START
+        self.num, self.livetime, self.deadtime = num, livetime, deadtime
+
     async def prepare_edge(self, num: int, livetime: float):
         self.trigger = DetectorTrigger.EXTERNAL_EDGE
         self.num, self.livetime = num, livetime
@@ -304,6 +308,7 @@ class BoundedOnlyDataLogic(BoundedDataLogic[MockPageableProvider]):
             AllTriggerTypesLogic(),
             {
                 DetectorTrigger.INTERNAL,
+                DetectorTrigger.EXTERNAL_START,
                 DetectorTrigger.EXTERNAL_EDGE,
                 DetectorTrigger.EXTERNAL_LEVEL,
             },
@@ -362,6 +367,7 @@ async def test_get_trigger_deadtime_with_settings():
     "trigger_type",
     [
         DetectorTrigger.INTERNAL,
+        DetectorTrigger.EXTERNAL_START,
         DetectorTrigger.EXTERNAL_EDGE,
         DetectorTrigger.EXTERNAL_LEVEL,
     ],
@@ -382,13 +388,16 @@ async def test_prepare_trigger_types(trigger_type):
     assert trigger_logic.num == 10
 
 
-async def test_prepare_unsupported_trigger_type():
+@pytest.mark.parametrize(
+    "trigger_type", [DetectorTrigger.EXTERNAL_START, DetectorTrigger.EXTERNAL_EDGE]
+)
+async def test_prepare_unsupported_trigger_type(trigger_type):
     """Test that preparing with unsupported trigger type raises error."""
     det = DetectorLogic(trigger=JustInternalTriggerLogic()).with_device()
     await det.stage()
 
-    with pytest.raises(ValueError, match="Trigger type.*EXTERNAL_EDGE not supported"):
-        await det.prepare(TriggerInfo(trigger=DetectorTrigger.EXTERNAL_EDGE))
+    with pytest.raises(ValueError, match=f"Trigger type.*{trigger_type.name} not"):
+        await det.prepare(TriggerInfo(trigger=trigger_type))
 
 
 @pytest.mark.parametrize(
@@ -452,6 +461,7 @@ async def test_exposures_per_collection_not_supported():
     "trigger_type,arm_timing",
     [
         (DetectorTrigger.INTERNAL, "kickoff"),
+        (DetectorTrigger.EXTERNAL_START, "prepare"),
         (DetectorTrigger.EXTERNAL_EDGE, "prepare"),
         (DetectorTrigger.EXTERNAL_LEVEL, "prepare"),
     ],
@@ -494,6 +504,7 @@ async def test_arm_timing(trigger_type, arm_timing, tmp_path):
     "trigger_type,arms_at_trigger",
     [
         (DetectorTrigger.INTERNAL, True),
+        (DetectorTrigger.EXTERNAL_START, False),
         (DetectorTrigger.EXTERNAL_EDGE, False),
         (DetectorTrigger.EXTERNAL_LEVEL, False),
     ],

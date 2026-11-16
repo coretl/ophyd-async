@@ -105,7 +105,7 @@ Note that on each trigger, only a single image is taken, at the default exposure
 ```
 
 The [](#TriggerInfo) contains all the parameters needed to set up the detector:
-- `trigger` - The trigger type: `INTERNAL` (detector generates its own triggers), `EXTERNAL_EDGE` (rising edge starts an internally-timed exposure), or `EXTERNAL_LEVEL` (high level duration determines exposure time)
+- `trigger` - The trigger type: `INTERNAL` (detector generates its own triggers), `EXTERNAL_START` (one rising edge starts all the internally-timed exposures), `EXTERNAL_EDGE` (rising edge starts an internally-timed exposure), or `EXTERNAL_LEVEL` (high level duration determines exposure time)
 - `livetime` - The exposure time per frame
 - `deadtime` - The minimum time between exposures (for internal triggering)
 - `exposures_per_collection` - Number of exposures averaged into a single collection that is passed to the data writer (default 1)
@@ -195,6 +195,7 @@ It is decorated with `@dataclass`, which generates `__init__` automatically from
 - `prepare_internal()` takes the number of frames, livetime (exposure), and deadtime, and sets up the pattern generator with those parameters.
 
 If we wanted to support external triggering, we would also implement:
+- `prepare_start()` for external start triggering (one edge starts all the internally-timed exposures)
 - `prepare_edge()` for external edge triggering (rising edge starts internally-timed exposure)
 - `prepare_level()` for external level/gate triggering (high level duration determines exposure)
 
