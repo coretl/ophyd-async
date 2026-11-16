@@ -22,7 +22,6 @@ from ophyd_async.core import (
     StreamResourceDataProvider,
     StreamResourceInfo,
     TriggerInfo,
-    soft_signal_r_and_setter,
     soft_signal_rw,
 )
 from ophyd_async.testing import (
@@ -518,7 +517,7 @@ async def test_preserve_detector_state_multi_collection_watcher_and_assets(
     # Collect watcher updates via watch() callback
     updates: list[dict] = []
     status = det.trigger()
-    status.watch(lambda *_, **kwargs: updates.append(kwargs))
+    status.watch(lambda **kwargs: updates.append(kwargs))
     await wait_for_pending_wakeups(raise_if_exceeded=False)
     assert (await det.describe())["multidet"]["shape"] == [5, 10, 15]
 
@@ -553,16 +552,14 @@ async def test_collect_asset_docs_uses_trigger_observed_event(
     and ``collect_asset_docs``."""
     det = StandardDetector(name="det")
     dl = StreamableOnlyDataLogic(tmp_path)
-    dl.collections_written, set_collections_written = soft_signal_r_and_setter(  # pyright: ignore[reportAttributeAccessIssue]
-        int, getter=lambda: 0
-    )
     det.add_detector_logics(JustInternalTriggerLogic(), dl)
     await det.prepare(TriggerInfo(collections_per_event=5, exposure_timeout=0.1))
 
     status = det.trigger()
     await wait_for_pending_wakeups(raise_if_exceeded=False)
-    set_collections_written(5)
+    await dl.collections_written.set(5)
     await status
+    await dl.collections_written.set(0)
 
     docs = [doc async for doc in det.collect_asset_docs()]
     assert [name for name, _ in docs] == ["stream_resource", "stream_datum"]
@@ -860,6 +857,7 @@ async def test_add_unknown_logic_type_raises():
         pass
 
     with pytest.raises(TypeError, match="Unknown logic type"):
+        # deliberately wrong, tests the runtime check
         det.add_detector_logics(UnknownLogic())  # pyright: ignore[reportArgumentType]
 
 

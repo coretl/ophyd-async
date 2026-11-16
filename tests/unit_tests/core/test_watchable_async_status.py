@@ -24,15 +24,15 @@ class SetFailedError(Exception):
 def watcher_test(
     storage: list[WatcherUpdate],
     *,
-    name: str | None,
-    current: int | None,
-    initial: int | None,
-    target: int | None,
-    unit: str | None,
-    precision: float | None,
-    fraction: float | None,
-    time_elapsed: float | None,
-    time_remaining: float | None,
+    name: str | None = None,
+    current: int | None = None,
+    initial: int | None = None,
+    target: int | None = None,
+    unit: str | None = None,
+    precision: float | None = None,
+    fraction: float | None = None,
+    time_elapsed: float | None = None,
+    time_remaining: float | None = None,
 ):
     storage.append(
         WatcherUpdate(
@@ -55,15 +55,15 @@ class TWatcher:
     def __call__(
         self,
         *,
-        name: str | None,
-        current: int | None,
-        initial: int | None,
-        target: int | None,
-        unit: str | None,
-        precision: float | None,
-        fraction: float | None,
-        time_elapsed: float | None,
-        time_remaining: float | None,
+        name: str | None = None,
+        current: int | None = None,
+        initial: int | None = None,
+        target: int | None = None,
+        unit: str | None = None,
+        precision: float | None = None,
+        fraction: float | None = None,
+        time_elapsed: float | None = None,
+        time_remaining: float | None = None,
     ) -> None:
         self.updates.append(current or -1)
 
@@ -163,8 +163,8 @@ async def test_asyncstatus_wraps_set_iterator_with_class_or_func_watcher(RE):
     updates = []
 
     w = TWatcher()
-    st.watch(partial(watcher_test, updates))  # pyright: ignore[reportArgumentType]
-    st.watch(w)  # pyright: ignore[reportArgumentType]
+    st.watch(partial(watcher_test, updates))
+    st.watch(w)
     await st
     assert st.done
     assert st.success
@@ -179,7 +179,7 @@ async def test_watchableasyncstatus_wraps_failing_set_iterator(RE):
     st = td.set(6)
     updates = []
 
-    st.watch(partial(watcher_test, updates))  # pyright: ignore[reportArgumentType]
+    st.watch(partial(watcher_test, updates))
     try:
         await st
     except Exception:
