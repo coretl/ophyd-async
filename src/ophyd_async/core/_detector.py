@@ -65,6 +65,10 @@ class DetectorTrigger(Enum):
     INTERNAL = "INTERNAL"
     """On arm generate internally timed exposures"""
 
+    EXTERNAL_START = "EXTERNAL_START"
+    """On a single (normally rising) edge of an external input generate all the
+    internally timed exposures"""
+
     EXTERNAL_EDGE = "EXTERNAL_EDGE"
     """On every (normally rising) edge of an external input generate an internally
     timed exposure"""
@@ -81,8 +85,8 @@ class TriggerInfo(ConfinedModel):
     """What sort of triggering should the detector be set for."""
 
     livetime: float = Field(default=0.0, ge=0.0)
-    """For INTERNAL or EXTERNAL_EDGE triggering, how long should each exposure be.
-    0 means whatever is currently set."""
+    """For INTERNAL, EXTERNAL_EDGE or EXTERNAL_START triggering, how long should
+    each exposure be. 0 means whatever is currently set."""
 
     deadtime: float = Field(default=0.0, ge=0.0)
     """For INTERNAL triggering, how long should be left between each exposure.
@@ -157,6 +161,7 @@ class DetectorTriggerLogic:
     - Configuration signals that should appear in detector metadata
     - Deadtime calculations based on detector configuration
     - Preparation for internal (self-triggered) exposures
+    - Preparation for external start-triggered exposures
     - Preparation for external edge-triggered exposures
     - Preparation for external level-triggered exposures
     - Multi-exposure collection batching
@@ -180,6 +185,15 @@ class DetectorTriggerLogic:
 
     async def prepare_internal(self, num: int, livetime: float, deadtime: float):
         """Prepare the detector to take internally triggered exposures.
+
+        :param num: the number of exposures to take
+        :param livetime: how long the exposure should be, 0 means what is currently set
+        :param deadtime: how long between exposures, 0 means the shortest possible
+        """
+        raise NotImplementedError(self)
+
+    async def prepare_start(self, num: int, livetime: float, deadtime: float):
+        """Prepare the detector to take exposures all started by one external trigger.
 
         :param num: the number of exposures to take
         :param livetime: how long the exposure should be, 0 means what is currently set
@@ -228,6 +242,8 @@ def _get_supported_triggers(
     supported_triggers = set()
     if _trigger_logic_supported(trigger_logic.prepare_internal):
         supported_triggers.add(DetectorTrigger.INTERNAL)
+    if _trigger_logic_supported(trigger_logic.prepare_start):
+        supported_triggers.add(DetectorTrigger.EXTERNAL_START)
     if _trigger_logic_supported(trigger_logic.prepare_edge):
         supported_triggers.add(DetectorTrigger.EXTERNAL_EDGE)
     if _trigger_logic_supported(trigger_logic.prepare_level):
@@ -1129,6 +1145,12 @@ class DetectorLogic(FlyableLogic[TriggerInfo, DetectorCtx]):
         match value.trigger:
             case DetectorTrigger.INTERNAL:
                 await self.trigger.prepare_internal(
+                    num=value.number_of_exposures,
+                    livetime=value.livetime,
+                    deadtime=value.deadtime,
+                )
+            case DetectorTrigger.EXTERNAL_START:
+                await self.trigger.prepare_start(
                     num=value.number_of_exposures,
                     livetime=value.livetime,
                     deadtime=value.deadtime,

@@ -47,7 +47,8 @@ from ophyd_async.core import DEFAULT_TIMEOUT, DetectorTrigger, TriggerInfo
                 "livetime": 1,
                 "exposure_timeout": None,
             },
-            "Input should be 'INTERNAL', 'EXTERNAL_EDGE' or 'EXTERNAL_LEVEL' "
+            "Input should be 'INTERNAL', 'EXTERNAL_START', 'EXTERNAL_EDGE' or "
+            "'EXTERNAL_LEVEL' "
             "[type=enum, input_value='not_in_enum', input_type=str]",
         ),
         (
