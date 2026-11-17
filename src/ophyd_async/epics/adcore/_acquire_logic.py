@@ -27,10 +27,8 @@ class ADAcquireLogic(DetectorAcquireLogic):
         `AcquireBusy` wait for the number of queued arrays to reach zero, and
         `acquire` waits for the `acquire` put callback, so turning it on
         is what makes a step scan read plugin scalars for the frame it just
-        took rather than the one before. Defaults to on, since racing is
-        silent and the wait costs nothing when a file writer is the slowest
-        thing in the chain anyway. Turn it off for a detector whose plugin
-        chain must not gate acquisition.
+        took rather than the one before. Turn it off for a detector whose
+        plugin chain must not gate acquisition.
     :param timeout: How long to wait for the driver to arm and to return to idle.
 
     `ensure_ready` also resets the driver's `ArrayCounter` to 0.
@@ -53,10 +51,7 @@ class ADAcquireLogic(DetectorAcquireLogic):
 
     async def ensure_ready(self):
         # Stop first: WaitForPlugins is latched and has no _RBV, so set it once
-        # per scan while the driver is known to be idle rather than on the
-        # latency path before every arm. Always written, never left at whatever
-        # the IOC happened to boot with, so a scan does not depend on who
-        # touched the PV last.
+        # per scan while the driver is idle. Always written.
         await self.ensure_stopped()
         await asyncio.gather(
             self.driver.wait_for_plugins.set(self.wait_for_plugins),
@@ -91,11 +86,8 @@ class ADContAcqAcquireLogic(DetectorAcquireLogic):
     `NDArrayPort` is not the driver's port. `stage()` also resets the driver's
     `ArrayCounter` to 0; the CB plugin's own counter is left alone.
 
-    Deliberately has no `wait_for_plugins` equivalent to [](#ADAcquireLogic).
-    That setting gates the driver's `AcquireBusy` going to 0 at the end of an
-    acquisition, and here the driver is always acquiring, so there is no such
-    transition to wait on. `acquire` waits on the circular buffer's trigger
-    instead.
+    There is no `wait_for_plugins` as in [](#ADAcquireLogic): the driver is
+    always acquiring, so `acquire` waits on the circular buffer's trigger.
 
     :param driver: The continuously acquiring detector driver
     :param cb_plugin: The circular buffer plugin gating downstream plugins

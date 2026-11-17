@@ -136,5 +136,6 @@ async def test_trigger_uses_num_images_and_process_plugin(
     shape_0 = await _trigger_with_preserved_state(det, expected_collections)
 
     assert shape_0 == expected_collections
-    assert await proc.num_filter.get_value() == expected_exposures
+    # Filtering is switched off, not set to 1 exposure, when it is disabled
+    assert await proc.num_filter.get_value() == num_filter
     assert await num_signal.get_value() == expected_collections * expected_exposures
