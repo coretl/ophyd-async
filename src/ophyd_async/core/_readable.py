@@ -516,33 +516,6 @@ class StandardReadable(
             self.set_readable_format(device, format)
 
 
-def _config_signals(device: Device) -> set[SignalR]:
-    """Return every `Signal` contributing to a Device's `read_configuration()`.
-
-    Recurses into children registered as [](#StandardReadableFormat.CHILD), so
-    a Device that registers a sub-Device whole picks up whatever that
-    sub-Device declares as configuration. A Device that is not a
-    `StandardReadable` contributes nothing.
-
-    Unlike `walk_config_signals` this reads the registry rather than calling
-    `read_configuration()`, so it does no I/O and includes read-only `SignalR`s
-    as well as `SignalRW`s (`ADBaseIO.model` is a `SignalR`, and it is exactly
-    the signal an areaDetector trigger logic needs for deadtime).
-    """
-    signals: set[SignalR] = set()
-    if not isinstance(device, StandardReadable):
-        return signals
-    for entry in device.get_readable_formats():
-        match entry:
-            case (signal, Format.CONFIG_SIGNAL):
-                signals.add(signal)
-            case (child, Format.CHILD):
-                signals |= _config_signals(child)
-            case _:
-                pass
-    return signals
-
-
 #: The changes to the readable formats of a Device tree since construction:
 #: `{StandardReadable: {child Device: format}}`, where a format of `None` means
 #: "stop this child contributing".

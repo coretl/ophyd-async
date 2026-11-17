@@ -6,6 +6,7 @@ import pytest
 
 from ophyd_async.core import (
     callback_on_mock_put,
+    get_mock,
     init_devices,
     set_callback_filter,
     set_mock_value,
@@ -18,14 +19,18 @@ from ophyd_async.testing import assert_has_calls
 async def adbase_detector() -> adcore.AreaDetector[adcore.ADBaseIO]:
     driver = adcore.ADBaseIO("PREFIX:DRV:")
     async with init_devices(mock=True):
-        det = adcore.AreaDetector(driver=driver)
-        det.add_detector_logics(adcore.ADAcquireLogic(driver))
+        det = adcore.AreaDetector(
+            driver=driver, acquire_logic=adcore.ADAcquireLogic(driver)
+        )
     return det
 
 
 async def test_acquire_logic_trigger_internal_calls_acquire(
     adbase_detector: adcore.AreaDetector[adcore.ADBaseIO],
 ):
+    await adbase_detector.stage()
+    # Only the calls after stage() are of interest
+    get_mock(adbase_detector).reset_mock()
     await adbase_detector.trigger()
     assert_has_calls(
         adbase_detector.driver,
@@ -38,14 +43,16 @@ async def test_acquire_logic_trigger_internal_calls_acquire(
 async def test_acquire_logic_when_arming_times_out():
     driver = adcore.ADBaseIO("PREFIX:DRV:")
     async with init_devices(mock=True):
-        det = adcore.AreaDetector(driver=driver)
-        det.add_detector_logics(adcore.ADAcquireLogic(driver, timeout=0.02))
+        det = adcore.AreaDetector(
+            driver=driver, acquire_logic=adcore.ADAcquireLogic(driver, timeout=0.02)
+        )
 
     async def sleep_for_a_bit(value):
         await asyncio.sleep(0.02)
 
     callback_on_mock_put(det.driver.acquire, sleep_for_a_bit)
 
+    await det.stage()
     with pytest.raises(
         TimeoutError,
         match=re.escape(
@@ -60,11 +67,13 @@ async def test_acquire_logic_when_arming_times_out():
 async def test_acquire_logic_wait_for_idle_in_bad_state():
     driver = adcore.ADBaseIO("PREFIX:DRV:")
     async with init_devices(mock=True):
-        det = adcore.AreaDetector(driver=driver)
-        det.add_detector_logics(adcore.ADAcquireLogic(driver, timeout=0.05))
+        det = adcore.AreaDetector(
+            driver=driver, acquire_logic=adcore.ADAcquireLogic(driver, timeout=0.05)
+        )
 
     set_mock_value(driver.detector_state, adcore.ADState.ERROR)
 
+    await det.stage()
     with pytest.raises(ValueError) as exc_info:
         await det.trigger()
 
@@ -74,7 +83,7 @@ async def test_acquire_logic_wait_for_idle_in_bad_state():
     assert "ADState.ABORTED" in error_msg
 
 
-async def test_start_acquiring_driver_and_ensure_status_timing(
+async def test_acquire_driver_and_ensure_status_timing(
     adbase_detector: adcore.AreaDetector[adcore.ADBaseIO],
 ):
     """This test ensures the camera has time to return to a good state.
@@ -97,12 +106,15 @@ async def test_start_acquiring_driver_and_ensure_status_timing(
             adcore.ADState.IDLE,
         )
 
+    await adbase_detector.stage()
     await asyncio.gather(adbase_detector.trigger(), complete_acquire())
 
 
 async def test_acquire_logic_disarm(
     adbase_detector: adcore.AreaDetector[adcore.ADBaseIO],
 ):
+    await adbase_detector.stage()
+    get_mock(adbase_detector).reset_mock()
     await adbase_detector.unstage()
     assert_has_calls(
         adbase_detector.driver,
@@ -112,18 +124,20 @@ async def test_acquire_logic_disarm(
     )
 
 
-async def test_start_acquiring_driver_and_ensure_status_disconnected():
+async def test_acquire_driver_and_ensure_status_disconnected():
     """This test ensures the function behaves gracefully if no detector
     states are available.
 
     """
     driver = adcore.ADBaseIO("PREFIX:DRV:")
     async with init_devices(mock=True):
-        det = adcore.AreaDetector(driver=driver)
-        det.add_detector_logics(adcore.ADAcquireLogic(driver, timeout=0.1))
+        det = adcore.AreaDetector(
+            driver=driver, acquire_logic=adcore.ADAcquireLogic(driver, timeout=0.1)
+        )
 
     set_callback_filter(driver.detector_state, lambda v: None)
 
+    await det.stage()
     with pytest.raises(asyncio.TimeoutError) as exc:
         await det.trigger()
     assert (

@@ -38,13 +38,13 @@ async def _status_aexit(slow: SlowToCancel, _: pytest.MonkeyPatch):
         await wait_for_pending_wakeups()  # let the status task start
 
 
-async def _blob_ensure_stopped(slow: SlowToCancel, _: pytest.MonkeyPatch):
+async def _blob_acquire_close(slow: SlowToCancel, _: pytest.MonkeyPatch):
     pattern_generator = Mock()
     pattern_generator.write_images_to_file = slow.coro
-    logic = BlobAcquireLogic(pattern_generator)
-    await logic.start_acquiring()
+    acquisition = BlobAcquireLogic(pattern_generator).acquire()
+    await anext(acquisition)
     await wait_for_pending_wakeups()  # let the task start
-    await logic.ensure_stopped()
+    await acquisition.aclose()
 
 
 async def _set_and_wait(slow: SlowToCancel, monkeypatch: pytest.MonkeyPatch):
@@ -64,9 +64,7 @@ async def _set_and_wait(slow: SlowToCancel, monkeypatch: pytest.MonkeyPatch):
         await signal_module.set_and_wait_for_value(sig, 1)
 
 
-@pytest.mark.parametrize(
-    "cleanup", [_status_aexit, _blob_ensure_stopped, _set_and_wait]
-)
+@pytest.mark.parametrize("cleanup", [_status_aexit, _blob_acquire_close, _set_and_wait])
 async def test_cancelling_caller_during_cleanup_waits_for_it_then_raises(
     cleanup: Callable[[SlowToCancel, pytest.MonkeyPatch], Coroutine[Any, Any, None]],
     monkeypatch: pytest.MonkeyPatch,

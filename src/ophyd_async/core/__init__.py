@@ -9,6 +9,7 @@ from ._command import (
     soft_command,
 )
 from ._data_providers import (
+    DataProvider,
     StreamableDataProvider,
     StreamResourceDataProvider,
     StreamResourceInfo,
@@ -24,10 +25,12 @@ from ._derived_signal_backend import Transform, merge_gathered_dicts
 from ._detector import (
     DetectorAcquireLogic,
     DetectorDataLogic,
+    DetectorLogic,
     DetectorTrigger,
     DetectorTriggerLogic,
     StandardDetector,
     TriggerInfo,
+    UnboundedDataLogic,
 )
 from ._device import (
     Device,
@@ -49,7 +52,12 @@ from ._enums import (
     OnOff,
     YesNo,
 )
-from ._flyable import KICKED_OFF, FlyableLogic, FlyMotorInfo, StandardFlyable
+from ._flyable import (
+    KICKED_OFF,
+    FlyableLogic,
+    FlyMotorInfo,
+    StandardFlyable,
+)
 from ._log import config_ophyd_async_logging, logger
 from ._mock_signal_backend import MockSignalBackend
 from ._mock_signal_utils import (
@@ -288,6 +296,8 @@ __all__ = [
     "DetectorTriggerLogic",
     "DetectorAcquireLogic",
     "DetectorDataLogic",
+    "UnboundedDataLogic",
+    "DetectorLogic",
     "StandardDetector",
     # Path
     "PathInfo",
@@ -301,6 +311,7 @@ __all__ = [
     "AutoMaxIncrementingPathProvider",
     "UUIDFilenameProvider",
     # Data Providers
+    "DataProvider",
     "StreamableDataProvider",
     "StreamResourceInfo",
     "StreamResourceDataProvider",
