@@ -43,6 +43,7 @@
 - `BoundedDataLogic`, `UnboundedDataLogic`, `DetectorLogic`, `DataProvider`, `PageableDataProvider` and `EventPageDataProvider` in `ophyd_async.core`. A detector whose providers make event pages publishes them from `collect_pages()`.
 - `TriggerInfo.flush_period`, the seconds between flushes of the data being written. `ADHDFDataLogic` sizes its HDF chunks from it (#1309).
 - A `StandardDetector` with no data logic can be kicked off.
+- `DetectorSuppressLogic`, set as `DetectorLogic.suppress`, names the readables a detector's data hides.
 
 ### Deprecated
 

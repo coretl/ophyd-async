@@ -16,6 +16,7 @@ from ophyd_async.core import (
     DataProvider,
     DetectorAcquireLogic,
     DetectorLogic,
+    DetectorSuppressLogic,
     DetectorTrigger,
     DetectorTriggerLogic,
     PageableDataProvider,
@@ -1529,6 +1530,51 @@ async def test_suppressed_bounded_logic_sits_the_scan_out(tmp_path):
     assert det.hints == {"fields": ["det"]}
 
 
+class SetSuppressLogic(DetectorSuppressLogic):
+    def __init__(self, hidden: set[str]) -> None:
+        self.hidden = hidden
+
+    async def hidden_datakeys(self) -> set[str]:
+        return set(self.hidden)
+
+
+async def test_suppress_logic_hides_readables_until_unstage():
+    hidden = soft_signal_rw(int, 1, name="det-hidden")
+    also_hidden = soft_signal_rw(int, 2, name="det-also-hidden")
+    kept = soft_signal_rw(int, 3, name="det-kept")
+    suppress = SetSuppressLogic({"det-hidden", "det-also-hidden"})
+    det = DetectorLogic(suppress=suppress).with_device("det")
+    for signal in (hidden, also_hidden, kept):
+        det.set_readable_format(signal, Format.HINTED_SIGNAL)
+    await det.stage()
+    await det.prepare(TriggerInfo())
+    await det.trigger()
+
+    description = await det.describe()
+
+    assert set(description) == {"det-kept"}
+
+    # The same result at a later prepare is no change
+    await det.prepare(TriggerInfo())
+    await det.trigger()
+
+    # A different result is, until the next stage takes it
+    suppress.hidden = {"det-hidden"}
+    with pytest.raises(
+        RuntimeError,
+        match=re.escape(
+            "det: hidden datakeys changed since the first prepare() after "
+            "stage(): ['det-also-hidden']. unstage() and stage() to use the new values."
+        ),
+    ):
+        await det.prepare(TriggerInfo())
+    await det.unstage()
+    await det.stage()
+    await det.prepare(TriggerInfo())
+    await det.trigger()
+    assert set(await det.describe()) == {"det-also-hidden", "det-kept"}
+
+
 class _HangingLogic:
     """A data logic whose start_provider never returns, recording if it runs."""
 
@@ -1578,3 +1624,25 @@ async def test_failed_start_provider_stops_the_others_starting(hanging, failing)
 
     assert not hanging_logic.running
     await det.unstage()
+
+
+async def test_hidden_datakeys_are_asked_before_the_trigger_logic_is_prepared():
+    calls: list[str] = []
+
+    class RecordingTriggerLogic(JustInternalTriggerLogic):
+        async def prepare_internal(self, num: int, livetime: float, deadtime: float):
+            calls.append("prepare_internal")
+
+    class RecordingSuppressLogic(DetectorSuppressLogic):
+        async def hidden_datakeys(self) -> set[str]:
+            calls.append("hidden_datakeys")
+            return set()
+
+    det = DetectorLogic(
+        trigger=RecordingTriggerLogic(), suppress=RecordingSuppressLogic()
+    ).with_device("det")
+    await det.stage()
+
+    await det.prepare(TriggerInfo())
+
+    assert calls == ["hidden_datakeys", "prepare_internal"]

@@ -82,6 +82,14 @@ This is a general `StandardReadable` hook mapping a datakey name to `None` or a 
 `DataKey`, matched by name so a signal is found wherever it is registered. `None` also drops
 the hint, as it is for a signal that is switched off.
 
+### The detector asks its logic which readables the data hides
+
+The core `DetectorSuppressLogic`, `DetectorLogic.suppress`, names the readables the
+detector's data hides. It is asked at the first `prepare()` of a stage and the answer kept
+in the prepare context, so the frozen logic holds no state. Each later `prepare()` asks
+again and raises on a difference, before any data logic starts, so a run is never split
+part way and no PV the user owns is written.
+
 ### The detector flies with one `fly()` generator
 
 `FlyableLogic.fly` is one async generator
@@ -125,7 +133,8 @@ carry over and bounded ones are restarted ([ADR 0025](0025-bounded-data-logic-ti
 The trigger logic is not re-prepared per step point.
 
 - A failed `prepare()` needs `unstage()`, and `stage()` forgets the context, so a retry is
-  a first prepare of the stage: it starts every data logic, whatever the failed one got to.
+  a first prepare of the stage: it takes the hidden set afresh and starts every data logic,
+  whatever the failed one got to.
 - The context outlives `complete()`, so `collect_while_completing` can collect after it.
 - A step scan's collect publishes up to the point `trigger()` waited for, never re-reading
   the counter, so it publishes exactly what `trigger()` saw written.
