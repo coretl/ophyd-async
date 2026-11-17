@@ -4,8 +4,11 @@ import warnings
 from collections.abc import (
     Awaitable,
     Callable,
+    Collection,
     Generator,
+    Iterable,
     Iterator,
+    Mapping,
     Sequence,
 )
 from contextlib import contextmanager
@@ -20,7 +23,7 @@ from ._device import Device, DeviceMap, DeviceVector
 from ._protocol import AsyncConfigurable, AsyncReadable, AsyncStageable
 from ._signal import SignalR
 from ._standard_base import _StandardBase
-from ._utils import merge_gathered_dicts
+from ._utils import merge_dicts, merge_gathered_dicts
 
 
 class StandardReadableFormat(Enum):
@@ -76,6 +79,17 @@ SignalFormat = Literal[
 
 #: A registered child and its format. Only a `SignalR` has a signal format.
 ReadableEntry = tuple[Device, Literal[Format.CHILD]] | tuple[SignalR, SignalFormat]
+
+
+def _without_signals(
+    entries: Iterable[ReadableEntry], names: Collection[str]
+) -> list[ReadableEntry]:
+    """`entries` with the signals named in `names` left out."""
+    return [
+        entry
+        for entry in entries
+        if entry[1] is Format.CHILD or entry[0].name not in names
+    ]
 
 
 class _SealDefaultFormatsMeta(type(_StandardBase)):
@@ -141,6 +155,10 @@ class StandardReadable(
         Callable[[], Awaitable[dict[str, DataKey]]], ...
     ] = ()
     _hints_funcs: tuple[Callable[[], Iterator[Hints]], ...] = ()
+    # The names of registered children that something else provides instead, by
+    # name so a child's own children are covered. Each is dropped from read() and
+    # describe() after checking it against the DataKey, and kept in hints.
+    _suppressed_datakeys_funcs: tuple[Callable[[], Mapping[str, DataKey]], ...] = ()
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -218,9 +236,17 @@ class StandardReadable(
                     pass
         return await merge_gathered_dicts(coros)
 
+    def _suppressed_datakeys(self) -> dict[str, DataKey]:
+        return merge_dicts(func() for func in self._suppressed_datakeys_funcs)
+
     async def __on_describe(self) -> dict[str, DataKey]:
-        """What the registered children contribute to `describe()`."""
+        """What the registered children contribute to `describe()`.
+
+        Every signal with a replacement is described too, to check the
+        replacement can stand in for it.
+        """
         coros = []
+        replacements = self._suppressed_datakeys()
         for entry in self._readables.values():
             match entry:
                 case (device, Format.CHILD):
@@ -235,12 +261,29 @@ class StandardReadable(
                     coros.append(signal.describe())
                 case (_, Format.CONFIG_SIGNAL):
                     pass
-        return await merge_gathered_dicts(coros)
+        datakeys = await merge_gathered_dicts(coros)
+        # A replacement needs the signal's dtype, and its shape or that shape with
+        # one extra leading dimension, e.g. one per collection of an event
+        mismatched = []
+        for key in sorted(datakeys.keys() & replacements.keys()):
+            signal, data = datakeys[key], replacements[key]
+            same_dtype = signal.get("dtype_numpy") == data.get("dtype_numpy")
+            same_shape = signal["shape"] in (data["shape"], data["shape"][1:])
+            if not (same_dtype and same_shape):
+                mismatched.append(key)
+        if mismatched:
+            raise ValueError(
+                f"{self.name}: duplicate datakeys {mismatched}: registered signals "
+                "with a different shape or dtype from the data that would replace "
+                "them, so rename one of them"
+            )
+        return {k: v for k, v in datakeys.items() if k not in replacements}
 
     async def __on_read(self) -> dict[str, Reading]:
         """What the registered children contribute to `read()`."""
         coros = []
-        for entry in self._readables.values():
+        suppressed = self._suppressed_datakeys()
+        for entry in _without_signals(self._readables.values(), suppressed):
             match entry:
                 case (device, Format.CHILD):
                     if isinstance(device, AsyncReadable):
@@ -254,7 +297,9 @@ class StandardReadable(
                     coros.append(signal.read(cached=False))
                 case (_, Format.CONFIG_SIGNAL):
                     pass
-        return await merge_gathered_dicts(coros)
+        readings = await merge_gathered_dicts(coros)
+        # Suppressed signals were left out, but not those read by a child
+        return {k: v for k, v in readings.items() if k not in suppressed}
 
     def __on_hints(self) -> Iterator[Hints]:
         """What the registered children contribute to `hints`."""
