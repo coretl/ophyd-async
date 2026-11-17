@@ -26,7 +26,7 @@
 - `ADAcquireLogic` sets `WaitForPlugins` at `stage()`, from its new `wait_for_plugins` argument (default on), rather than `AreaDetector` hiding it.
 - `StandardDetector` is now a `StandardFlyable` whose `logic` is a `DetectorLogic` holding the trigger, acquire and data logics (see ADR 0026): build it in a `logic` `@cached_property` rather than passing logics to `__init__()`. `add_detector_logics()` is removed; use `DetectorLogic.with_device()` for an ad-hoc detector.
 - `DetectorAcquireLogic.start_acquiring()` and `wait_for_idle()` become one `acquire()`, an async generator that starts acquiring, yields once armed, then waits until idle. It must clean up what it started if it is closed at its `yield`.
-- A data logic inherits `UnboundedDataLogic` and implements one `start_provider()`, replacing `prepare_unbounded()` (see ADR 0025). `prepare()` raises if two serving data logics make the same datakey.
+- A data logic inherits `BoundedDataLogic`, told the number of collections in the scan, or `UnboundedDataLogic`, and implements one `start_provider()`, replacing `prepare_unbounded()` (see ADR 0025). `prepare()` raises if two serving data logics make the same datakey.
 - `DataProvider`, the new base of `StreamableDataProvider`, has an abstract `start_new_resources(origin)`. `make_stream_docs(collections_written, collections_per_event)` becomes `make_stream_docs(index)` and `make_datakeys(collections_per_event)` becomes `make_datakeys()`. `StreamResourceDataProvider` takes `collections_written` (was `collections_written_signal`) and `collections_per_event`, and loses `last_emitted`.
 - A registered signal with the same name as a datakey a serving data provider makes is left out of `read()` and `describe()`, so the provider's data replaces it.
 - `kickoff()` during or after a `StandardDetector.trigger()` raises `TransitionError`. After a failed `trigger()`, `unstage()` and `stage()` the detector before using it again.
@@ -40,7 +40,7 @@
 - `cancel_and_wait()` cancels tasks and waits for all of them to end, even through a cancel of its caller, then raises the error of the first task, in the order given, that ended with one. If its caller was cancelled, it raises `CancelledError` instead.
 - `plugins_with_proc()` adds the process plugin made from a `proc_suffix` to a detector's `plugins`, and raises `ValueError` if `plugins` already has a `"proc"`. Every areaDetector vendor detector and `ContAcqDetector` uses it, so `"proc"` is reserved: pass `proc_suffix` instead.
 - `StandardReadable.set_readable_format()` changes what a child contributes to `read()`, `read_configuration()` and `hints` at runtime, like `Kind` in ophyd v1, and replaces the now deprecated `add_readables()`. `store_settings()` and `apply_settings()` save and restore these changes.
-- `UnboundedDataLogic`, `DetectorLogic` and `DataProvider` in `ophyd_async.core`.
+- `BoundedDataLogic`, `UnboundedDataLogic`, `DetectorLogic`, `DataProvider`, `PageableDataProvider` and `EventPageDataProvider` in `ophyd_async.core`. A detector whose providers make event pages publishes them from `collect_pages()`.
 - `TriggerInfo.flush_period`, the seconds between flushes of the data being written. `ADHDFDataLogic` sizes its HDF chunks from it (#1309).
 - A `StandardDetector` with no data logic can be kicked off.
 
@@ -60,4 +60,4 @@
 - Leaving an `async with AsyncStatus(...)` block, `set_and_wait_for_other_value()` and closing the sim `BlobAcquireLogic.acquire()` no longer swallow a cancellation of the caller that arrives while they wait for the task they cancelled: they wait for that task to end, then raise the cancellation.
 - A `WatchableAsyncStatus` whose watcher raises closes the async generator it drives straight away, rather than when the generator is collected.
 - `unstage()` now cancels a running `StandardDetector.trigger()`, and closes an acquisition that an externally triggered `prepare()` armed and nothing ran.
-- A data provider carried over to the next `prepare()` no longer includes collections written before it in its first stream datum.
+- A data provider carried over to the next `prepare()` no longer includes collections written before it in its first event page or stream datum.

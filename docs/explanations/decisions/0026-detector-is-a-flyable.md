@@ -49,11 +49,28 @@ class MyDetector(StandardDetector):
 - Datakeys are named after the Device, whose name only exists once `init_devices` calls
   `set_name`, so `StandardFlyable` passes the name to `prepare_to_fly`.
 
-### A provider's datakey replaces a registered signal of its name
+### The Device binds the collect verb at `prepare()`
 
-A value can be both a registered signal and written by a data logic, such as an
-areaDetector plugin scalar that the HDF writer also writes as an NDAttribute. So:
+A detector makes stream assets or event pages, never both
+([ADR 0025](0025-bounded-data-logic-tier.md)). The bluesky bundler picks which to call
+from the *static* type, so declaring both would silently drop the pages, and declaring
+neither could not fly. So `StandardDetector.prepare()` overrides the flyer's and, when it
+succeeds, binds the verb `DetectorLogic.produces` names as an instance attribute and
+removes the other. A step scan restarts its bounded providers at each point, but they must
+make the same datakeys, so it keeps the verb it was prepared with.
 
+This is a bundler limitation: a device knows what it produced, and deciding from that is a
+few lines in `RunBundler.collect`. Once released, both verbs become plain methods and the
+override goes.
+
+### Pageable and streamable data mix when the stream assets cover them
+
+[ADR 0025](0025-bounded-data-logic-tier.md) made carrying both kinds of data logic an
+error, but it is useful: an areaDetector stats total can go into the HDF file as an
+NDAttribute *and* be read from the plugin's buffer. So:
+
+- A bounded logic leaves out the datakeys the unbounded ones make, and sits the scan out,
+  unarmed, if that is all of them.
 - A registered signal whose name a provider key has is dropped from `read()` and
   `describe()` while prepared, and keeps its hint, since the replacement has its name.
 - The provider key must have the signal's dtype and shape, optionally with a leading
@@ -103,8 +120,8 @@ no data logic is still a valid flyer for its triggering.
 
 One `DetectorCtx` threads from `prepare_to_fly` to `fly`; what exists only once flying
 lives in `fly`, so no field waits for kickoff as `| None`. The logic holds no state: the
-next `prepare()` gets the last context as `previous_ctx`, which is how providers carry over
-([ADR 0025](0025-data-logics-start-providers.md)).
+next `prepare()` gets the last context as `previous_ctx`, which is how unbounded providers
+carry over and bounded ones are restarted ([ADR 0025](0025-bounded-data-logic-tier.md)).
 The trigger logic is not re-prepared per step point.
 
 - A failed `prepare()` needs `unstage()`, and `stage()` forgets the context, so a retry is
@@ -128,8 +145,10 @@ been.
   detector's states. So `describe()` and the collect verbs still work after a failed
   fly. `read()` also checks the state, as it means something only after `trigger()`; before
   that it raises rather than return nothing.
+- A detector satisfies neither `WritesStreamAssets` nor `EventPageCollectable` until
+  prepared; the RunEngine only dispatches on them after prepare.
 - `StandardDetector` no longer implements `complete`, `kickoff`, `stage` or `unstage`, so
   lifecycle changes reach detectors too. It adds `__on_*` hooks for `read()`, `describe()`,
   `hints`, suppression and `unstage()`, registered in lists rather than overriding the
   verbs, so mix-ins combined on one Device do not shadow each other through the MRO. It
-  overrides none of the flyer's verbs.
+  overrides only `prepare()`, to bind the collect verb.
