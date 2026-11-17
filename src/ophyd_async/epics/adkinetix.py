@@ -88,9 +88,7 @@ class KinetixTriggerLogic(DetectorTriggerLogic):
         await prepare_filter(self.process_plugin, num_filter=exposures_per_collection)
 
     async def default_trigger_info(self):
-        return await trigger_info_from_driver(
-            self.driver.num_images, self.process_plugin
-        )
+        return await trigger_info_from_driver(self.driver, self.process_plugin)
 
 
 class KinetixDetector(AreaDetector[KinetixDriverIO]):

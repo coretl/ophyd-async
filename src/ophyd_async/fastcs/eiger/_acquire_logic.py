@@ -1,3 +1,5 @@
+from collections.abc import AsyncGenerator
+
 from ophyd_async.core import (
     DEFAULT_TIMEOUT,
     DetectorAcquireLogic,
@@ -15,10 +17,9 @@ class EigerAcquireLogic(DetectorAcquireLogic):
         self.detector = detector
         self.arm_when_ready = arm_when_ready
 
-    async def start_acquiring(self):
+    async def acquire(self) -> AsyncGenerator[None, None]:
         await self.arm_when_ready.trigger()
-
-    async def wait_for_idle(self):
+        yield
         await wait_for_value(self.detector.state, "idle", timeout=DEFAULT_TIMEOUT)
 
     async def ensure_stopped(self):

@@ -7,6 +7,7 @@ from ophyd_async.core import (
     StaticPathProvider,
     TriggerInfo,
     callback_on_mock_put,
+    get_mock,
     init_devices,
     set_mock_value,
 )
@@ -62,6 +63,9 @@ async def test_data_type_inferred_from_counter_depth(
 async def test_prepare_external_edge(
     test_admerlin: admerlin.MerlinDetector,
 ):
+    await test_admerlin.stage()
+    # Only the calls after stage() are of interest
+    get_mock(test_admerlin).reset_mock()
     await test_admerlin.prepare(
         TriggerInfo(
             trigger=DetectorTrigger.EXTERNAL_EDGE,

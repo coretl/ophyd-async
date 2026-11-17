@@ -1,8 +1,8 @@
 import asyncio
+from collections.abc import AsyncGenerator
 
 from ophyd_async.core import (
     DEFAULT_TIMEOUT,
-    AsyncStatus,
     DetectorAcquireLogic,
     EnableDisable,
     SignalR,
@@ -25,7 +25,7 @@ class ADAcquireLogic(DetectorAcquireLogic):
         Whether the detector should wait for its plugins to drain before it
         reports acquisition as complete. `WaitForPlugins` makes the driver's
         `AcquireBusy` wait for the number of queued arrays to reach zero, and
-        `wait_for_idle` blocks on the `acquire` put callback, so turning it on
+        `acquire` waits for the `acquire` put callback, so turning it on
         is what makes a step scan read plugin scalars for the frame it just
         took rather than the one before. Defaults to on, since racing is
         silent and the wait costs nothing when a file writer is the slowest
@@ -48,7 +48,6 @@ class ADAcquireLogic(DetectorAcquireLogic):
             self.driver_armed_signal = driver.acquire
         self.wait_for_plugins = wait_for_plugins
         self.timeout = timeout
-        self.acquire_status: AsyncStatus | None = None
 
     async def ensure_ready(self):
         # Stop first: WaitForPlugins is latched and has no _RBV, so set it once
@@ -59,19 +58,17 @@ class ADAcquireLogic(DetectorAcquireLogic):
         await self.ensure_stopped()
         await self.driver.wait_for_plugins.set(self.wait_for_plugins)
 
-    async def start_acquiring(self):
-        self.acquire_status = await set_and_wait_for_other_value(
+    async def acquire(self) -> AsyncGenerator[None, None]:
+        async with await set_and_wait_for_other_value(
             set_signal=self.driver.acquire,
             set_value=True,
             match_signal=self.driver_armed_signal,
             match_value=True,
             wait_for_set_completion=False,
             timeout=self.timeout,
-        )
-
-    async def wait_for_idle(self):
-        if self.acquire_status:
-            await self.acquire_status
+        ) as status:
+            yield
+            await status
         await wait_for_good_state(
             self.driver.detector_state,
             {ADState.IDLE, ADState.ABORTED},
@@ -91,8 +88,8 @@ class ADContAcqAcquireLogic(DetectorAcquireLogic):
     Deliberately has no `wait_for_plugins` equivalent to [](#ADAcquireLogic).
     That setting gates the driver's `AcquireBusy` going to 0 at the end of an
     acquisition, and here the driver is always acquiring, so there is no such
-    transition to wait on. `wait_for_idle` waits on the circular buffer's
-    capture instead.
+    transition to wait on. `acquire` waits on the circular buffer's trigger
+    instead.
 
     :param driver: The continuously acquiring detector driver
     :param cb_plugin: The circular buffer plugin gating downstream plugins
@@ -149,7 +146,7 @@ class ADContAcqAcquireLogic(DetectorAcquireLogic):
             timeout=DEFAULT_TIMEOUT,
         )
 
-    async def start_acquiring(self):
+    async def acquire(self) -> AsyncGenerator[None, None]:
         num_frames_to_skip = self.num_frames_to_skip
         if num_frames_to_skip:
             initial_count, acquire_period = await asyncio.gather(
@@ -163,8 +160,7 @@ class ADContAcqAcquireLogic(DetectorAcquireLogic):
                 timeout=num_frames_to_skip * acquire_period + DEFAULT_TIMEOUT,
             )
         await self.cb_plugin.trigger_.set(True)
-
-    async def wait_for_idle(self):
+        yield
         num_images, acquire_period = await asyncio.gather(
             self.cb_plugin.post_count.get_value(),
             self.acquire_period_signal.get_value(),
