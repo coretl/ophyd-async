@@ -474,6 +474,9 @@ class DetectorCtx:
     unbounded_providers: Sequence[DataProvider] = ()
     #: The datakeys of every provider, the same at every prepare of the stage
     datakeys: dict[str, DataKey] = field(default_factory=dict)
+    #: What `DetectorSuppressLogic.hidden_datakeys` returned at the first
+    #: prepare of the stage, the same at every prepare of it
+    hidden: set[str] = field(default_factory=set)
     #: The collections every unbounded data logic had written at the end of
     #: prepare()
     unbounded_start_collections: int = 0
@@ -673,6 +676,28 @@ def _preserve_detector_state() -> bool:
     return os.environ.get("OPHYD_ASYNC_PRESERVE_DETECTOR_STATE", "NO").upper() == "YES"
 
 
+class DetectorSuppressLogic:
+    """Base class for saying which readables a detector's data hides."""
+
+    @abstractmethod
+    async def hidden_datakeys(self) -> set[str]:
+        """The names of the readables the detector's data hides.
+
+        Called at the first `prepare()` after `stage()`, and again at each later
+        one, which raises if the result differs. Each name is that of a readable
+        the detector registers.
+        """
+
+
+def _raise_if_hidden_changed(name: str, before: set[str], now: set[str]) -> None:
+    changed = sorted(before ^ now)
+    if changed:
+        raise RuntimeError(
+            f"{name}: hidden datakeys changed since the first prepare() after "
+            f"stage(): {changed}. unstage() and stage() to use the new values."
+        )
+
+
 @dataclass(frozen=True, kw_only=True, eq=False)
 class DetectorLogic(FlyableLogic[TriggerInfo, DetectorCtx]):
     """Drive a detector through its trigger, acquire and data logics.
@@ -684,11 +709,13 @@ class DetectorLogic(FlyableLogic[TriggerInfo, DetectorCtx]):
         with the hardware's current timing is supported
     :param acquire: starts and stops acquisition
     :param data: the data logics, each publishing one part of the data
+    :param suppress: says which registered readables the data hides
     """
 
     trigger: DetectorTriggerLogic | None = None
     acquire: DetectorAcquireLogic | None = None
     data: Sequence[BoundedDataLogic[Any] | UnboundedDataLogic[Any]] = ()
+    suppress: DetectorSuppressLogic | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "data", tuple(self.data))
@@ -755,22 +782,38 @@ class DetectorLogic(FlyableLogic[TriggerInfo, DetectorCtx]):
     ) -> AsyncGenerator[DetectorCtx | WatcherUpdate, None]:
         """Set the trigger logic up, yield the context, then start the data.
 
-        The context holds `value` and the collection period, which is read back
-        from the trigger logic when `value` leaves the livetime at 0. An
+        The context holds `value`, the collection period, which is read back
+        from the trigger logic when `value` leaves the livetime at 0, and what
+        the suppress logic hid. That is asked before the trigger logic is
+        prepared, and raises at a later prepare if it differs from the first. An
         externally triggered detector is armed last, after the data logics are
         started so their buffers are sized.
         """
+        hidden = await self._hidden_datakeys(name, previous_ctx)
         await self._prepare_trigger_logic(value)
         # After preparing the trigger logic, as the hardware then holds the
         # values read back
         collection_period = await self._resolve_collection_period(value)
         ctx = DetectorCtx(
-            trigger_info=value, name=name, collection_period=collection_period
+            trigger_info=value,
+            name=name,
+            collection_period=collection_period,
+            hidden=hidden,
         )
         yield ctx
         await self._start_providers(ctx, previous_ctx)
         if value.trigger is not DetectorTrigger.INTERNAL:
             ctx.external_acquire_gen = await self._arm()
+
+    async def _hidden_datakeys(
+        self, name: str, previous_ctx: DetectorCtx | None
+    ) -> set[str]:
+        hidden = (
+            set() if self.suppress is None else await self.suppress.hidden_datakeys()
+        )
+        if previous_ctx is not None:
+            _raise_if_hidden_changed(name, previous_ctx.hidden, hidden)
+        return hidden
 
     async def _start_providers(
         self, ctx: DetectorCtx, previous_ctx: DetectorCtx | None
@@ -1220,11 +1263,11 @@ class StandardDetector(
         if self._ctx is not NOT_PREPARED and self._ctx.external_acquire_gen:
             await self._ctx.external_acquire_gen.aclose()
 
-    def __on_suppressed_datakeys(self) -> Mapping[str, DataKey]:
-        """The datakeys of the serving providers."""
+    def __on_suppressed_datakeys(self) -> Mapping[str, DataKey | None]:
+        """The datakeys of the serving providers and what the suppress logic hides."""
         if self._ctx is NOT_PREPARED:
             return {}
-        return self._ctx.datakeys
+        return {**self._ctx.datakeys, **dict.fromkeys(self._ctx.hidden)}
 
     async def __on_describe(self) -> dict[str, DataKey]:
         """What the data logics contribute to `describe()`.

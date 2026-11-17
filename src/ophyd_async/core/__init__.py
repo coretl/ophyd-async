@@ -29,6 +29,7 @@ from ._detector import (
     DetectorAcquireLogic,
     DetectorDataLogic,
     DetectorLogic,
+    DetectorSuppressLogic,
     DetectorTrigger,
     DetectorTriggerLogic,
     StandardDetector,
@@ -306,6 +307,7 @@ __all__ = [
     "BoundedDataLogic",
     "UnboundedDataLogic",
     "DetectorLogic",
+    "DetectorSuppressLogic",
     "StandardDetector",
     # Path
     "PathInfo",
