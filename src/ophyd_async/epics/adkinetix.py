@@ -19,7 +19,7 @@ from ophyd_async.epics.adcore import NDProcessIO
 from .adcore import (
     ADAcquireLogic,
     ADBaseIO,
-    ADWriterFactory,
+    ADDataFactory,
     AreaDetector,
     NDPluginBaseIO,
     plugins_with_proc,
@@ -108,7 +108,7 @@ class KinetixDetector(AreaDetector[KinetixDriverIO]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         driver_suffix: str = "cam1:",
         proc_suffix: str | None = None,
         plugins: dict[str, NDPluginBaseIO] | None = None,

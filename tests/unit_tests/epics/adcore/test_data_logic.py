@@ -31,7 +31,7 @@ async def hdf_det(
     async with init_devices(mock=True):
         detector = adsimdetector.SimDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             plugins={"stats": adcore.NDStatsIO("PREFIX:STATS:")},
         )
     set_mock_value(detector.driver.array_size_x, 1024)
@@ -122,7 +122,7 @@ async def test_a_writer_follows_its_plugin_by_default(
     plugin_enabled: EnableDisable,
     makes_provider: bool,
 ):
-    factory = getattr(adcore.ADWriterFactory, kind)(static_path_provider)
+    factory = getattr(adcore.ADDataFactory, kind)(static_path_provider)
     writer, logic = factory("PREFIX:", hdf_det.driver, [])
     async with init_devices(mock=True):
         writer.set_name(kind)
@@ -149,7 +149,7 @@ async def test_hdf_writer_passes_parent_name_to_path_provider(tmp_path: Path):
     )
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
-            "PREFIX:", adcore.ADWriterFactory.hdf(pp), name="sim_detector"
+            "PREFIX:", adcore.ADDataFactory.hdf(pp), name="sim_detector"
         )
 
     writer = det.get_plugin("hdf", adcore.NDPluginFileIO)
@@ -201,8 +201,8 @@ async def test_prepare_hdf(
 @pytest.mark.parametrize(
     "factory_cls,extension",
     [
-        (adcore.ADWriterFactory.jpeg, ".jpg"),
-        (adcore.ADWriterFactory.tiff, ".tiff"),
+        (adcore.ADDataFactory.jpeg, ".jpg"),
+        (adcore.ADDataFactory.tiff, ".tiff"),
     ],
 )
 async def test_prepare_multipart(
@@ -260,7 +260,7 @@ async def test_hdf_chunk_sized_from_flush_period(
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             # Averages the exposures of each collection into one frame
             proc_suffix="PROC:",
         )
@@ -293,9 +293,9 @@ async def test_hdf_chunk_sized_from_flush_period(
 @pytest.mark.parametrize(
     "factory_cls,is_hdf",
     [
-        (adcore.ADWriterFactory.hdf, True),
-        (adcore.ADWriterFactory.jpeg, False),
-        (adcore.ADWriterFactory.tiff, False),
+        (adcore.ADDataFactory.hdf, True),
+        (adcore.ADDataFactory.jpeg, False),
+        (adcore.ADDataFactory.tiff, False),
     ],
 )
 async def test_can_specify_different_uri_and_path(
@@ -352,9 +352,9 @@ async def test_can_specify_different_uri_and_path(
 @pytest.mark.parametrize(
     "factory_cls,is_hdf",
     [
-        (adcore.ADWriterFactory.hdf, True),
-        (adcore.ADWriterFactory.jpeg, False),
-        (adcore.ADWriterFactory.tiff, False),
+        (adcore.ADDataFactory.hdf, True),
+        (adcore.ADDataFactory.jpeg, False),
+        (adcore.ADDataFactory.tiff, False),
     ],
 )
 async def test_can_override_uri_with_different_path_semantics(
@@ -513,7 +513,7 @@ async def test_multipart_start_waits_for_num_captured_to_read_zero(
 ):
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
-            "PREFIX:", adcore.ADWriterFactory.tiff(static_path_provider)
+            "PREFIX:", adcore.ADDataFactory.tiff(static_path_provider)
         )
     writer = det.get_plugin("tiff", adcore.NDPluginFileIO)
     set_mock_value(writer.file_path_exists, True)

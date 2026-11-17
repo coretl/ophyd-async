@@ -31,7 +31,7 @@
 - A registered signal with the same name as a datakey a serving data provider makes is left out of `read()` and `describe()`, so the provider's data replaces it.
 - `kickoff()` during or after a `StandardDetector.trigger()` raises `TransitionError`. After a failed `trigger()`, `unstage()` and `stage()` the detector before using it again.
 - `TriggerInfo.number_of_events` must be positive.
-- `adcore.ADWriterFactory` factories take `always_enable`, default `False`: a plugin whose `EnableCallbacks` is off at the first `prepare()` sits out until the next `stage()`. Pass `always_enable=True` to keep the HDF writer always on.
+- `adcore.ADWriterFactory` is renamed `ADDataFactory`, and the old name is deprecated. Its factories take `always_enable`, default `False`: a plugin whose `EnableCallbacks` is off at the first `prepare()` sits out until the next `stage()`. Pass `always_enable=True` to keep the HDF writer always on.
 
 ### Added
 

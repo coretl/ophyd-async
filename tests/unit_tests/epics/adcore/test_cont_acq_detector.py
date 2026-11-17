@@ -130,7 +130,7 @@ async def test_cont_acq_skips_dirty_frames(
     async with init_devices(mock=True):
         det = adcore.ContAcqDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             proc_suffix=proc_suffix,
             num_frames_to_skip=num_frames_to_skip,
         )
@@ -303,7 +303,7 @@ async def cont_acq_hdf_detector(
 ) -> adcore.AreaDetector[adcore.ADBaseIO]:
     async with init_devices(mock=True):
         det = adcore.ContAcqDetector(
-            "PREFIX:", adcore.ADWriterFactory.hdf(static_path_provider)
+            "PREFIX:", adcore.ADDataFactory.hdf(static_path_provider)
         )
     set_mock_value(det.driver.image_mode, adcore.ADImageMode.CONTINUOUS)
     set_mock_value(det.driver.acquire_time, 0.8)

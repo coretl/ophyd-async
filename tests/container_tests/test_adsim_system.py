@@ -106,7 +106,7 @@ def adsim(RE: RunEngine, shared_tmp_path: Path) -> AreaDetector:
         process_plugin = NDProcessIO(f"{prefix}-DI-CAM-01:PROC:")
         adsim = SimDetector(
             f"{prefix}-DI-CAM-01:",
-            adcore.ADWriterFactory.hdf(
+            adcore.ADDataFactory.hdf(
                 provider, writer_suffix="HDF5:", always_enable=True
             ),
             driver_suffix="DET:",

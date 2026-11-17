@@ -19,7 +19,7 @@ from ophyd_async.core import (
 from .adcore import (
     ADAcquireLogic,
     ADBaseIO,
-    ADWriterFactory,
+    ADDataFactory,
     AreaDetector,
     NDPluginBaseIO,
     NDProcessIO,
@@ -110,7 +110,7 @@ class AravisDetector(AreaDetector[AravisDriverIO]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         driver_suffix: str = "cam1:",
         proc_suffix: str | None = None,
         override_deadtime: float | None = None,
