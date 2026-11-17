@@ -31,7 +31,12 @@
 - A registered signal with the same name as a datakey a serving data provider makes is left out of `read()` and `describe()`, so the provider's data replaces it.
 - `kickoff()` during or after a `StandardDetector.trigger()` raises `TransitionError`. After a failed `trigger()`, `unstage()` and `stage()` the detector before using it again.
 - `TriggerInfo.number_of_events` must be positive.
-- `adcore.ADWriterFactory` is renamed `ADDataFactory`, and the old name is deprecated. Its factories take `always_enable`, default `False`: a plugin whose `EnableCallbacks` is off at the first `prepare()` sits out until the next `stage()`. Pass `always_enable=True` to keep the HDF writer always on.
+- `adcore.ADWriterFactory` is renamed `ADDataFactory`, and the old name is deprecated. It is built with keywords only, `build` replacing `writer_cls`, `writer_suffix` and `writer_name`. Its factories take `always_enable`, default `False`: a plugin whose `EnableCallbacks` is off at the first `prepare()` sits out until the next `stage()`. Pass `always_enable=True` to keep the HDF writer always on.
+- `setup_ndstats_sum` is removed: list the stats plugin in `ADDataFactory.hdf(ndattribute_sources=)` instead. Each `NDStatsIO` statistic is named after its scalar signal wherever it appears, so `det-sum` is now `det-stats-total`.
+- `AreaDetector` registers every plugin as a `CHILD` readable, so their read, configuration and hinted signals appear in the detector's `read()`, `read_configuration()` and `hints`. Opt a plugin out with `set_readable_format(plugin, None)`.
+- `AreaDetector` leaves out of `read()`, `describe()` and `hints` the signals of a plugin or statistic switched off at the first `prepare()` after `stage()`, and a later `prepare()` raises if those switches have changed.
+- `NDROIStatIO.stage()` names each channel `<plugin name>-<Name PV>`, which changes the datakey of every ROI stat signal. Unused channels are left out of `read()`, `describe()` and `hints`.
+- `adcore.prepare_filter` sets `enable_filter` to False for a single exposure.
 
 ### Added
 
@@ -44,6 +49,8 @@
 - `TriggerInfo.flush_period`, the seconds between flushes of the data being written. `ADHDFDataLogic` sizes its HDF chunks from it (#1309).
 - A `StandardDetector` with no data logic can be kicked off.
 - `DetectorSuppressLogic`, set as `DetectorLogic.suppress`, names the readables a detector's data hides.
+- `adcore.TimeSeriesDataLogic` and `ADDataFactory.time_series(plugin)` publish the time series of an `NDPluginStats` or `NDPluginROIStat` as event pages, for an areaDetector that writes no file.
+- `NDParam`, `NDPluginBaseIO.get_enabled_params()`, `NDStatsIO.ts_plugin`, `NDROIStatTSControl`, the `ts_*` time series signals of `NDStatsIO` and `NDROIStatNIO`, and `NDROIStatNIO.net`.
 
 ### Changed
 
