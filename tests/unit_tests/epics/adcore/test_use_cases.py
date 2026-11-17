@@ -24,7 +24,7 @@ async def test_step_scan_hdf_detector_with_stats_and_temp(
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             plugins={"stats": stat},
         )
         temp = epics_signal_r(float, "SAMP:TEMP:RBV")
@@ -218,7 +218,7 @@ async def test_step_scan_tiff_detector(
 ):
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
-            "PREFIX:", adcore.ADWriterFactory.tiff(static_path_provider)
+            "PREFIX:", adcore.ADDataFactory.tiff(static_path_provider)
         )
 
     writer = det.get_plugin("tiff", adcore.NDPluginFileIO)
@@ -284,7 +284,7 @@ async def test_step_scan_tiff_detector(
 async def test_flyscan_aravis_detector(static_path_provider: StaticPathProvider):
     async with init_devices(mock=True):
         det = adaravis.AravisDetector(
-            "PREFIX:", adcore.ADWriterFactory.hdf(static_path_provider)
+            "PREFIX:", adcore.ADDataFactory.hdf(static_path_provider)
         )
 
     writer = det.get_plugin("hdf", adcore.NDPluginFileIO)
@@ -429,7 +429,7 @@ async def test_2_rois_with_hdf(tmp_path):
     async with init_devices(mock=True):
         det = adaravis.AravisDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(
+            adcore.ADDataFactory.hdf(
                 path_provider,
                 writer_suffix="HDF1:",
                 writer_name="hdf1",
@@ -440,7 +440,7 @@ async def test_2_rois_with_hdf(tmp_path):
                     color_mode_signal=driver.color_mode,
                 ),
             ),
-            adcore.ADWriterFactory.hdf(
+            adcore.ADDataFactory.hdf(
                 path_provider,
                 writer_suffix="HDF2:",
                 writer_name="hdf2",
@@ -599,7 +599,7 @@ async def test_step_scan_keep_numimages(
     async with init_devices(mock=True):
         det = adsimdetector.SimDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             plugins={"stats": stat},
         )
     # Plugins are not registered automatically, and the stats readables give one
@@ -716,7 +716,7 @@ async def test_kinetix_step_scan_with_averaging_filter(
 
         det = adkinetix.KinetixDetector(
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             proc_suffix="PROC:",
         )
 
@@ -837,7 +837,7 @@ async def test_hdf_by_settings_follows_its_plugin_at_stage_for_the_whole_stage(
         det = adsimdetector.SimDetector(
             "PREFIX:",
             *(
-                adcore.ADWriterFactory.hdf(
+                adcore.ADDataFactory.hdf(
                     path_provider,
                     writer_suffix=f"HDF{i}:",
                     writer_name=f"hdf{i}",

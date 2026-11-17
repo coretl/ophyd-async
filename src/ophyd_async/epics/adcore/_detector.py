@@ -13,7 +13,7 @@ from ophyd_async.core import (
 from ophyd_async.core import StandardReadableFormat as Format
 
 from ._acquire_logic import ADContAcqAcquireLogic
-from ._data_logic import ADWriterFactory
+from ._data_logic import ADDataFactory
 from ._io import (
     ADBaseIO,
     ADBaseIOT,
@@ -30,7 +30,7 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
         self,
         driver: ADBaseIOT,
         prefix: str | None = None,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         acquire_logic: DetectorAcquireLogic | None = None,
         trigger_logic: DetectorTriggerLogic | None = None,
         plugins: Mapping[str, NDPluginBaseIO] | None = None,
@@ -152,7 +152,7 @@ class ContAcqDetector(AreaDetector[ADBaseIOT]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         driver_cls: type[ADBaseIOT] = ADBaseIO,
         driver_suffix: str = "cam1:",
         cb_suffix: str = "CB1:",

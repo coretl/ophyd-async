@@ -1,4 +1,5 @@
 import asyncio
+import warnings
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import PureWindowsPath
@@ -324,7 +325,7 @@ class ADMultipartDataLogic(UnboundedDataLogic[StreamResourceDataProvider]):
 
 
 @dataclass
-class ADWriterFactory(Generic[NDPluginBaseIOT]):
+class ADDataFactory(Generic[NDPluginBaseIOT]):
     """Factory that creates a plugin and its matching data logic.
 
     Construct using the static methods `hdf`, `jpeg` or `tiff`, then pass one
@@ -408,7 +409,7 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
         | None = None,
         hinted: bool = True,
         always_enable: bool = False,
-    ) -> "ADWriterFactory[NDFileHDF5IO]":
+    ) -> "ADDataFactory[NDFileHDF5IO]":
         """Create a factory for an HDF5 file writer.
 
         :param path_provider: Provides file path information for each acquisition.
@@ -429,7 +430,7 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
             another data logic can serve them. True serves every scan. Starting
             switches the plugin on either way.
         """
-        return ADWriterFactory(
+        return ADDataFactory(
             writer_cls=NDFileHDF5IO,
             writer_suffix=writer_suffix,
             writer_name=writer_name,
@@ -458,7 +459,7 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
         | None = None,
         hinted: bool = True,
         always_enable: bool = False,
-    ) -> "ADWriterFactory[NDPluginFileIO]":
+    ) -> "ADDataFactory[NDPluginFileIO]":
         """Create a factory for a JPEG file writer.
 
         :param path_provider: Provides file path information for each acquisition.
@@ -478,7 +479,7 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
             another data logic can serve them. True serves every scan. Starting
             switches the plugin on either way.
         """
-        return ADWriterFactory(
+        return ADDataFactory(
             writer_cls=NDPluginFileIO,
             writer_suffix=writer_suffix,
             writer_name=writer_name,
@@ -509,7 +510,7 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
         | None = None,
         hinted: bool = True,
         always_enable: bool = False,
-    ) -> "ADWriterFactory[NDPluginFileIO]":
+    ) -> "ADDataFactory[NDPluginFileIO]":
         """Create a factory for a TIFF file writer.
 
         :param path_provider: Provides file path information for each acquisition.
@@ -529,7 +530,7 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
             another data logic can serve them. True serves every scan. Starting
             switches the plugin on either way.
         """
-        return ADWriterFactory(
+        return ADDataFactory(
             writer_cls=NDPluginFileIO,
             writer_suffix=writer_suffix,
             writer_name=writer_name,
@@ -548,3 +549,34 @@ class ADWriterFactory(Generic[NDPluginBaseIOT]):
                 )
             ),
         )
+
+
+class ADWriterFactory(ADDataFactory[NDPluginBaseIOT]):
+    """Deprecated name of `ADDataFactory`."""
+
+    def __post_init__(self) -> None:
+        _warn_writer_factory()
+
+    @staticmethod
+    def hdf(*args, **kwargs) -> ADDataFactory[NDFileHDF5IO]:
+        _warn_writer_factory()
+        return ADDataFactory.hdf(*args, **kwargs)
+
+    @staticmethod
+    def jpeg(*args, **kwargs) -> ADDataFactory[NDPluginFileIO]:
+        _warn_writer_factory()
+        return ADDataFactory.jpeg(*args, **kwargs)
+
+    @staticmethod
+    def tiff(*args, **kwargs) -> ADDataFactory[NDPluginFileIO]:
+        _warn_writer_factory()
+        return ADDataFactory.tiff(*args, **kwargs)
+
+
+def _warn_writer_factory() -> None:
+    warnings.warn(
+        DeprecationWarning(
+            "'ADWriterFactory' is deprecated, use 'ADDataFactory' instead"
+        ),
+        stacklevel=3,
+    )
