@@ -5,7 +5,7 @@ behaviour the spec wants that something outside ophyd-async still prevents.
 
 The fakes in this file stand in for the three kinds of device a detector drives:
 a device-side `Source` (counter plus data), an acquire logic that fills it, and
-data logics that publish it as stream assets.
+data logics that publish it as readables, event pages or stream assets.
 """
 
 import asyncio
@@ -20,16 +20,21 @@ import bluesky.preprocessors as bpp
 import numpy as np
 import pytest
 from bluesky import RunEngine
+from event_model import DataKey
+from event_model.documents import PartialEventPage
 
 from ophyd_async.core import (
     KICKED_OFF,
     Array1D,
     AsyncStatus,
+    BoundedDataLogic,
     DetectorAcquireLogic,
+    DetectorDataLogic,
     DetectorLogic,
     DetectorTrigger,
     DetectorTriggerLogic,
     FlyableLogic,
+    PageableDataProvider,
     SignalR,
     StandardDetector,
     StandardFlyable,
@@ -115,24 +120,94 @@ class FakeStream(StreamResourceDataProvider):
             yield doc
 
 
-class FakeData(UnboundedDataLogic[Any]):
-    """Publishes a `Source` as stream assets.
+class FakePageable(PageableDataProvider):
+    """Event pages straight from a source, one value per collection.
 
-    :param suffix: the suffix of the hinted datakey
+    Every datakey holds the same values. `make_page` carries on from the last
+    page.
     """
+
+    def __init__(
+        self,
+        datakey_names: Sequence[str],
+        source: Source,
+        collections_per_event: int,
+        shape_tail: tuple[int, ...] = (),
+        dtype_numpy: str = "<i8",
+        owner: Any = None,
+    ) -> None:
+        super().__init__(source.written, collections_per_event)
+        self.datakey_names = datakey_names
+        self.source = source
+        self.owner = owner
+        self.shape_tail = shape_tail
+        self.dtype_numpy = dtype_numpy
+        self.start_new_resources(0)
+
+    def start_new_resources(self, origin: int) -> None:
+        self.origin = origin
+        self.published = 0
+
+    async def make_datakeys(self) -> dict[str, DataKey]:
+        return {
+            datakey_name: DataKey(
+                source="fake",
+                shape=[self.collections_per_event, *self.shape_tail],
+                dtype="array",
+                dtype_numpy=self.dtype_numpy,
+            )
+            for datakey_name in self.datakey_names
+        }
+
+    def _page(self, first: int, last: int) -> PartialEventPage:
+        cpe = self.collections_per_event
+        events = range(first, last)
+        starts = [self.origin + e * cpe for e in events]
+        values = [self.source.data[start : start + cpe] for start in starts]
+        times = [float(e) for e in events]
+        return {
+            "data": dict.fromkeys(self.datakey_names, values),
+            "time": times,
+            "timestamps": dict.fromkeys(self.datakey_names, times),
+        }
+
+    async def make_page(self, index: int) -> PartialEventPage | None:
+        if self.owner and self.owner.fail:
+            raise BoomError("make_page")
+        if index <= self.published:
+            return None
+        page = self._page(self.published, index)
+        self.published = index
+        return page
+
+
+class _FakeData:
+    """Publishes a `Source` as event pages or stream assets.
+
+    :param bounded: a finite buffer: it needs a finite N (raises for N=0 if it
+        has datakeys left to make) and is cleared at each start
+    :param suffix: the suffix of the hinted datakey
+    :param also: the suffixes of further datakeys holding the same data
+    """
+
+    bounded: bool
 
     def __init__(
         self,
         source: Source,
         *,
+        publication: str,
         suffix: str = "",
+        also: Sequence[str] = (),
         shape_tail: tuple[int, ...] = (),
         dtype_numpy: str = "<i8",
         tmp_path: Any = None,
         hints: Callable[[str], Sequence[str]] | None = None,
     ) -> None:
         self.source = source
+        self.publication = publication
         self.datakey_suffix = suffix
+        self.also = also
         self.shape_tail = shape_tail
         self.dtype_numpy = dtype_numpy
         self.tmp_path = tmp_path
@@ -146,35 +221,59 @@ class FakeData(UnboundedDataLogic[Any]):
         #: What was done to this logic, in order
         self.log: list[str] = []
 
-    async def start_provider(
+    @property
+    def collections_written(self) -> SignalR[int]:
+        return self.source.written
+
+    async def _start(
         self,
         name: str,
+        existing_datakeys: Sequence[str],
+        num_collections: int,
         collections_per_event: int,
         collection_period: float,
-        flush_period: float,
     ) -> Any:
         self.periods.append(collection_period)
-        if self.sit_out:
+        datakey_names = [
+            datakey_name
+            for datakey_name in (
+                name + suffix for suffix in (self.datakey_suffix, *self.also)
+            )
+            if datakey_name not in existing_datakeys
+        ]
+        if self.sit_out or not datakey_names:
             return None
         self.starts += 1
         self.log.append("start")
         if self.fail_start:
             raise BoomError("start")
-        datakey_name = name + self.datakey_suffix
-        return FakeStream(
-            uri=f"file://localhost/{self.tmp_path.as_posix().lstrip('/')}/f.h5",
-            resources=[
-                StreamResourceInfo(
-                    data_key=datakey_name,
-                    shape=self.shape_tail,
-                    chunk_shape=(1, *self.shape_tail),
-                    dtype_numpy=self.dtype_numpy,
-                    parameters={"dataset": "/data"},
-                )
-            ],
-            mimetype="application/x-hdf5",
-            collections_written=self.source.written,
-            collections_per_event=collections_per_event,
+        if self.bounded:
+            # A finite buffer is armed empty
+            await self.source.rearm()
+        if self.publication == "stream":
+            return FakeStream(
+                uri=f"file://localhost/{self.tmp_path.as_posix().lstrip('/')}/f.h5",
+                resources=[
+                    StreamResourceInfo(
+                        data_key=datakey_name,
+                        shape=self.shape_tail,
+                        chunk_shape=(1, *self.shape_tail),
+                        dtype_numpy=self.dtype_numpy,
+                        parameters={"dataset": "/data"},
+                    )
+                    for datakey_name in datakey_names
+                ],
+                mimetype="application/x-hdf5",
+                collections_written=self.source.written,
+                collections_per_event=collections_per_event,
+                owner=self,
+            )
+        return FakePageable(
+            datakey_names,
+            self.source,
+            collections_per_event,
+            shape_tail=self.shape_tail,
+            dtype_numpy=self.dtype_numpy,
             owner=self,
         )
 
@@ -187,9 +286,50 @@ class FakeData(UnboundedDataLogic[Any]):
         return self.hints(datakey_name) if self.hints else [datakey_name]
 
 
+class FakeBoundedData(_FakeData, BoundedDataLogic[Any]):
+    bounded = True
+
+    async def start_provider(
+        self,
+        name: str,
+        existing_datakeys: Sequence[str],
+        num_collections: int,
+        collections_per_event: int,
+        collection_period: float,
+        flush_period: float,
+    ) -> Any:
+        return await self._start(
+            name,
+            existing_datakeys,
+            num_collections,
+            collections_per_event,
+            collection_period,
+        )
+
+
+class FakeUnboundedData(_FakeData, UnboundedDataLogic[Any]):
+    bounded = False
+
+    async def start_provider(
+        self,
+        name: str,
+        collections_per_event: int,
+        collection_period: float,
+        flush_period: float,
+    ) -> Any:
+        # An unbounded source takes data for as long as it is told to
+        return await self._start(name, (), 1, collections_per_event, collection_period)
+
+
+def FakeData(  # noqa: N802
+    source: Source, *, bounded: bool, **kwargs: Any
+) -> FakeBoundedData | FakeUnboundedData:
+    return (FakeBoundedData if bounded else FakeUnboundedData)(source, **kwargs)
+
+
 def make_detector(
     name: str = "det",
-    *data: FakeData,
+    *data: _FakeData,
     acquire: DetectorAcquireLogic | None = None,
     trigger: DetectorTriggerLogic | None = None,
     readable: SignalR | None = None,
@@ -237,7 +377,7 @@ def fly_scan(det: StandardDetector, info: TriggerInfo):
 
 
 # ---------------------------------------------------------------------------
-# Use cases 1, 2, 3 and 11, through the RunEngine
+# Use cases 1, 2, 3, 5, 11 and the four quadrants of D2, through the RunEngine
 # ---------------------------------------------------------------------------
 
 
@@ -261,7 +401,7 @@ def test_uc2_streamable_step_scan_with_readables(RE: RunEngine, tmp_path):
     counts = soft_signal_rw(int, 7, name="det-counts")
     det = make_detector(
         "det",
-        FakeData(source, tmp_path=tmp_path),
+        FakeData(source, publication="stream", bounded=False, tmp_path=tmp_path),
         acquire=FillingAcquire(source),
         readable=counts,
     )
@@ -289,7 +429,7 @@ def test_uc3_streamable_fly_scan_makes_assets_and_no_events(RE: RunEngine, tmp_p
     source = Source()
     det = make_detector(
         "det",
-        FakeData(source, tmp_path=tmp_path),
+        FakeData(source, publication="stream", bounded=False, tmp_path=tmp_path),
         acquire=FillingAcquire(source, per_start=6),
     )
 
@@ -309,7 +449,7 @@ def test_two_runs_in_one_stage_each_have_their_own_stream_resource(
     RE: RunEngine, tmp_path
 ):
     source = Source()
-    data = FakeData(source, tmp_path=tmp_path)
+    data = FakeData(source, publication="stream", bounded=False, tmp_path=tmp_path)
     det = make_detector("det", data, acquire=FillingAcquire(source))
 
     @bpp.stage_decorator([det])
@@ -341,13 +481,88 @@ def test_two_runs_in_one_stage_each_have_their_own_stream_resource(
     assert runs[0]["stream_resource"][0]["uid"] != runs[1]["stream_resource"][0]["uid"]
 
 
-async def test_d2_progress_baseline_is_read_live_for_unbounded_sources(tmp_path):
+def test_uc5_pageable_step_scan_with_several_collections_per_event(RE: RunEngine):
+    """Use case 5 (and 4's buffer): one array reading of shape [N] per point.
+
+    The finite buffer is cleared between points, so each point holds its own N.
+    """
+    source = Source()
+    det = make_detector(
+        "det",
+        FakeData(source, publication="page", bounded=True),
+        acquire=FillingAcquire(source, per_start=3),
+    )
+
+    docs = run_plan(RE, step_scan(det, 2, TriggerInfo(collections_per_event=3)))
+
+    assert docs["descriptor"][0]["data_keys"]["det"]["shape"] == [3]
+    assert [e["data"]["det"] for e in docs["event"]] == [[0, 1, 2], [3, 4, 5]]
+
+
+def test_uc4_pageable_fly_scan_collects_event_pages(RE: RunEngine):
+    """Use case 4: N events come out of collect_pages as event pages."""
+    source = Source()
+    det = make_detector(
+        "det",
+        FakeData(source, publication="page", bounded=True),
+        acquire=FillingAcquire(source, per_start=4),
+    )
+
+    docs = run_plan(RE, fly_scan(det, TriggerInfo(number_of_events=4)))
+
+    (page,) = docs["event_page"]
+    assert page["data"]["det"] == [[0], [1], [2], [3]]
+    assert docs["stop"][0]["num_events"] == {"primary": 4}
+
+
+@pytest.mark.parametrize(
+    "publication,bounded",
+    [
+        ("stream", False),
+        ("stream", True),
+        ("page", True),
+        ("page", False),
+    ],
+)
+def test_d2_all_four_bound_by_publication_quadrants_step_scan(
+    RE: RunEngine, tmp_path, publication: str, bounded: bool
+):
+    """Bound and publication are separate axes (D2): every quadrant step-scans.
+
+    An unbounded pageable source (a monitor-fed accumulator) is never re-armed
+    and its count keeps rising, so the progress baseline of each point must be
+    read live; a baseline of 0 reads stale data.
+    """
+    source = Source()
+    det = make_detector(
+        "det",
+        FakeData(source, publication=publication, bounded=bounded, tmp_path=tmp_path),
+        acquire=FillingAcquire(source, per_start=1),
+    )
+
+    docs = run_plan(RE, step_scan(det, 3))
+
+    if publication == "page":
+        assert [e["data"]["det"] for e in docs["event"]] == [[0], [1], [2]]
+    else:
+        # A bounded provider is re-made at each point, so it starts a new stream
+        # resource each time; an unbounded one carries on in the same one
+        stops = [1, 1, 1] if bounded else [1, 2, 3]
+        assert [d["indices"]["stop"] for d in docs["stream_datum"]] == stops
+        assert len(docs["stream_resource"]) == (3 if bounded else 1)
+        assert docs["event"][0]["data"] == {}
+
+
+@pytest.mark.parametrize("publication", ["stream", "page"])
+async def test_d2_progress_baseline_is_read_live_for_unbounded_sources(
+    publication: str, tmp_path
+):
     """A source that already holds collections (e.g. left running) is not stale."""
     source = Source()
     await source.produce(5)
     det = make_detector(
         "det",
-        FakeData(source, tmp_path=tmp_path),
+        FakeData(source, publication=publication, bounded=False, tmp_path=tmp_path),
         acquire=FillingAcquire(source, per_start=1),
     )
     await det.stage()
@@ -359,33 +574,116 @@ async def test_d2_progress_baseline_is_read_live_for_unbounded_sources(tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# A data logic is started once a stage while its provider can carry over (D3)
+# Bounded logics are re-armed at each step point after the first (D2, D3)
 # ---------------------------------------------------------------------------
 
 
-async def test_d3_unbounded_logic_is_never_restarted_and_fly_never_rearms(tmp_path):
+async def test_d3_bounded_logic_is_restarted_at_each_point_after_the_first():
     source = Source()
-    data = FakeData(source, tmp_path=tmp_path)
-    det = make_detector("det", data, acquire=FillingAcquire(source, per_start=2))
+    data = FakeData(source, publication="page", bounded=True)
+    det = make_detector("det", data, acquire=FillingAcquire(source))
+    await det.stage()
+    await det.prepare(TriggerInfo())
+
+    await det.trigger()
+    assert data.starts == 1
+    await det.trigger()
+    await det.trigger()
+    assert data.starts == 3
+
+
+async def test_d3_step_scan_index_counts_since_prepare_across_points(tmp_path):
+    """get_index counts every point; a bounded provider only holds its own."""
+    bounded_source, open_source = Source(), Source()
+    det = make_detector(
+        "det",
+        FakeData(
+            bounded_source,
+            publication="stream",
+            bounded=True,
+            suffix="-b",
+            tmp_path=tmp_path,
+        ),
+        FakeData(open_source, publication="stream", bounded=False, tmp_path=tmp_path),
+        acquire=FillingAcquire(bounded_source, open_source),
+    )
+    await det.stage()
+    await det.prepare(TriggerInfo())
+    points = []
+    for _ in range(3):
+        await det.trigger()
+        index = await det.get_index()
+        docs = [d async for d in det.collect_asset_docs(index)]  # type: ignore[attr-defined]
+        points.append(
+            (
+                index,
+                [d["data_key"] for name, d in docs if name == "stream_resource"],
+                [
+                    (d["indices"]["start"], d["indices"]["stop"])
+                    for name, d in docs
+                    if name == "stream_datum"
+                ],
+            )
+        )
+    # The bounded provider is restarted at each point, so has a new resource
+    # holding one event, while the unbounded one carries on in its first
+    assert points == [
+        (1, ["det-b", "det"], [(0, 1), (0, 1)]),
+        (2, ["det-b"], [(0, 1), (1, 2)]),
+        (3, ["det-b"], [(0, 1), (2, 3)]),
+    ]
+
+
+async def test_d3_unbounded_logic_is_never_restarted_and_fly_never_rearms():
+    source = Source()
+    bounded = FakeData(source, publication="page", bounded=True)
+    other = Source()
+    unbounded = FakeData(other, publication="page", bounded=False, suffix="-u")
+    det = make_detector(
+        "det", bounded, unbounded, acquire=FillingAcquire(source, other, per_start=2)
+    )
     await det.stage()
     await det.prepare(TriggerInfo(number_of_events=2))
     await det.kickoff()
     await det.complete()
-    assert data.starts == 1
+    assert (bounded.starts, unbounded.starts) == (1, 1)
     await det.prepare(TriggerInfo())
     await det.trigger()
     await det.trigger()
-    # The provider carried over to the second prepare
-    assert data.starts == 1
+    # The unbounded provider carried over to the second prepare
+    assert (bounded.starts, unbounded.starts) == (3, 1)
 
 
-async def test_d3_fly_scan_with_an_unbounded_source_non_zero_at_kickoff(tmp_path):
-    source = Source()
-    await source.produce(4)
+async def test_d3_mixed_bounded_and_unbounded_pageable_steps_repeatedly():
+    """One baseline per bound group: the bounded one resets, the other counts on."""
+    bounded_source, open_source = Source(), Source()
+    await open_source.produce(3)
+    bounded = FakeData(bounded_source, publication="page", bounded=True, suffix="-b")
+    unbounded = FakeData(open_source, publication="page", bounded=False, suffix="-u")
     det = make_detector(
         "det",
-        FakeData(source, tmp_path=tmp_path),
-        acquire=FillingAcquire(source, per_start=3),
+        bounded,
+        unbounded,
+        acquire=FillingAcquire(bounded_source, open_source),
+    )
+    await det.stage()
+    await det.prepare(TriggerInfo())
+    values = []
+    for _ in range(3):
+        await det.trigger()
+        reading = await det.read()
+        values.append((reading["det-b"]["value"], reading["det-u"]["value"]))
+    assert values == [([0], [3]), ([1], [4]), ([2], [5])]
+
+
+async def test_d3_fly_scan_with_an_unbounded_source_non_zero_at_kickoff():
+    bounded_source, open_source = Source(), Source()
+    await open_source.produce(4)
+    det = make_detector(
+        "det",
+        FakeData(bounded_source, publication="page", bounded=True, suffix="-b"),
+        FakeData(open_source, publication="page", bounded=False, suffix="-u"),
+        acquire=FillingAcquire(bounded_source, open_source, per_start=3),
     )
     await det.stage()
     await det.prepare(TriggerInfo(number_of_events=3))
@@ -393,11 +691,20 @@ async def test_d3_fly_scan_with_an_unbounded_source_non_zero_at_kickoff(tmp_path
     await det.complete()
     # Events since prepare()
     assert await det.get_index() == 3
-    docs = [doc async for doc in det.collect_asset_docs()]
-    # The StreamDatum indexes the events in the file, after the 4 already there
-    assert [doc["indices"] for name, doc in docs if name == "stream_datum"] == [
-        {"start": 4, "stop": 7}
-    ]
+    (page,) = [p async for p in det.collect_pages()]  # type: ignore[attr-defined]
+    assert page["data"]["det-b"] == [[0], [1], [2]]
+    assert page["data"]["det-u"] == [[4], [5], [6]]
+
+
+class _BoundedAndUnbounded(BoundedDataLogic[Any], UnboundedDataLogic[Any]):
+    async def start_provider(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+@pytest.mark.parametrize("dl", [DetectorDataLogic(), _BoundedAndUnbounded()])
+def test_d3_data_must_be_a_bounded_or_an_unbounded_logic(dl):
+    with pytest.raises(TypeError, match="must inherit from exactly one of"):
+        DetectorLogic(data=[dl])
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +745,7 @@ async def reach(state: str, tmp_path) -> StandardDetector:
     acquire = GatedAcquire(source)
     det = make_detector(
         "det",
-        FakeData(source, tmp_path=tmp_path),
+        FakeData(source, publication="stream", bounded=False, tmp_path=tmp_path),
         acquire=acquire,
     )
     # "K" is kicked off with the fly still running
@@ -467,7 +774,7 @@ async def call(det: StandardDetector, verb: str) -> None:
         cast(GatedAcquire, det.logic.acquire).done.set()
         await asyncio.wait_for(det.complete(), 2)
     elif verb == "collect_asset_docs":
-        _ = [doc async for doc in det.collect_asset_docs()]
+        _ = [doc async for doc in det.collect_asset_docs()]  # type: ignore[attr-defined]
     else:
         await asyncio.wait_for(getattr(det, verb)(), 2)
 
@@ -547,7 +854,8 @@ async def test_lifecycle_verb_from_state(state, verb, ok, tmp_path):
 async def test_complete_while_kickoff_is_still_arming_raises(tmp_path):
     source = Source()
     acquire = SlowToArmAcquire(source)
-    det = make_detector("det", FakeData(source, tmp_path=tmp_path), acquire=acquire)
+    data = FakeData(source, publication="stream", bounded=False, tmp_path=tmp_path)
+    det = make_detector("det", data, acquire=acquire)
     await det.stage()
     await det.prepare(TriggerInfo())
     kickoff = det.kickoff()
@@ -562,6 +870,16 @@ async def test_complete_while_kickoff_is_still_arming_raises(tmp_path):
     acquire.arm.set()
     await wait_for_pending_wakeups()
     assert kickoff.done
+    await det.unstage()
+
+
+async def test_a_prepare_refused_mid_fly_leaves_the_collect_verb_bound(tmp_path):
+    det = await reach("K", tmp_path)
+    with pytest.raises(RuntimeError, match="cannot go to PREPARING from FLYING"):
+        await det.prepare(TriggerInfo())
+    cast(GatedAcquire, det.logic.acquire).done.set()
+    await det.complete()
+    assert [doc async for doc in det.collect_asset_docs()]  # type: ignore[attr-defined]
     await det.unstage()
 
 
@@ -707,9 +1025,9 @@ class ArmLoggingAcquire(FillingAcquire):
             yield
 
 
-async def test_an_external_prepare_starts_the_data_before_arming(tmp_path):
+async def test_an_external_prepare_starts_the_data_before_arming():
     source = Source()
-    data = FakeData(source, tmp_path=tmp_path)
+    data = FakeData(source, bounded=False, publication="page")
     det = make_detector(
         "det",
         data,
@@ -724,10 +1042,10 @@ async def test_an_external_prepare_starts_the_data_before_arming(tmp_path):
     await det.unstage()
 
 
-async def test_the_last_prepare_is_forgotten_at_stage_not_unstage(tmp_path):
+async def test_the_last_prepare_is_forgotten_at_stage_not_unstage():
     source = Source()
-    serving = FakeData(source, tmp_path=tmp_path)
-    sitting_out = FakeData(source, suffix="-b", tmp_path=tmp_path)
+    serving = FakeData(source, bounded=False, publication="page")
+    sitting_out = FakeData(source, bounded=False, publication="page", suffix="-b")
     sitting_out.sit_out = True
     det = make_detector("det", serving, sitting_out)
     # Before a prepare, every data logic's fields are hinted
@@ -743,7 +1061,7 @@ async def test_the_last_prepare_is_forgotten_at_stage_not_unstage(tmp_path):
     assert det.hints == {"fields": ["det", "det-b"]}
 
 
-class StopData(FakeData):
+class StopData(FakeBoundedData):
     """Its `ensure_stopped` raises if `stop_mode` is "fail", runs until
     cancelled if "hang"."""
 
@@ -762,12 +1080,12 @@ class StopData(FakeData):
             self.stopping = False
 
 
-# A prepare() for a different scan restarts the data logics
-@pytest.mark.parametrize("verb", ["stage", "prepare", "unstage"])
-async def test_a_failed_stop_leaves_no_other_stop_running(verb: str, tmp_path):
+# trigger() restarts a bounded logic at each point after the first
+@pytest.mark.parametrize("verb", ["stage", "trigger", "unstage"])
+async def test_a_failed_stop_leaves_no_other_stop_running(verb: str):
     source, other_source = Source(), Source()
-    failing = StopData(source, tmp_path=tmp_path)
-    hanging = StopData(other_source, suffix="-h", tmp_path=tmp_path)
+    failing = StopData(source, publication="page")
+    hanging = StopData(other_source, publication="page", suffix="-h")
     det = make_detector(
         "det", failing, hanging, acquire=FillingAcquire(source, other_source)
     )
@@ -778,19 +1096,16 @@ async def test_a_failed_stop_leaves_no_other_stop_running(verb: str, tmp_path):
     failing.stop_mode, hanging.stop_mode = "fail", "hang"
 
     with pytest.raises(BoomError, match="stop"):
-        if verb == "prepare":
-            await det.prepare(TriggerInfo(livetime=0.1))
-        else:
-            await getattr(det, verb)()
+        await getattr(det, verb)()
 
     assert not hanging.stopping
 
 
-async def test_unstage_cancels_a_running_trigger_that_kickoff_cannot_overlap(
-    tmp_path,
-):
+async def test_unstage_cancels_a_running_trigger_that_kickoff_cannot_overlap():
     acquire = HeldAcquire()
-    det = make_detector("det", FakeData(Source(), tmp_path=tmp_path), acquire=acquire)
+    det = make_detector(
+        "det", FakeData(Source(), publication="page", bounded=False), acquire=acquire
+    )
     await det.stage()
     # Prepares implicitly, arms, then waits for data that never comes
     status = det.trigger()
@@ -805,21 +1120,52 @@ async def test_unstage_cancels_a_running_trigger_that_kickoff_cannot_overlap(
 
 
 # ---------------------------------------------------------------------------
-# Use case 11
+# Use cases 10 and 11
 # ---------------------------------------------------------------------------
 
 
-async def test_a_data_logic_that_served_the_stage_must_serve_all_of_it(tmp_path):
+async def test_a_bounded_logic_publishes_only_the_keys_unbounded_do_not_make():
+    unbounded_source, bounded_source = Source(), Source()
+    det = make_detector(
+        "det",
+        FakeData(unbounded_source, publication="page", bounded=False, suffix="-u"),
+        FakeData(
+            bounded_source, publication="page", bounded=True, suffix="-u", also=["-b"]
+        ),
+        acquire=FillingAcquire(unbounded_source, bounded_source, per_start=2),
+    )
+    await det.stage()
+    await det.prepare(TriggerInfo(number_of_events=2))
+    await det.kickoff()
+    await det.complete()
+
+    (page,) = [p async for p in det.collect_pages()]  # type: ignore[attr-defined]
+    assert page["data"] == {"det-u": [[0], [1]], "det-b": [[0], [1]]}
+    # Hinted fields are those the providers make
+    assert det.hints == {"fields": ["det-u"]}
+
+
+@pytest.mark.parametrize(
+    "bounded, again",
+    [
+        # A bounded logic is restarted at the next step point
+        (True, lambda det: det.trigger()),
+        # An unbounded one at a prepare() for a different scan
+        (False, lambda det: det.prepare(TriggerInfo(collections_per_event=2))),
+    ],
+)
+async def test_a_data_logic_that_served_the_stage_must_serve_all_of_it(
+    bounded: bool, again
+):
     source = Source()
-    data = FakeData(source, tmp_path=tmp_path)
+    data = FakeData(source, publication="page", bounded=bounded)
     det = make_detector("det", data, acquire=FillingAcquire(source))
     await det.stage()
     await det.trigger()
 
     data.sit_out = True
-    # A prepare() for a different scan starts the logic again
     with pytest.raises(RuntimeError, match=r"made \[\] at .*, but \['det'\] before it"):
-        await det.prepare(TriggerInfo(collections_per_event=2))
+        await again(det)
 
 
 async def test_uc11_no_data_no_readables_steps_and_flies():
@@ -837,7 +1183,8 @@ async def test_uc11_no_data_no_readables_steps_and_flies():
     await det.kickoff()
     await det.complete()
     assert acquire.idle_waits == 3
-    assert [doc async for doc in det.collect_asset_docs()] == []
+    assert not hasattr(det, "collect_asset_docs")
+    assert not hasattr(det, "collect_pages")
 
 
 # ---------------------------------------------------------------------------
@@ -845,17 +1192,174 @@ async def test_uc11_no_data_no_readables_steps_and_flies():
 # ---------------------------------------------------------------------------
 
 
-def _reading_detector(suppressor: FakeData, source: Source, value: Any):
+async def test_u5_read_is_idempotent_for_pageable_data():
+    source = Source()
+    det = make_detector(
+        "det",
+        FakeData(source, publication="page", bounded=True),
+        acquire=FillingAcquire(source, per_start=2),
+    )
+    await det.stage()
+    await det.prepare(TriggerInfo(collections_per_event=2))
+    await det.trigger()
+
+    first = await det.read()
+    second = await det.read()
+
+    assert first["det"]["value"] == [0, 1]
+    assert second == first
+
+
+async def test_u5_collect_pages_takes_an_index():
+    source = Source()
+    det = make_detector(
+        "det",
+        FakeData(source, publication="page", bounded=True),
+        acquire=FillingAcquire(source, per_start=5),
+    )
+    await det.stage()
+    await det.prepare(TriggerInfo(number_of_events=5))
+    await det.kickoff()
+
+    first = [p async for p in det.collect_pages(index=2)]  # type: ignore[attr-defined]
+    rest = [p async for p in det.collect_pages(index=5)]  # type: ignore[attr-defined]
+
+    assert [p["data"]["det"] for p in first] == [[[0], [1]]]
+    assert [p["data"]["det"] for p in rest] == [[[2], [3], [4]]]
+
+
+async def test_uc12b_multiple_pageable_on_one_detector_merge_into_one_page():
+    """Use case 12(b), written as if the bundler limits were fixed."""
+    a, b = Source(), Source()
+    det = make_detector(
+        "det",
+        FakeData(a, publication="page", bounded=True, suffix="-a"),
+        FakeData(b, publication="page", bounded=True, suffix="-b"),
+        acquire=FillingAcquire(a, b, per_start=3),
+    )
+    await det.stage()
+    await det.prepare(TriggerInfo(number_of_events=3))
+    await det.kickoff()
+    await det.complete()
+
+    pages = [p async for p in det.collect_pages()]  # type: ignore[attr-defined]
+
+    (page,) = pages
+    assert page["data"] == {"det-a": [[0], [1], [2]], "det-b": [[0], [1], [2]]}
+    assert set(page["timestamps"]) == {"det-a", "det-b"}
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="bluesky's RunBundler collects stream assets XOR event pages per "
+    "device, so prepare() raises on the mix; passes once that goes",
+)
+async def test_uc12a_mixed_pageable_and_streamable_on_one_detector(tmp_path):
+    """Use case 12(a), written as if the bundler limits were fixed."""
+    stream_source, page_source = Source(), Source()
+    det = make_detector(
+        "det",
+        FakeData(stream_source, publication="stream", bounded=False, tmp_path=tmp_path),
+        FakeData(page_source, publication="page", bounded=True, suffix="-stats"),
+        acquire=FillingAcquire(stream_source, page_source, per_start=2),
+    )
+    await det.stage()
+    await det.prepare(TriggerInfo(number_of_events=2))
+    assert set(await det.describe_collect()) == {"det", "det-stats"}
+    await det.kickoff()
+    await det.complete()
+
+    docs = [d async for d in det.collect_asset_docs()]  # type: ignore[attr-defined]
+    pages = [p async for p in det.collect_pages()]  # type: ignore[attr-defined]
+
+    assert [name for name, _ in docs] == ["stream_resource", "stream_datum"]
+    (page,) = pages
+    assert page["data"] == {"det-stats": [[0], [1]]}
+
+
+class _BreachingData(FakeUnboundedData):
+    """Its provider's pages drop their last event, are `None`, or page `det` too."""
+
+    breach = ""
+
+    async def start_provider(self, *args: Any) -> Any:
+        provider = await super().start_provider(*args)
+        make_page = provider.make_page
+
+        async def breaching_make_page(index: int) -> PartialEventPage | None:
+            page = await make_page(index)
+            if page and self.breach == "short":
+                page = {
+                    "data": {k: v[:-1] for k, v in page["data"].items()},
+                    "timestamps": {k: v[:-1] for k, v in page["timestamps"].items()},
+                    "time": page["time"][:-1],
+                }
+            elif self.breach == "none":
+                page = None
+            elif page and self.breach == "extra_key":
+                page["data"]["det"] = page["data"]["det-b"]
+            return page
+
+        provider.make_page = breaching_make_page
+        return provider
+
+
+@pytest.mark.parametrize(
+    "breach, error, match",
+    [
+        (
+            "short",
+            TypeError,
+            r"Differing numbers of events: FakePageable\[0\] has 1, "
+            r"FakePageable\[1\] has 0",
+        ),
+        (
+            "none",
+            TypeError,
+            r"Differing numbers of events: FakePageable\[0\] has 1, "
+            r"FakePageable\[1\] has None",
+        ),
+        (
+            "extra_key",
+            ValueError,
+            "Duplicate keys found while merging dictionaries: det",
+        ),
+    ],
+)
+async def test_pageable_providers_must_page_each_event_of_their_own_keys(
+    breach: str, error: type[Exception], match: str
+):
+    source = Source()
+    breaching = _BreachingData(source, publication="page", suffix="-b")
+    breaching.breach = breach
+    det = make_detector(
+        "det",
+        FakeData(source, publication="page", bounded=False),
+        breaching,
+        acquire=FillingAcquire(source),
+    )
+    await det.stage()
+    await det.trigger()
+    with pytest.raises(error, match=match):
+        await det.read()
+
+
+def _reading_detector(suppressor: _FakeData, source: Source, value: Any):
     reading = soft_signal_rw(Array1D[np.int64], value, name="det-reading")
     return make_detector(
         "det", suppressor, acquire=FillingAcquire(source, per_start=3), readable=None
     ), reading
 
 
-async def test_readable_is_suppressed_by_streamable_keys(tmp_path):
+@pytest.mark.parametrize("publication", ["page", "stream"])
+async def test_readable_is_suppressed_by_pageable_and_streamable_keys(
+    publication, tmp_path
+):
     source = Source()
     data = FakeData(
         source,
+        publication=publication,
+        bounded=False,
         suffix="-reading",
         shape_tail=(),
         dtype_numpy="<i8",
@@ -871,12 +1375,15 @@ async def test_readable_is_suppressed_by_streamable_keys(tmp_path):
     description = await det.describe()
 
     assert list(description) == ["det-reading"]
-    assert await det.read() == {}
+    if publication == "page":
+        assert (await det.read())["det-reading"]["value"] == [0, 1, 2]
+    else:
+        assert await det.read() == {}
 
 
-async def test_same_name_different_shape_is_a_duplicate_not_a_suppression(tmp_path):
+async def test_same_name_different_shape_is_a_duplicate_not_a_suppression():
     source = Source()
-    data = FakeData(source, suffix="-reading", tmp_path=tmp_path)
+    data = FakeData(source, publication="page", bounded=False, suffix="-reading")
     det, reading = _reading_detector(data, source, np.array([9, 9], dtype=np.int64))
     det.reading = reading
     det.set_readable_format(reading, Format.HINTED_SIGNAL)
@@ -887,9 +1394,11 @@ async def test_same_name_different_shape_is_a_duplicate_not_a_suppression(tmp_pa
         await det.describe()
 
 
-async def test_u9_a_suppressed_readable_keeps_its_hint(tmp_path):
+async def test_u9_a_suppressed_readable_keeps_its_hint():
     source = Source()
-    data = FakeData(source, suffix="-reading", hints=lambda _: [], tmp_path=tmp_path)
+    data = FakeData(
+        source, publication="page", bounded=False, suffix="-reading", hints=lambda _: []
+    )
     det, reading = _reading_detector(data, source, np.array([9, 9, 9], dtype=np.int64))
     det.reading = reading
     det.set_readable_format(reading, Format.HINTED_SIGNAL)
@@ -901,12 +1410,14 @@ async def test_u9_a_suppressed_readable_keeps_its_hint(tmp_path):
     assert det.hints == {"fields": ["det-reading"]}
 
 
-async def test_u9_a_suppressed_readable_and_its_suppressor_both_hinting_is_an_error(
-    tmp_path,
-):
+async def test_u9_a_suppressed_readable_and_its_suppressor_both_hinting_is_an_error():
     source = Source()
     data = FakeData(
-        source, suffix="-reading", hints=lambda name: [name], tmp_path=tmp_path
+        source,
+        publication="page",
+        bounded=False,
+        suffix="-reading",
+        hints=lambda name: [name],
     )
     det, reading = _reading_detector(data, source, np.array([9, 9, 9], dtype=np.int64))
     det.reading = reading
@@ -920,20 +1431,23 @@ async def test_u9_a_suppressed_readable_and_its_suppressor_both_hinting_is_an_er
         det.hints  # noqa: B018
 
 
-async def test_u7_duplicate_datakeys_raise_at_prepare(tmp_path):
+@pytest.mark.parametrize("publication", ["page", "stream"])
+async def test_u7_duplicate_datakeys_within_a_tier_raise_at_prepare(
+    publication, tmp_path
+):
     det = make_detector(
         "det",
-        FakeData(Source(), tmp_path=tmp_path),
-        FakeData(Source(), tmp_path=tmp_path),
+        FakeData(Source(), publication=publication, bounded=False, tmp_path=tmp_path),
+        FakeData(Source(), publication=publication, bounded=False, tmp_path=tmp_path),
         acquire=FillingAcquire(),
     )
     await det.stage()
     with pytest.raises(
         RuntimeError,
         match=r"^More than one data logic makes the same datakey: "
-        r"\{'det': \['FakeData', 'FakeData'\]\}\. Each datakey must come from "
-        r"one data logic, so enable only one of them, or give them different "
-        r"datakeys$",
+        r"\{'det': \['FakeUnboundedData', 'FakeUnboundedData'\]\}\. "
+        r"Each datakey must come from one data logic, so enable only one of them, "
+        r"or give them different datakeys$",
     ):
         await det.prepare(TriggerInfo())
 
@@ -956,13 +1470,13 @@ class ReadbackTrigger(InternalTrigger):
     ],
 )
 async def test_u12_zero_livetime_readback_is_gated_by_the_env_var(
-    monkeypatch: pytest.MonkeyPatch, env, expected_period, tmp_path
+    monkeypatch: pytest.MonkeyPatch, env, expected_period
 ):
     if env is None:
         monkeypatch.delenv("OPHYD_ASYNC_PRESERVE_DETECTOR_STATE", raising=False)
     else:
         monkeypatch.setenv("OPHYD_ASYNC_PRESERVE_DETECTOR_STATE", env)
-    data = FakeData(Source(), tmp_path=tmp_path)
+    data = FakeData(Source(), publication="page", bounded=False)
     det = make_detector(
         "det", data, trigger=ReadbackTrigger(), acquire=FillingAcquire()
     )
@@ -974,15 +1488,46 @@ async def test_u12_zero_livetime_readback_is_gated_by_the_env_var(
 
 
 # ---------------------------------------------------------------------------
+# collect_pages from each state (U1): any after prepare(), pages once acquired
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "state,acquired", [("P", False), ("T", True), ("K", True), ("C", True)]
+)
+async def test_collect_pages_from_each_state(state: str, acquired: bool):
+    source = Source()
+    det = make_detector(
+        "det",
+        FakeData(source, publication="page", bounded=False),
+        acquire=FillingAcquire(source),
+    )
+    await det.stage()
+    await det.prepare(TriggerInfo())
+    if state == "T":
+        await det.trigger()
+    elif state in "KC":
+        await det.kickoff()
+        if state == "C":
+            await det.complete()
+
+    pages = [page async for page in det.collect_pages()]  # type: ignore[attr-defined]
+    assert (pages != []) is acquired
+
+
+# ---------------------------------------------------------------------------
 # Verifier findings 2 and 4 to 6: re-asking, notes, failed prepare and start
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("publication", ["stream", "page"])
 async def test_an_unbounded_provider_carries_over_without_its_logic_being_asked(
-    tmp_path,
+    publication: str, tmp_path
 ):
     source = Source()
-    unbounded = FakeData(source, tmp_path=tmp_path)
+    unbounded = FakeData(
+        source, publication=publication, bounded=False, tmp_path=tmp_path
+    )
     det = make_detector("det", unbounded, acquire=FillingAcquire(source))
     await det.stage()
     unbounded.log.clear()
@@ -997,7 +1542,26 @@ async def test_an_unbounded_provider_carries_over_without_its_logic_being_asked(
     assert set(await det.describe_collect()) == {"det"}
 
 
-class NewFileData(FakeData):
+async def test_a_carried_pageable_provider_first_page_starts_at_the_new_baseline():
+    source = Source()
+    det = make_detector(
+        "det",
+        FakeData(source, publication="page", bounded=False),
+        acquire=FillingAcquire(source),
+    )
+    await det.stage()
+    await det.prepare(TriggerInfo())
+    await det.trigger()
+    await det.prepare(TriggerInfo())
+    await det.kickoff()
+    await det.complete()
+
+    # The first run's collection is not repeated in the second run's page
+    pages = [page async for page in det.collect_pages()]  # type: ignore[attr-defined]
+    assert [page["data"] for page in pages] == [{"det": [[1]]}]
+
+
+class NewFileData(FakeUnboundedData):
     """A file writer: each start opens a new file, counting from 0."""
 
     async def start_provider(self, *args: Any, **kwargs: Any) -> Any:
@@ -1029,8 +1593,8 @@ async def test_unbounded_providers_carry_over_only_from_a_whole_shared_event(
     sources = Source(), Source()
     det = make_detector(
         "det",
-        NewFileData(sources[0], tmp_path=tmp_path),
-        NewFileData(sources[1], tmp_path=tmp_path, suffix="-s"),
+        NewFileData(sources[0], publication="stream", tmp_path=tmp_path),
+        NewFileData(sources[1], publication="stream", tmp_path=tmp_path, suffix="-s"),
         acquire=FillingAcquire(*sources, per_start=2),
     )
     await det.stage()
@@ -1044,7 +1608,7 @@ async def test_unbounded_providers_carry_over_only_from_a_whole_shared_event(
     await det.kickoff()
     await det.complete()
 
-    docs = [doc async for doc in det.collect_asset_docs()]
+    docs = [doc async for doc in det.collect_asset_docs()]  # type: ignore[attr-defined]
     assert [doc["indices"] for name, doc in docs if name == "stream_datum"] == [
         indices,
         indices,
@@ -1053,8 +1617,12 @@ async def test_unbounded_providers_carry_over_only_from_a_whole_shared_event(
 
 async def test_a_changed_scan_stops_the_old_provider_before_making_the_new(tmp_path):
     sources = Source(), Source()
-    unbounded = FakeData(sources[0], tmp_path=tmp_path)
-    steady = FakeData(sources[1], tmp_path=tmp_path, suffix="-s")
+    unbounded = FakeData(
+        sources[0], publication="stream", bounded=False, tmp_path=tmp_path
+    )
+    steady = FakeData(
+        sources[1], publication="stream", bounded=False, tmp_path=tmp_path, suffix="-s"
+    )
     det = make_detector(
         "det", unbounded, steady, acquire=FillingAcquire(*sources, per_start=2)
     )
@@ -1084,7 +1652,7 @@ async def test_a_changed_scan_stops_the_old_provider_before_making_the_new(tmp_p
 async def test_a_settings_change_takes_effect_at_the_next_stage_not_prepare(tmp_path):
     # Stands for a plugin's EnableCallbacks being switched off in the Settings
     source = Source()
-    plugin = FakeData(source, tmp_path=tmp_path)
+    plugin = FakeData(source, publication="stream", bounded=False, tmp_path=tmp_path)
     det = make_detector("det", plugin, acquire=FillingAcquire(source))
     await det.stage()
     info = TriggerInfo()
@@ -1110,6 +1678,8 @@ async def test_a_settings_change_takes_effect_at_the_next_stage_not_prepare(tmp_
         "trigger",
         "kickoff",
         "complete",
+        "read",
+        "collect_pages",
         "collect_asset_docs",
     ],
 )
@@ -1135,7 +1705,8 @@ async def test_f4_exceptions_from_logic_propagate(verb: str, tmp_path):
 
     source = Source()
     acquire = Failing(source)
-    data = FakeData(source, tmp_path=tmp_path)
+    publication = "stream" if verb == "collect_asset_docs" else "page"
+    data = FakeData(source, publication=publication, bounded=False, tmp_path=tmp_path)
     det = make_detector("det", data, acquire=acquire)
     # Before kickoff, as fly() runs on to the end of acquire() as soon as it can
     acquire.failing = verb
@@ -1143,13 +1714,17 @@ async def test_f4_exceptions_from_logic_propagate(verb: str, tmp_path):
         await det.stage()
     if verb not in ("stage", "unstage"):
         await det.prepare(TriggerInfo(number_of_events=1))
-    if verb in ("complete", "collect_asset_docs"):
+    if verb == "read":
+        await det.trigger()
+    if verb in ("complete", "collect_pages", "collect_asset_docs"):
         await det.kickoff()
-    data.fail = verb == "collect_asset_docs"
+    data.fail = verb in ("read", "collect_pages", "collect_asset_docs")
 
     with pytest.raises(BoomError):
-        if verb == "collect_asset_docs":
-            _ = [doc async for doc in det.collect_asset_docs()]
+        if verb == "collect_pages":
+            _ = [page async for page in det.collect_pages()]  # type: ignore[attr-defined]
+        elif verb == "collect_asset_docs":
+            _ = [doc async for doc in det.collect_asset_docs()]  # type: ignore[attr-defined]
         else:
             await getattr(det, verb)()
 
@@ -1169,17 +1744,32 @@ async def test_acquire_that_yields_twice_raises():
         await det.trigger()
 
 
-@pytest.mark.parametrize("failing_index", [0, 1])
+@pytest.mark.parametrize(
+    "bounded_fails, with_bounded, keys",
+    [
+        (False, False, ["det"]),
+        (True, True, ["det", "det-b"]),
+        (False, True, ["det", "det-b"]),
+    ],
+)
 async def test_prepare_after_a_failed_start_is_a_first_prepare(
-    failing_index: int, tmp_path
+    bounded_fails: bool, with_bounded: bool, keys: list[str], tmp_path
 ):
-    sources = Source(), Source()
-    data = [
-        FakeData(sources[0], tmp_path=tmp_path),
-        FakeData(sources[1], tmp_path=tmp_path, suffix="-b"),
-    ]
-    failing = data[failing_index]
-    det = make_detector("det", *data, acquire=FillingAcquire(*sources))
+    source, bounded_source = Source(), Source()
+    unbounded = FakeData(source, publication="stream", bounded=False, tmp_path=tmp_path)
+    data = [unbounded]
+    if with_bounded:
+        data.append(
+            FakeData(
+                bounded_source,
+                publication="stream",
+                bounded=True,
+                tmp_path=tmp_path,
+                suffix="-b",
+            )
+        )
+    failing = data[-1] if bounded_fails else unbounded
+    det = make_detector("det", *data, acquire=FillingAcquire(source, bounded_source))
     await det.stage()
     failing.fail_start = True
     with pytest.raises(BoomError, match="start"):
@@ -1190,16 +1780,23 @@ async def test_prepare_after_a_failed_start_is_a_first_prepare(
     await det.stage()
     await det.prepare(TriggerInfo())
 
-    assert list(await det.describe_collect()) == ["det", "det-b"]
+    assert list(await det.describe_collect()) == keys
 
 
+@pytest.mark.parametrize("publication", ["page", "stream"])
 @pytest.mark.parametrize("cpe", [1, 3])
 async def test_scalar_readable_is_suppressed_by_a_key_of_any_collections_per_event(
-    cpe: int, tmp_path
+    publication: str, cpe: int, tmp_path
 ):
     """A readable gives one value per event, so [cpe] suppresses it, not just []."""
     source = Source()
-    data = FakeData(source, suffix="-reading", tmp_path=tmp_path)
+    data = FakeData(
+        source,
+        publication=publication,
+        bounded=False,
+        suffix="-reading",
+        tmp_path=tmp_path,
+    )
     det = make_detector("det", data, acquire=FillingAcquire(source, per_start=cpe))
     det.reading = soft_signal_rw(int, 9, name="det-reading")
     det.set_readable_format(det.reading, Format.HINTED_SIGNAL)
@@ -1210,9 +1807,13 @@ async def test_scalar_readable_is_suppressed_by_a_key_of_any_collections_per_eve
     description = await det.describe()
 
     assert description["det-reading"]["shape"] == [cpe]
-    assert await det.read() == {}
+    reading = await det.read()
+    if publication == "page":
+        assert reading["det-reading"]["value"] == list(range(cpe))
+    else:
+        assert reading == {}
 
 
 def test_data_logic_with_the_removed_stop_raises():
     with pytest.raises(TypeError, match=r"StaleData defines stop, which .* -> ensure"):
-        type("StaleData", (UnboundedDataLogic,), {"stop": lambda self: None})
+        type("StaleData", (BoundedDataLogic,), {"stop": lambda self: None})

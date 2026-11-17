@@ -10,6 +10,8 @@ from ._command import (
 )
 from ._data_providers import (
     DataProvider,
+    EventPageDataProvider,
+    PageableDataProvider,
     StreamableDataProvider,
     StreamResourceDataProvider,
     StreamResourceInfo,
@@ -23,6 +25,7 @@ from ._derived_signal import (
 )
 from ._derived_signal_backend import Transform, merge_gathered_dicts
 from ._detector import (
+    BoundedDataLogic,
     DetectorAcquireLogic,
     DetectorDataLogic,
     DetectorLogic,
@@ -296,6 +299,7 @@ __all__ = [
     "DetectorTriggerLogic",
     "DetectorAcquireLogic",
     "DetectorDataLogic",
+    "BoundedDataLogic",
     "UnboundedDataLogic",
     "DetectorLogic",
     "StandardDetector",
@@ -312,6 +316,8 @@ __all__ = [
     "UUIDFilenameProvider",
     # Data Providers
     "DataProvider",
+    "EventPageDataProvider",
+    "PageableDataProvider",
     "StreamableDataProvider",
     "StreamResourceInfo",
     "StreamResourceDataProvider",

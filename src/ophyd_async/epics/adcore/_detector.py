@@ -3,6 +3,7 @@ from functools import cached_property
 from typing import Generic
 
 from ophyd_async.core import (
+    BoundedDataLogic,
     DetectorAcquireLogic,
     DetectorLogic,
     DetectorTriggerLogic,
@@ -43,7 +44,7 @@ class AreaDetector(StandardDetector, Generic[ADBaseIOT]):
                 self._set_unique(plugin_name, plugin)
         self._trigger_logic = trigger_logic
         self._acquire_logic = acquire_logic
-        data_logics: list[UnboundedDataLogic] = []
+        data_logics: list[BoundedDataLogic | UnboundedDataLogic] = []
         if writer_factories:
             if prefix is None:
                 raise ValueError("prefix is required when writer_factories are given")

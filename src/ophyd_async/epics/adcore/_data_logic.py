@@ -10,6 +10,7 @@ import numpy as np
 
 from ophyd_async.core import (
     DEFAULT_TIMEOUT,
+    BoundedDataLogic,
     EnableDisable,
     PathInfo,
     PathProvider,
@@ -363,7 +364,7 @@ class ADDataFactory(Generic[NDPluginBaseIOT]):
     )
     data_logic_factory: Callable[
         [NDPluginBaseIOT, NDArrayDescription, ADBaseIO, Sequence[NDPluginBaseIO]],
-        UnboundedDataLogic,
+        BoundedDataLogic | UnboundedDataLogic,
     ]
 
     def __call__(
@@ -371,7 +372,7 @@ class ADDataFactory(Generic[NDPluginBaseIOT]):
         prefix: str,
         driver: ADBaseIO,
         plugins: Sequence[NDPluginBaseIO],
-    ) -> tuple[NDPluginBaseIOT, UnboundedDataLogic]:
+    ) -> tuple[NDPluginBaseIOT, BoundedDataLogic | UnboundedDataLogic]:
         """Instantiate the writer plugin and build the data logic.
 
         :param prefix: EPICS PV prefix for the detector (same as `AreaDetector.prefix`).
