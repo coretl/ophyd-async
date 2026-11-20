@@ -5,10 +5,12 @@ https://github.com/areaDetector/ADCore
 
 from ._acquire_logic import ADAcquireLogic, ADContAcqAcquireLogic
 from ._data_logic import (
+    ADDataFactory,
     ADHDFDataLogic,
     ADMultipartDataLogic,
     ADWriterFactory,
     NDArrayDescription,
+    TimeSeriesDataLogic,
 )
 from ._detector import AreaDetector, ContAcqDetector, plugins_with_proc
 from ._io import (
@@ -31,6 +33,7 @@ from ._io import (
     NDFileHDF5Compression,
     NDFileHDF5IO,
     NDFileIO,
+    NDParam,
     NDPluginBaseIO,
     NDPluginFileIO,
     NDProcessFilterCallbacks,
@@ -38,7 +41,10 @@ from ._io import (
     NDProcessIO,
     NDROIStatIO,
     NDROIStatNIO,
+    NDROIStatTSControl,
     NDStatsIO,
+    NDStatsTimeSeriesIO,
+    NDStatsTSAcquireMode,
 )
 from ._ndattribute import (
     NDAttributeDataType,
@@ -47,7 +53,7 @@ from ._ndattribute import (
     NDAttributePvDbrType,
     ndattributes_to_xml,
 )
-from ._plan_stubs import setup_ndattributes, setup_ndstats_sum
+from ._plan_stubs import setup_ndattributes
 from ._trigger_logic import (
     ADContAcqTriggerLogic,
     prepare_exposures,
@@ -65,9 +71,13 @@ __all__ = [
     "ADBaseIO",
     "NDPluginBaseIO",
     "NDROIIO",
+    "NDParam",
     "NDStatsIO",
+    "NDStatsTimeSeriesIO",
+    "NDStatsTSAcquireMode",
     "NDROIStatNIO",
     "NDROIStatIO",
+    "NDROIStatTSControl",
     "NDCBFlushOnSoftTrgMode",
     "NDCircularBuffIO",
     "ADFileWriteMode",
@@ -96,7 +106,9 @@ __all__ = [
     "NDArrayDescription",
     "ADHDFDataLogic",
     "ADMultipartDataLogic",
+    "ADDataFactory",
     "ADWriterFactory",
+    "TimeSeriesDataLogic",
     # Detector
     "AreaDetector",
     "ContAcqDetector",
@@ -108,5 +120,4 @@ __all__ = [
     "NDAttributeParam",
     "ndattributes_to_xml",
     "setup_ndattributes",
-    "setup_ndstats_sum",
 ]

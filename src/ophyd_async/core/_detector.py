@@ -25,14 +25,19 @@ from bluesky.protocols import (
     Hints,
     Reading,
     Stageable,
+    Status,
     StreamAsset,
     Triggerable,
-    WritesStreamAssets,
 )
 from event_model import DataKey
+from event_model.documents import PartialEventPage
 from pydantic import Field, PositiveInt, computed_field
 
-from ._data_providers import DataProvider, StreamableDataProvider
+from ._data_providers import (
+    DataProvider,
+    PageableDataProvider,
+    StreamableDataProvider,
+)
 from ._device import Device
 from ._flyable import KICKED_OFF, NOT_PREPARED, FlyableLogic, StandardFlyable
 from ._readable import StandardReadable, StandardReadableFormat
@@ -50,6 +55,7 @@ from ._utils import (
     gather_dict,
     get_unique,
     merge_dicts,
+    merge_gathered_dicts,
 )
 
 
@@ -289,13 +295,20 @@ ProviderT = TypeVar("ProviderT", bound=DataProvider)
 class DetectorDataLogic(Generic[ProviderT]):
     """Base class for detector data logic: do not inherit from it directly.
 
-    Inherit from [](#UnboundedDataLogic).
+    Inherit from [](#BoundedDataLogic) or [](#UnboundedDataLogic), which say
+    whether the data source needs to know how many collections to take.
 
-    At the first `prepare()` after `stage()` the detector starts every data
-    logic. The logics that return a provider serve the stage. At each later
-    `prepare()` they are started again only if their provider cannot carry over
-    (see [](#UnboundedDataLogic)).
+    At the first `prepare()` after `stage()` the detector starts every
+    unbounded data logic, then every bounded one, handing each bounded logic the
+    datakeys the unbounded providers already make. The logics that return a
+    provider serve the stage. At each later `prepare()` the bounded ones are
+    started again, and the unbounded ones only if their provider cannot carry
+    over (see [](#UnboundedDataLogic)).
     The provider describes and publishes what is being written.
+
+    Whether the data is published as stream assets or event pages is the type
+    of the provider that is returned, not a declaration on the logic, so one
+    logic may produce either depending on the scan.
 
     A source that produces a single value per event, like a plugin scalar, needs
     no data logic at all: register its signal with
@@ -331,6 +344,45 @@ class DetectorDataLogic(Generic[ProviderT]):
         return None
 
 
+class BoundedDataLogic(DetectorDataLogic[ProviderT]):
+    """A data logic whose source must be told how many collections to take.
+
+    For a finite buffer, like an areaDetector stats time series. It is started
+    after the unbounded logics, so it can leave out datakeys they already make.
+    At each step point after the first the detector stops it and starts a new
+    provider, so a buffer holding the last point's data is cleared.
+    """
+
+    @abstractmethod
+    async def start_provider(
+        self,
+        name: str,
+        existing_datakeys: Sequence[str],
+        num_collections: int,
+        collections_per_event: int,
+        collection_period: float,
+        flush_period: float,
+    ) -> ProviderT | None:
+        """Start writing and return a new provider describing what is written.
+
+        Return a [](#StreamableDataProvider) to publish stream assets, or a
+        [](#PageableDataProvider) to publish event pages, made for
+        `collections_per_event`. The provider must make none of
+        `existing_datakeys`. Return `None`, without writing, if there is nothing
+        left to make: this is not an error and is not warned about.
+
+        :param name: the detector name, which prefixes every datakey
+        :param existing_datakeys: the datakeys the unbounded providers make
+        :param num_collections: how many collections the scan takes
+        :param collections_per_event: how many collections make up one event
+        :param collection_period: seconds per collection,
+            `exposures_per_collection * (livetime + deadtime)`, for sizing
+            chunks (0 means "use whatever is currently set on the hardware")
+        :param flush_period: how often to flush
+        """
+        raise NotImplementedError(self)
+
+
 class UnboundedDataLogic(DetectorDataLogic[ProviderT]):
     """A data logic whose source takes data for as long as it is told to.
 
@@ -352,8 +404,9 @@ class UnboundedDataLogic(DetectorDataLogic[ProviderT]):
     ) -> ProviderT | None:
         """Start writing and return a new provider describing what is written.
 
-        Return a [](#StreamableDataProvider) made for `collections_per_event`
-        to publish stream assets. Return `None`, without writing, to sit out the
+        Return a [](#StreamableDataProvider) to publish stream assets, or a
+        [](#PageableDataProvider) to publish event pages, made for
+        `collections_per_event`. Return `None`, without writing, to sit out the
         scans of this stage, for instance a plugin that is switched off: this is
         not an error and is not warned about.
 
@@ -365,6 +418,32 @@ class UnboundedDataLogic(DetectorDataLogic[ProviderT]):
         :param flush_period: how often to flush
         """
         raise NotImplementedError(self)
+
+
+def _merge_pages(
+    pages: Sequence[tuple[PageableDataProvider, PartialEventPage | None]],
+) -> PartialEventPage | None:
+    """Merge one page per pageable provider into a single page.
+
+    `None` if every provider returned `None`. Raises if only some did, if the
+    pages hold different numbers of events, or if a key appears twice.
+    """
+    if all(page is None for _, page in pages):
+        return None
+    # A None page has length None, so a mix of None and real pages differs too
+    lengths = {
+        f"{type(provider).__name__}[{i}]": len(page["time"]) if page else None
+        for i, (provider, page) in enumerate(pages)
+    }
+    get_unique(lengths, "numbers of events")
+    made = [page for _, page in pages if page]
+    # Each event happened when the last of its providers' data arrived
+    times = zip(*(page["time"] for page in made), strict=True)
+    return {
+        "data": merge_dicts(page["data"] for page in made),
+        "timestamps": merge_dicts(page["timestamps"] for page in made),
+        "time": [max(t) for t in times],
+    }
 
 
 @dataclass
@@ -379,9 +458,15 @@ class DetectorCtx:
     #: plus deadtime, or what the hardware has set when the livetime is 0 and
     #: its state is preserved
     collection_period: float
+    #: The bounded data logics of this stage: those that returned a provider
+    #: when last started
+    bounded_logics: Sequence[BoundedDataLogic[Any]] = ()
     #: The unbounded data logics of this stage: those that returned a provider
     #: when last started
     unbounded_logics: Sequence[UnboundedDataLogic[Any]] = ()
+    #: The providers `bounded_logics` started for this prepare, one per logic.
+    #: Restarted at each step point after the first
+    bounded_providers: Sequence[DataProvider] = ()
     #: The providers `unbounded_logics` started, one per logic. Carried over from
     #: the previous prepare if made for the same collections per event,
     #: collection period and flush period, and all have written the same whole
@@ -389,21 +474,42 @@ class DetectorCtx:
     unbounded_providers: Sequence[DataProvider] = ()
     #: The datakeys of every provider, the same at every prepare of the stage
     datakeys: dict[str, DataKey] = field(default_factory=dict)
+    #: What `DetectorSuppressLogic.hidden_datakeys` returned at the first
+    #: prepare of the stage, the same at every prepare of it
+    hidden: set[str] = field(default_factory=set)
     #: The collections every unbounded data logic had written at the end of
     #: prepare()
     unbounded_start_collections: int = 0
     #: How many trigger()s this prepare has served
     triggers: int = 0
+    #: The readings of `DetectorLogic.get_readings` at the current step point,
+    #: `None` until read
+    readings: dict[str, Reading] | None = None
     #: The acquire logic's `acquire()`, run to its yield by prepare() for
     #: external triggering
     external_acquire_gen: AsyncGenerator[None, None] | None = None
 
+    @property
+    def providers(self) -> list[DataProvider]:
+        """Every serving provider, the unbounded ones first."""
+        return [*self.unbounded_providers, *self.bounded_providers]
 
-async def _datakeys(ctx: DetectorCtx) -> dict[str, DataKey]:
-    """The datakeys of every serving provider, raising on one made by more than one."""
-    made = await asyncio.gather(*(p.make_datakeys() for p in ctx.unbounded_providers))
+    @property
+    def logics(self) -> list[DetectorDataLogic[Any]]:
+        """Every serving data logic, in the order of `providers`."""
+        return [*self.unbounded_logics, *self.bounded_logics]
+
+
+async def _datakeys(
+    logics: Sequence[DetectorDataLogic[Any]], providers: Sequence[DataProvider]
+) -> dict[str, DataKey]:
+    """The datakeys `providers` make, raising on one made by more than one.
+
+    :param logics: the data logic that started each of `providers`, to name them
+    """
+    made = await asyncio.gather(*(p.make_datakeys() for p in providers))
     makers: dict[str, list[str]] = {}
-    for logic, datakeys in zip(ctx.unbounded_logics, made, strict=True):
+    for logic, datakeys in zip(logics, made, strict=True):
         for key in datakeys:
             makers.setdefault(key, []).append(type(logic).__name__)
     if clashes := {key: names for key, names in makers.items() if len(names) > 1}:
@@ -437,6 +543,45 @@ async def _start_unbounded(ctx: DetectorCtx) -> None:
     started = list(zip(ctx.unbounded_logics, providers, strict=True))
     ctx.unbounded_logics = [dl for dl, p in started if p]
     ctx.unbounded_providers = [p for _, p in started if p]
+
+
+async def _start_bounded(ctx: DetectorCtx) -> None:
+    """Start `ctx.bounded_logics`, keeping those that return a provider.
+
+    Their providers leave out the datakeys the unbounded providers make.
+    """
+    info = ctx.trigger_info
+    existing_datakeys = list(
+        await _datakeys(ctx.unbounded_logics, ctx.unbounded_providers)
+    )
+    providers = await _gather_or_cancel_all(
+        [
+            dl.start_provider(
+                ctx.name,
+                existing_datakeys,
+                info.number_of_collections,
+                info.collections_per_event,
+                ctx.collection_period,
+                info.flush_period,
+            )
+            for dl in ctx.bounded_logics
+        ]
+    )
+    started = list(zip(ctx.bounded_logics, providers, strict=True))
+    ctx.bounded_logics = [dl for dl, p in started if p]
+    ctx.bounded_providers = [p for _, p in started if p]
+
+
+async def _restart_bounded(ctx: DetectorCtx, when: str) -> None:
+    """Stop and start `ctx.bounded_logics`, then check the datakeys are unchanged.
+
+    :param when: when this happens, for the error message
+    """
+    await _stop_logics(ctx.bounded_logics)
+    await _start_bounded(ctx)
+    before = ctx.datakeys
+    ctx.datakeys = await _datakeys(ctx.logics, ctx.providers)
+    _check_datakeys(ctx, before, when)
 
 
 def _check_datakeys(ctx: DetectorCtx, before: Collection[str], when: str) -> None:
@@ -484,16 +629,38 @@ def _carries_over(
     )
 
 
+def _bounded_origin(ctx: DetectorCtx) -> int:
+    """The events written before the bounded providers were last started.
+
+    The step points before the current one, as each point restarts them, and 0
+    in a fly scan.
+    """
+    return max(ctx.triggers - 1, 0)
+
+
 def _collections_offset(ctx: DetectorCtx) -> dict[SignalR[int], int]:
     """The offset from each provider's `collections_written` to the scan count.
 
-    Added to `collections_written` it gives the collections since `prepare()`,
-    as a provider counts from before `prepare()`.
+    Added to `collections_written` it gives the collections since `prepare()`:
+    positive for a bounded data logic, which only counts from the current step
+    point, and negative for an unbounded one, which counts from before
+    `prepare()`.
     """
+    cpe = ctx.trigger_info.collections_per_event
+    bounded = _bounded_origin(ctx) * cpe
+    unbounded = -ctx.unbounded_start_collections
     return {
-        p.collections_written: -ctx.unbounded_start_collections
-        for p in ctx.unbounded_providers
+        **{p.collections_written: bounded for p in ctx.bounded_providers},
+        **{p.collections_written: unbounded for p in ctx.unbounded_providers},
     }
+
+
+def _provider_ends(ctx: DetectorCtx, index: int) -> Iterator[tuple[DataProvider, int]]:
+    """Each serving provider, with event `index` counted from its origin."""
+    for provider in ctx.bounded_providers:
+        yield provider, index - _bounded_origin(ctx)
+    for provider in ctx.unbounded_providers:
+        yield provider, index
 
 
 async def _no_acquisition() -> AsyncGenerator[None, None]:
@@ -509,6 +676,28 @@ def _preserve_detector_state() -> bool:
     return os.environ.get("OPHYD_ASYNC_PRESERVE_DETECTOR_STATE", "NO").upper() == "YES"
 
 
+class DetectorSuppressLogic:
+    """Base class for saying which readables a detector's data hides."""
+
+    @abstractmethod
+    async def hidden_datakeys(self) -> set[str]:
+        """The names of the readables the detector's data hides.
+
+        Called at the first `prepare()` after `stage()`, and again at each later
+        one, which raises if the result differs. Each name is that of a readable
+        the detector registers.
+        """
+
+
+def _raise_if_hidden_changed(name: str, before: set[str], now: set[str]) -> None:
+    changed = sorted(before ^ now)
+    if changed:
+        raise RuntimeError(
+            f"{name}: hidden datakeys changed since the first prepare() after "
+            f"stage(): {changed}. unstage() and stage() to use the new values."
+        )
+
+
 @dataclass(frozen=True, kw_only=True, eq=False)
 class DetectorLogic(FlyableLogic[TriggerInfo, DetectorCtx]):
     """Drive a detector through its trigger, acquire and data logics.
@@ -520,14 +709,22 @@ class DetectorLogic(FlyableLogic[TriggerInfo, DetectorCtx]):
         with the hardware's current timing is supported
     :param acquire: starts and stops acquisition
     :param data: the data logics, each publishing one part of the data
+    :param suppress: says which registered readables the data hides
     """
 
     trigger: DetectorTriggerLogic | None = None
     acquire: DetectorAcquireLogic | None = None
-    data: Sequence[UnboundedDataLogic[Any]] = ()
+    data: Sequence[BoundedDataLogic[Any] | UnboundedDataLogic[Any]] = ()
+    suppress: DetectorSuppressLogic | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "data", tuple(self.data))
+        for dl in self.data:
+            if isinstance(dl, BoundedDataLogic) == isinstance(dl, UnboundedDataLogic):
+                raise TypeError(
+                    f"{dl!r} must inherit from exactly one of BoundedDataLogic and "
+                    "UnboundedDataLogic"
+                )
 
     @cached_property
     def supported_triggers(self) -> set[DetectorTrigger]:
@@ -585,50 +782,89 @@ class DetectorLogic(FlyableLogic[TriggerInfo, DetectorCtx]):
     ) -> AsyncGenerator[DetectorCtx | WatcherUpdate, None]:
         """Set the trigger logic up, yield the context, then start the data.
 
-        The context holds `value` and the collection period, which is read back
-        from the trigger logic when `value` leaves the livetime at 0. An
+        The context holds `value`, the collection period, which is read back
+        from the trigger logic when `value` leaves the livetime at 0, and what
+        the suppress logic hid. That is asked before the trigger logic is
+        prepared, and raises at a later prepare if it differs from the first. An
         externally triggered detector is armed last, after the data logics are
-        started so their writers are ready.
+        started so their buffers are sized.
         """
+        hidden = await self._hidden_datakeys(name, previous_ctx)
         await self._prepare_trigger_logic(value)
         # After preparing the trigger logic, as the hardware then holds the
         # values read back
         collection_period = await self._resolve_collection_period(value)
         ctx = DetectorCtx(
-            trigger_info=value, name=name, collection_period=collection_period
+            trigger_info=value,
+            name=name,
+            collection_period=collection_period,
+            hidden=hidden,
         )
         yield ctx
         await self._start_providers(ctx, previous_ctx)
         if value.trigger is not DetectorTrigger.INTERNAL:
             ctx.external_acquire_gen = await self._arm()
 
+    async def _hidden_datakeys(
+        self, name: str, previous_ctx: DetectorCtx | None
+    ) -> set[str]:
+        hidden = (
+            set() if self.suppress is None else await self.suppress.hidden_datakeys()
+        )
+        if previous_ctx is not None:
+            _raise_if_hidden_changed(name, previous_ctx.hidden, hidden)
+        return hidden
+
     async def _start_providers(
         self, ctx: DetectorCtx, previous_ctx: DetectorCtx | None
     ) -> None:
         """Start the data providers for this scan.
 
-        At the first `prepare()` of a stage every data logic is started, and the
-        logics that return a provider serve the rest of the stage. At a later
-        `prepare()` the providers of `previous_ctx` carry over if they were made
-        for the same name, collections per event, collection period and flush
-        period, and have all written the same whole number of events, and are
-        restarted otherwise. Every provider then starts new stream resources at
-        `ctx.unbounded_start_collections`, so each run has its own.
+        At the first `prepare()` of a stage every unbounded data logic is
+        started, then every bounded one, leaving out the datakeys the unbounded
+        providers make. The logics that return a provider serve the rest of the
+        stage. At a later `prepare()` the unbounded providers of `previous_ctx`
+        carry over if they were made for the same name, collections per event,
+        collection period and flush period, and have all written the same whole
+        number of events, and are restarted otherwise; the bounded ones are
+        always restarted. Every unbounded provider then starts
+        new stream resources at `ctx.unbounded_start_collections`, so each run
+        has its own.
         """
         if previous_ctx is None:
-            ctx.unbounded_logics = self.data
+            ctx.unbounded_logics = [
+                dl for dl in self.data if isinstance(dl, UnboundedDataLogic)
+            ]
+            ctx.bounded_logics = [
+                dl for dl in self.data if isinstance(dl, BoundedDataLogic)
+            ]
             await _start_unbounded(ctx)
-            ctx.datakeys = await _datakeys(ctx)
+            await _start_bounded(ctx)
+            ctx.datakeys = await _datakeys(ctx.logics, ctx.providers)
         else:
             ctx.unbounded_logics = previous_ctx.unbounded_logics
+            ctx.bounded_logics = previous_ctx.bounded_logics
             ctx.datakeys = previous_ctx.datakeys
             ctx.unbounded_providers = previous_ctx.unbounded_providers
             written = await _unbounded_written(ctx)
             if not _carries_over(previous_ctx, ctx, written):
                 await _stop_logics(ctx.unbounded_logics)
                 await _start_unbounded(ctx)
-                ctx.datakeys = await _datakeys(ctx)
-                _check_datakeys(ctx, previous_ctx.datakeys, "this prepare()")
+            await _restart_bounded(ctx, "this prepare()")
+        # TODO: delete this check if the run bundler learns to collect both from
+        # one device (bluesky/bluesky#2111), with the prepare() override. See ADR 0026.
+        if all(self.produces(ctx)):
+            pageable = await merge_gathered_dicts(
+                p.make_datakeys()
+                for p in ctx.providers
+                if isinstance(p, PageableDataProvider)
+            )
+            raise TypeError(
+                f"The detector would produce {sorted(pageable)} as event pages and "
+                "the rest of its data as stream assets; bluesky collects only one "
+                "of them from a detector, so its stream assets must make these "
+                "datakeys too, or a data logic must not serve this scan"
+            )
         # Every unbounded data logic has written the same: they all started
         # together, after stage() stopped them all, or carried over having done so
         written = await _unbounded_written(ctx)
@@ -656,7 +892,12 @@ class DetectorLogic(FlyableLogic[TriggerInfo, DetectorCtx]):
                 yield update
 
     async def step(self, ctx: DetectorCtx) -> AsyncGenerator[WatcherUpdate, None]:
-        """Take one step point's exposures and wait for them to be written."""
+        """Take one step point's exposures and wait for them to be written.
+
+        At each point after the first the bounded providers are restarted, so a
+        buffer holding the last point's data is cleared. Unbounded providers
+        keep counting.
+        """
         info = ctx.trigger_info
         if info.number_of_events != 1:
             raise ValueError(
@@ -669,7 +910,11 @@ class DetectorLogic(FlyableLogic[TriggerInfo, DetectorCtx]):
                 "An externally triggered detector must be prepared again before "
                 "each trigger()"
             )
+        # prepare() started the bounded providers for the first point
+        if ctx.triggers:
+            await _restart_bounded(ctx, f"step point {ctx.triggers + 1}")
         ctx.triggers += 1
+        ctx.readings = None
         async with self._acquiring(ctx):
             async for update in self._wait_for(
                 ctx, ctx.triggers - 1, ctx.triggers, divisor=1
@@ -696,15 +941,49 @@ class DetectorLogic(FlyableLogic[TriggerInfo, DetectorCtx]):
         """
         if ctx is None:
             return [field for dl in self.data for field in dl.get_hinted_fields(name)]
-        return [
+        fields = (
             field
-            for dl in ctx.unbounded_logics
+            for dl in (*ctx.unbounded_logics, *ctx.bounded_logics)
             for field in dl.get_hinted_fields(ctx.name)
             if field in ctx.datakeys
-        ]
+        )
+        # A bounded logic may hint a datakey an unbounded provider makes
+        return list(dict.fromkeys(fields))
+
+    def produces(self, ctx: DetectorCtx) -> tuple[bool, bool]:
+        """Whether the serving providers make (stream assets, event pages)."""
+        return (
+            any(isinstance(p, StreamableDataProvider) for p in ctx.providers),
+            any(isinstance(p, PageableDataProvider) for p in ctx.providers),
+        )
+
+    async def get_readings(self, ctx: DetectorCtx) -> dict[str, Reading]:
+        """Read the current step point's event from each pageable provider.
+
+        Makes the page up to the end of the point and reads its last event. The
+        readings are kept in `ctx`, so a repeat read at the same point returns
+        them again.
+        """
+        if ctx.readings is None:
+            page = await self._make_page(ctx, ctx.triggers)
+            ctx.readings = (
+                {
+                    key: Reading(
+                        value=values[-1], timestamp=page["timestamps"][key][-1]
+                    )
+                    for key, values in page["data"].items()
+                }
+                if page
+                else {}
+            )
+        return ctx.readings
 
     async def get_written_index(self, ctx: DetectorCtx) -> int:
-        """The events every serving data logic has written since `prepare()`."""
+        """The events every serving data logic has written since `prepare()`.
+
+        In a step scan this counts every point, though the bounded data logics
+        only hold the current one.
+        """
         offsets = _collections_offset(ctx)
         written = await gather_dict({s: s.get_value() for s in offsets})
         collections = min((written[s] + o for s, o in offsets.items()), default=0)
@@ -720,6 +999,21 @@ class DetectorLogic(FlyableLogic[TriggerInfo, DetectorCtx]):
             index = ctx.triggers or await self.get_written_index(ctx)
         return index
 
+    async def _make_page(self, ctx: DetectorCtx, index: int) -> PartialEventPage | None:
+        """One page merging each pageable provider's events up to event `index`.
+
+        `None` if no provider has new events.
+        """
+        providers = [
+            (p, end)
+            for p, end in _provider_ends(ctx, index)
+            if isinstance(p, PageableDataProvider)
+        ]
+        pages = await asyncio.gather(*(p.make_page(end) for p, end in providers))
+        return _merge_pages(
+            [(p, page) for (p, _), page in zip(providers, pages, strict=True)]
+        )
+
     async def asset_docs(
         self, ctx: DetectorCtx, index: int | None
     ) -> AsyncIterator[StreamAsset]:
@@ -728,11 +1022,21 @@ class DetectorLogic(FlyableLogic[TriggerInfo, DetectorCtx]):
         `None` collects a step scan to the end of its point, and a fly scan up to
         `get_written_index`.
         """
-        end = await self._collect_end(ctx, index)
-        for p in ctx.unbounded_providers:
+        for p, end in _provider_ends(ctx, await self._collect_end(ctx, index)):
             if isinstance(p, StreamableDataProvider):
                 async for doc in p.make_stream_docs(end):
                     yield doc
+
+    async def event_pages(
+        self, ctx: DetectorCtx, index: int | None
+    ) -> AsyncIterator[PartialEventPage]:
+        """One page merging each pageable provider's events up to event `index`.
+
+        `None` collects a step scan to the end of its point, and a fly scan up to
+        `get_written_index`.
+        """
+        if page := await self._make_page(ctx, await self._collect_end(ctx, index)):
+            yield page
 
     async def _wait_for(
         self, ctx: DetectorCtx, start: int, end: int, divisor: int
@@ -884,7 +1188,6 @@ class StandardDetector(
     Stageable,
     Triggerable,
     Collectable,
-    WritesStreamAssets,
     HasHints,
 ):
     """Detector base class for step and fly scanning detectors.
@@ -922,6 +1225,11 @@ class StandardDetector(
     and `get_index()` raise until a `prepare()` has succeeded. An
     externally triggered detector is prepared again before each `trigger()`.
     After any verb raises, `unstage()` and `stage()` it before using it again.
+
+    `WritesStreamAssets` (and its `collect_asset_docs`) and
+    `EventPageCollectable` (and its `collect_pages`) are *not* inherited: which
+    of them applies depends on what the data logics produce for a given scan, so
+    whichever it is gets bound as an instance attribute by `prepare()`.
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -955,11 +1263,11 @@ class StandardDetector(
         if self._ctx is not NOT_PREPARED and self._ctx.external_acquire_gen:
             await self._ctx.external_acquire_gen.aclose()
 
-    def __on_suppressed_datakeys(self) -> Mapping[str, DataKey]:
-        """The datakeys of the serving providers."""
+    def __on_suppressed_datakeys(self) -> Mapping[str, DataKey | None]:
+        """The datakeys of the serving providers and what the suppress logic hides."""
         if self._ctx is NOT_PREPARED:
             return {}
-        return self._ctx.datakeys
+        return {**self._ctx.datakeys, **dict.fromkeys(self._ctx.hidden)}
 
     async def __on_describe(self) -> dict[str, DataKey]:
         """What the data logics contribute to `describe()`.
@@ -970,7 +1278,7 @@ class StandardDetector(
         return self._prepared_ctx("describe").datakeys
 
     async def __on_read(self) -> dict[str, Reading]:
-        """Check `read()` follows a `trigger()`; the data logics add nothing.
+        """What the data logics contribute to `read()`: pageable data only.
 
         Streamable providers produce their data through `collect_asset_docs`.
         """
@@ -979,13 +1287,43 @@ class StandardDetector(
                 f"{self.name}: read not allowed from {self._state.state.name}, "
                 "allowed from: TRIGGERED"
             )
-        return {}
+        return await self.logic.get_readings(self._prepared_ctx("read"))
 
     def __on_hints(self) -> Iterator[Hints]:
         """The data logics' hinted fields, alongside the children's."""
         ctx = None if self._ctx is NOT_PREPARED else self._ctx
         if fields := self.logic.get_hinted_fields(self.name, ctx):
             yield {"fields": fields}
+
+    def prepare(self, value: TriggerInfo) -> WatchableAsyncStatus[Any]:
+        """Set up the scan as `StandardFlyable.prepare`, then bind the collect verb.
+
+        The collect verb matching what the serving providers produce is bound as
+        a real instance attribute, so the bundler's isinstance checks
+        (`WritesStreamAssets` vs `EventPageCollectable`) see exactly one of them.
+        """
+        # TODO: delete this override once the run bundler picks the collect verb
+        # from what a device produced (bluesky/bluesky#2111). See ADR 0026.
+        status = super().prepare(value)
+        # Added first, so it runs before whoever waits on the status
+        status.add_callback(self._bind_collect_verb)
+        return status
+
+    def _bind_collect_verb(self, status: Status) -> None:
+        if not status.success:
+            return
+        # Those checks resolve with inspect.getattr_static on Python 3.12+, which
+        # does not call __getattr__, so a dynamic hook would be invisible; both
+        # names are reserved by Device, hence object.__setattr__.
+        streamable, pageable = self.logic.produces(self._prepared_ctx("prepare"))
+        for verb, method, wanted in (
+            ("collect_asset_docs", self._collect_asset_docs, streamable),
+            ("collect_pages", self._collect_pages, pageable),
+        ):
+            if wanted:
+                object.__setattr__(self, verb, method)
+            elif verb in self.__dict__:
+                object.__delattr__(self, verb)
 
     @WatchableAsyncStatus.wrap
     async def trigger(self) -> AsyncGenerator[WatcherUpdate[int], None]:
@@ -1008,13 +1346,23 @@ class StandardDetector(
     async def describe_collect(self) -> dict[str, DataKey]:
         return self._prepared_ctx("describe_collect").datakeys
 
-    async def collect_asset_docs(
+    async def _collect_asset_docs(
         self, index: int | None = None
     ) -> AsyncIterator[StreamAsset]:
+        # Bound as collect_asset_docs when there is a streamable provider
         async for doc in self.logic.asset_docs(
             self._prepared_ctx("collect_asset_docs"), index
         ):
             yield doc
+
+    async def _collect_pages(
+        self, index: int | None = None
+    ) -> AsyncIterator[PartialEventPage]:
+        # Bound as collect_pages when there is a pageable provider
+        async for page in self.logic.event_pages(
+            self._prepared_ctx("collect_pages"), index
+        ):
+            yield page
 
     async def get_index(self) -> int:
         return await self.logic.get_written_index(self._prepared_ctx("get_index"))

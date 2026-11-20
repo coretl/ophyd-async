@@ -6,6 +6,9 @@ Date: 2026-10-30
 
 Accepted
 
+Partly superseded by [ADR 0027](0027-areadetector-statistic-names.md), under which
+`AreaDetector` registers every plugin.
+
 ## Context
 
 [ADR 0012](0012-detector-rewrite.md) gave `StandardDetector` its own ways to put a signal

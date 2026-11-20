@@ -1,7 +1,7 @@
 import pytest
 
+from ophyd_async.core import StandardReadableFormat as Format
 from ophyd_async.core import (
-    StandardReadableFormat,
     StaticPathProvider,
     TriggerInfo,
     init_devices,
@@ -13,37 +13,47 @@ from ophyd_async.epics import adcore
 @pytest.mark.parametrize(
     "factory",
     [
-        adcore.ADWriterFactory.hdf,
-        adcore.ADWriterFactory.jpeg,
-        adcore.ADWriterFactory.tiff,
+        adcore.ADDataFactory.hdf,
+        adcore.ADDataFactory.jpeg,
+        adcore.ADDataFactory.tiff,
     ],
 )
 @pytest.mark.parametrize("hinted", [True, False])
 def test_writer_image_hints(static_path_provider: StaticPathProvider, factory, hinted):
-    driver = adcore.ADBaseIO("PREFIX:DRV:")
     stats = adcore.NDStatsIO("PREFIX:STAT:")
-    det = adcore.AreaDetector(
-        driver,
+    det_with_stats = adcore.AreaDetector(
+        adcore.ADBaseIO("PREFIX:DRV:"),
         "PREFIX:",
         factory(static_path_provider, datakey_suffix="-image", hinted=hinted),
         plugins={"stats": stats},
         name="det",
     )
+    det = adcore.AreaDetector(
+        adcore.ADBaseIO("PREFIX:DRV2:"),
+        "PREFIX:",
+        factory(static_path_provider, datakey_suffix="-image", hinted=hinted),
+        name="det2",
+    )
     # No hinted fields means no hints at all
-    assert det.hints == ({"fields": ["det-image"]} if hinted else {})
-    det.set_readable_format(stats.total, StandardReadableFormat.HINTED_SIGNAL)
-    # Readable-format signals are hinted ahead of the data logics' fields
-    assert det.hints == {
-        "fields": ["det-stats-total"] + (["det-image"] if hinted else [])
+    assert det.hints == ({"fields": ["det2-image"]} if hinted else {})
+    # A plugin in plugins= is a readable, hinted ahead of the data logics' fields
+    assert det_with_stats.hints == {
+        "fields": [
+            "det-stats-min_value",
+            "det-stats-max_value",
+            "det-stats-mean_value",
+            "det-stats-total",
+            *(["det-image"] if hinted else []),
+        ]
     }
 
 
 @pytest.mark.parametrize(
     "factory",
     [
-        adcore.ADWriterFactory.hdf,
-        adcore.ADWriterFactory.jpeg,
-        adcore.ADWriterFactory.tiff,
+        adcore.ADDataFactory.hdf,
+        adcore.ADDataFactory.jpeg,
+        adcore.ADDataFactory.tiff,
     ],
 )
 def test_writer_image_hints_enabled_by_default(
@@ -74,7 +84,7 @@ def test_area_detector_requires_prefix_when_factories_given(
         adcore.AreaDetector(
             driver,
             None,
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             name="det",
         )
 
@@ -91,8 +101,8 @@ def test_area_detector_rejects_duplicate_writer_names(
         adcore.AreaDetector(
             driver,
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider, writer_name="hdf"),
-            adcore.ADWriterFactory.hdf(static_path_provider, writer_name="hdf"),
+            adcore.ADDataFactory.hdf(static_path_provider, writer_name="hdf"),
+            adcore.ADDataFactory.hdf(static_path_provider, writer_name="hdf"),
             name="det",
         )
 
@@ -106,7 +116,7 @@ def test_plugin_named_like_a_factory_attribute_raises(
         adcore.AreaDetector(
             driver,
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider, writer_name="stats"),
+            adcore.ADDataFactory.hdf(static_path_provider, writer_name="stats"),
             plugins={"stats": adcore.NDStatsIO("PREFIX:STATS:")},
             name="det",
         )
@@ -119,6 +129,107 @@ def test_plugin_named_like_the_driver_raises():
         adcore.AreaDetector(
             driver, plugins={"driver": adcore.NDStatsIO("PREFIX:S:")}, name="det"
         )
+
+
+def test_stats_time_series_makes_no_plugin_of_its_own():
+    stats = adcore.NDStatsIO("PREFIX:STATS:")
+
+    det = adcore.AreaDetector(
+        adcore.ADBaseIO("PREFIX:DRV:"),
+        "PREFIX:",
+        adcore.ADDataFactory.time_series(stats),
+        plugins={"stats": stats},
+        name="det",
+    )
+
+    assert [name for name, _ in det.children()] == ["driver", "stats"]
+
+
+def test_the_detector_registers_every_plugin_and_writer_as_a_child_readable(
+    static_path_provider: StaticPathProvider,
+):
+    stats = adcore.NDStatsIO("PREFIX:STATS:")
+
+    det = adcore.ContAcqDetector(
+        "PREFIX:",
+        adcore.ADDataFactory.hdf(static_path_provider),
+        proc_suffix="PROC:",
+        plugins={"stats": stats},
+        name="det",
+    )
+
+    children = [device for device, format in det.get_readable_formats()]
+    assert children == [det.driver, stats, det.proc, det.cb, det.hdf]
+    assert all(format is Format.CHILD for _, format in det.get_readable_formats())
+
+
+def test_the_factories_are_given_the_plugins_of_the_user_and_the_detector(
+    static_path_provider: StaticPathProvider,
+):
+    stats = adcore.NDStatsIO("PREFIX:STATS:")
+    seen = []
+    hdf = adcore.ADDataFactory.hdf(static_path_provider)
+
+    def build(prefix, driver, plugins):
+        seen.extend(plugins)
+        return hdf.build(prefix, driver, plugins)
+
+    det = adcore.ContAcqDetector(
+        "PREFIX:",
+        adcore.ADDataFactory(build=build),
+        proc_suffix="PROC:",
+        plugins={"stats": stats},
+        name="det",
+    )
+
+    assert seen == [stats, det.proc, det.cb]
+
+
+@pytest.mark.parametrize(
+    "make_factory",
+    [
+        lambda path_provider, plugin: adcore.ADDataFactory.hdf(
+            path_provider, ndattribute_sources=[plugin]
+        ),
+        lambda path_provider, plugin: adcore.ADDataFactory.time_series(plugin),
+    ],
+    ids=["hdf-ndattribute-sources", "time-series"],
+)
+def test_a_plugin_taken_by_reference_must_be_in_plugins(
+    static_path_provider: StaticPathProvider, make_factory
+):
+    stats = adcore.NDStatsIO("PREFIX:STATS:", name="stats")
+
+    with pytest.raises(ValueError, match=r"stats is not .* add it to `plugins=`"):
+        adcore.AreaDetector(
+            adcore.ADBaseIO("PREFIX:DRV:"),
+            "PREFIX:",
+            make_factory(static_path_provider, stats),
+            name="det",
+        )
+
+
+def test_area_detector_accepts_an_ndattribute_source_below_a_plugin(
+    static_path_provider: StaticPathProvider,
+):
+    roi = adcore.NDROIIO("PREFIX:ROI:")
+    roi.stat = adcore.NDStatsIO("PREFIX:STATS:")
+
+    adcore.AreaDetector(
+        adcore.ADBaseIO("PREFIX:DRV:"),
+        "PREFIX:",
+        adcore.ADDataFactory.hdf(static_path_provider, ndattribute_sources=[roi.stat]),
+        plugins={"roi": roi},
+        name="det",
+    )
+
+
+def test_deprecated_writer_factory_still_builds_the_new_factories(
+    static_path_provider: StaticPathProvider,
+):
+    with pytest.warns(DeprecationWarning, match="ADWriterFactory"):
+        hdf = adcore.ADWriterFactory.hdf(static_path_provider)
+    assert isinstance(hdf, adcore.ADDataFactory)
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +286,7 @@ async def test_get_ndarray_resource_info_undefined_datatype(
         det = adcore.AreaDetector(
             adcore.ADBaseIO("PREFIX:DRV:"),
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             name="det",
         )
     set_mock_value(det.driver.data_type, adcore.ADBaseDataType.UNDEFINED)
@@ -195,7 +306,7 @@ async def test_get_ndarray_resource_info_unsupported_color_mode(
         det = adcore.AreaDetector(
             adcore.ADBaseIO("PREFIX:DRV:"),
             "PREFIX:",
-            adcore.ADWriterFactory.hdf(static_path_provider),
+            adcore.ADDataFactory.hdf(static_path_provider),
             name="det",
         )
     set_mock_value(det.driver.color_mode, adcore.ADBaseColorMode.BAYER)

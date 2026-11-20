@@ -19,7 +19,7 @@ from ophyd_async.epics.adcore import NDProcessIO
 from .adcore import (
     ADAcquireLogic,
     ADBaseIO,
-    ADWriterFactory,
+    ADDataFactory,
     AreaDetector,
     NDPluginBaseIO,
     plugins_with_proc,
@@ -99,8 +99,8 @@ class KinetixDetector(AreaDetector[KinetixDriverIO]):
     :param driver_suffix: Suffix for the driver PV, defaults to "cam1:"
     :param proc_suffix: If provided, an NDProcessIO plugin is created at this suffix
     :param plugins:
-        Additional areaDetector plugins to include. "proc" is reserved: use
-        proc_suffix instead.
+        areaDetector plugins to add, each registered as a readable. "proc" is
+        reserved: use proc_suffix instead.
     :param config_sigs: Additional signals to include in configuration
     :param name: Name for the detector device
     """
@@ -108,7 +108,7 @@ class KinetixDetector(AreaDetector[KinetixDriverIO]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         driver_suffix: str = "cam1:",
         proc_suffix: str | None = None,
         plugins: dict[str, NDPluginBaseIO] | None = None,

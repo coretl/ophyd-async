@@ -14,6 +14,7 @@ from ophyd_async.core import (
     SignalR,
     StandardReadable,
     TransitionError,
+    set_mock_attr,
     soft_signal_r_and_setter,
     soft_signal_rw,
 )
@@ -592,7 +593,7 @@ class _Suppressing(StandardReadable):
     """A readable that is told which names to suppress, as a detector would."""
 
     def __init__(self, name: str = ""):
-        self.suppressed: dict[str, DataKey] = {}
+        self.suppressed: dict[str, DataKey | None] = {}
         super().__init__(name)
         self._suppressed_datakeys_funcs += (lambda: self.suppressed,)
 
@@ -607,7 +608,7 @@ class _Pair(StandardReadable):
         super().__init__(name)
 
 
-async def _suppressing(suppressed: dict[str, DataKey]) -> _Suppressing:
+async def _suppressing(suppressed: dict[str, DataKey | None]) -> _Suppressing:
     sr = _Suppressing("sr")
     sr.pair = _Pair()
     sr.sig = soft_signal_rw(int, 3)
@@ -621,6 +622,18 @@ async def _suppressing(suppressed: dict[str, DataKey]) -> _Suppressing:
 
 async def _datakeys() -> dict[str, DataKey]:
     return await (await _suppressing({})).describe()
+
+
+@pytest.mark.parametrize("suppressed_name", ["sr-sig", "sr-pair-two"])
+async def test_a_switched_off_name_is_dropped_from_read_describe_and_hints(
+    suppressed_name: str,
+):
+    sr = await _suppressing({suppressed_name: None})
+
+    expected = {"sr-pair-one", "sr-pair-two", "sr-sig"} - {suppressed_name}
+    assert set(await sr.read()) == expected
+    assert set(await sr.describe()) == expected
+    assert set(sr.hints["fields"]) == expected
 
 
 @pytest.mark.parametrize("suppressed_name", ["sr-sig", "sr-pair-two"])
@@ -643,3 +656,12 @@ async def test_a_replacement_of_a_different_dtype_is_a_duplicate_datakey():
 
     with pytest.raises(ValueError, match=r"duplicate datakeys \['sr-sig'\]"):
         await sr.describe()
+
+
+async def test_a_switched_off_signal_is_not_even_described():
+    sr = await _suppressing({"sr-sig": None})
+    sig_describe = set_mock_attr(sr.sig, "describe", MagicMock())
+
+    await sr.describe()
+
+    sig_describe.assert_not_called()

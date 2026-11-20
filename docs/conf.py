@@ -197,6 +197,8 @@ obj_ignore = [
     # TypeVars documented on StandardFlyable, added in #1359
     "PrepareT",
     "CtxT",
+    # event_model publishes no intersphinx entry for this TypedDict
+    "event_model.documents.PartialEventPage",
     # The context DetectorLogic threads from prepare to unstage, private
     # because nothing outside StandardDetector constructs or inspects one
     "ophyd_async.core._detector.DetectorCtx",

@@ -22,7 +22,7 @@ from ophyd_async.epics.core import PvSuffix
 from .adcore import (
     ADAcquireLogic,
     ADBaseIO,
-    ADWriterFactory,
+    ADDataFactory,
     AreaDetector,
     NDPluginBaseIO,
     NDProcessIO,
@@ -148,8 +148,8 @@ class VimbaDetector(AreaDetector[VimbaDriverIO]):
         based on camera model.
     :param proc_suffix: If provided, an NDProcessIO plugin is created at this suffix
     :param plugins:
-        Additional areaDetector plugins to include. "proc" is reserved: use
-        proc_suffix instead.
+        areaDetector plugins to add, each registered as a readable. "proc" is
+        reserved: use proc_suffix instead.
     :param config_sigs: Additional signals to include in configuration
     :param name: Name for the detector device
     """
@@ -157,7 +157,7 @@ class VimbaDetector(AreaDetector[VimbaDriverIO]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         driver_suffix="cam1:",
         override_deadtime: float | None = None,
         proc_suffix: str | None = None,

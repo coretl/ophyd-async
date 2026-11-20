@@ -235,23 +235,24 @@ The [](#StreamableDataProvider) returned from `start_provider()` is made for the
 - `make_datakeys()` - creates DataKey descriptions for each dataset
 - `make_stream_docs()` - emits StreamResource and StreamDatum documents as frames are written
 
-#### What a data logic returns
+#### Which kind of data a logic produces
 
-The detector starts each of its logics for the scan, and each returns one of:
+The detector starts each of its logics for the scan, and the type of provider that comes back says which kind of data it is.
 
-- a [](#StreamableDataProvider), which publishes stream assets, like a file writer. The detector publishes them through `collect_asset_docs`, and `BlobDataLogic` is an example.
-- `None`, meaning "not this stage", for instance a plugin that is switched off. The logic decides this without writing anything. This is not an error: a detector may carry more data logics than any one scan uses.
+- a [](#StreamableDataProvider) publishes stream assets, like a file writer. The detector exposes `collect_asset_docs`, and `BlobDataLogic` is an example.
+- a [](#PageableDataProvider) publishes event pages, like an areaDetector stats time series or a scaler's arrays, so the detector exposes `collect_pages` instead. Its `make_page()` carries on from where its last page got to; a step scan's `read()` takes the last event of the page made up to the end of the point. See [](#TimeSeriesDataLogic).
+- `None` means "not this stage", for instance a plugin that is switched off. The logic decides this without writing anything. This is not an error: a detector may carry more data logics than any one scan uses.
 
-An [](#UnboundedDataLogic), like a file writer, keeps counting for as long as it is told to; its collections-written signal is read when each `prepare()` finishes.
+Separately from that, a data logic is either a [](#BoundedDataLogic) or an [](#UnboundedDataLogic), whichever it inherits from (not both). An unbounded logic, like a file writer, keeps counting for as long as it is told to; its collections-written signal is read when each `prepare()` finishes. A bounded logic needs to be told how many collections to take, like a finite buffer: it is started after the unbounded ones and handed the datakeys their providers already make, and its provider must make none of them. It returns `None` if nothing is left to make, and raises for a scan with no fixed number of collections (`num_collections` of 0) if something is. At each point of a step scan after the first it is stopped and started again, so the buffer is cleared. Either kind may return either kind of provider.
 
 A source that produces one value per event, like a plugin scalar, needs no data logic at all: a detector is a [](#StandardReadable), so register the signal with [](#StandardReadable.set_readable_format).
 
-`start_provider()` is given the detector `name`, which a logic uses for its datakeys (adding its own suffix if it has one), and the fields it needs from the scan's [](#TriggerInfo): `collections_per_event`, a `collection_period` and a `flush_period`. The `collection_period` is `exposures_per_collection * (livetime + deadtime)`, where `prepare()` reads the livetime and deadtime back from the trigger logic when the plan's [](#TriggerInfo) leaves `livetime` at 0 and [](#OPHYD_ASYNC_PRESERVE_DETECTOR_STATE) is `YES`; otherwise it is 0 for "use what is on the hardware".
+Both kinds of `start_provider()` are given the detector `name`, which a logic uses for its datakeys (adding its own suffix if it has one), and the fields they need from the scan's [](#TriggerInfo): `collections_per_event`, a `collection_period` and a `flush_period`, and the bounded one also `existing_datakeys` and `num_collections`. The `collection_period` is `exposures_per_collection * (livetime + deadtime)`, where `prepare()` reads the livetime and deadtime back from the trigger logic when the plan's [](#TriggerInfo) leaves `livetime` at 0 and [](#OPHYD_ASYNC_PRESERVE_DETECTOR_STATE) is `YES`; otherwise it is 0 for "use what is on the hardware".
 
 No two providers may make the same datakey: `prepare()` raises if they do. A datakey a provider makes replaces a registered signal of that name.
 
 ```{note}
-Which logics serve is decided at the first `prepare()` after `stage()` and holds until the next `stage()`, so it can change from one stage to the next: a detector whose HDF writer is switched off can serve its TIFF writer instead. Change it **between stages**, not inside one: a run's descriptor is emitted at its start, so switching part way through would leave the descriptor and the documents disagreeing.
+Which logics serve is decided at the first `prepare()` after `stage()` and holds until the next `stage()`, so it can change from one stage to the next: a detector whose file writer is switched off can serve its stats time series instead. Change it **between stages**, not inside one: a run's descriptor is emitted at its start, so switching part way through would leave the descriptor and the documents disagreeing.
 ```
 
 ## Conclusion
