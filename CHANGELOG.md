@@ -51,6 +51,7 @@
 - `DetectorSuppressLogic`, set as `DetectorLogic.suppress`, names the readables a detector's data hides.
 - `adcore.TimeSeriesDataLogic` and `ADDataFactory.time_series(plugin)` publish the time series of an `NDPluginStats` or `NDPluginROIStat` as event pages, for an areaDetector that writes no file.
 - `NDParam`, `NDPluginBaseIO.get_enabled_params()`, `NDStatsIO.ts_plugin`, `NDROIStatTSControl`, the `ts_*` time series signals of `NDStatsIO` and `NDROIStatNIO`, and `NDROIStatNIO.net`.
+- `DetectorTrigger.EXTERNAL_START`, where one external trigger starts all the exposures, for a trigger logic that implements `prepare_start()`, as `EigerTriggerLogic` does.
 
 ### Changed
 

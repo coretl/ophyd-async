@@ -22,6 +22,7 @@ Now you need a class that subclasses [](#DetectorTriggerLogic). Decorate it with
 
 Implement methods for each trigger mode your detector supports:
 - `prepare_internal(num, livetime, deadtime)` - Setup for internal triggering (detector generates its own triggers)
+- `prepare_start(num, livetime, deadtime)` - Setup for external start triggering (one edge starts all the internally-timed exposures)
 - `prepare_edge(num, livetime)` - Setup for external edge triggering (rising edge starts an internally-timed exposure)
 - `prepare_level(num)` - Setup for external level/gate triggering (high level duration determines exposure time)
 - `prepare_exposures_per_collection(exposures_per_collection)` - If your detector should produce multiple exposures per individual frame written to disk, implement this method to configure the detector to produce the requested number of exposures per collection. For AD detectors, this is typically done with an optional process plugin that will perform a filter over a predefined number of exposures (i.e. an average or sum).

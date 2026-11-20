@@ -65,7 +65,25 @@ async def test_deadtime_correct(detector: EigerDetector):
     supported_triggers, deadtime = await detector.get_trigger_deadtime()
     assert supported_triggers == {
         DetectorTrigger.INTERNAL,
+        DetectorTrigger.EXTERNAL_START,
         DetectorTrigger.EXTERNAL_EDGE,
         DetectorTrigger.EXTERNAL_LEVEL,
     }
     assert deadtime == 0.0001
+
+
+async def test_prepare_start_sets_one_trigger_for_all_images(detector: EigerDetector):
+    await detector.stage()
+    get_mock(detector).reset_mock()
+    await detector.prepare(
+        TriggerInfo(
+            number_of_events=10,
+            livetime=0.1,
+            trigger=DetectorTrigger.EXTERNAL_START,
+        )
+    )
+    eiger = detector.detector
+    assert await eiger.trigger_mode.get_value() == EigerTriggerMode.EDGE
+    assert await eiger.ntrigger.get_value() == 1
+    assert await eiger.nimages.get_value() == 10
+    assert await eiger.count_time.get_value() == 0.1
