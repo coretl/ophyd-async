@@ -41,8 +41,6 @@ __all__ = [
     "PilatusReadoutTime",
 ]
 
-_MAX_NUM_IMAGE = 999_999
-
 
 class PilatusTriggerMode(StrictEnum):
     """Trigger modes for ADPilatus detector."""
@@ -115,23 +113,21 @@ class PilatusTriggerLogic(DetectorTriggerLogic):
 
     async def prepare_internal(self, num: int, livetime: float, deadtime: float):
         await self.driver.trigger_mode.set(PilatusTriggerMode.INTERNAL)
-        await prepare_exposures(self.driver, num or _MAX_NUM_IMAGE, livetime, deadtime)
+        await prepare_exposures(self.driver, num, livetime, deadtime)
 
     async def prepare_edge(self, num: int, livetime: float):
         await self.driver.trigger_mode.set(self.edge_trigger_mode)
-        await prepare_exposures(self.driver, num or _MAX_NUM_IMAGE, livetime)
+        await prepare_exposures(self.driver, num, livetime)
 
     async def prepare_level(self, num: int):
         await self.driver.trigger_mode.set(PilatusTriggerMode.EXT_ENABLE)
-        await prepare_exposures(self.driver, num or _MAX_NUM_IMAGE)
+        await prepare_exposures(self.driver, num)
 
     async def prepare_exposures_per_collection(self, exposures_per_collection: int):
         await prepare_filter(self.process_plugin, exposures_per_collection)
 
     async def default_trigger_info(self):
-        return await trigger_info_from_driver(
-            self.driver.num_images, self.process_plugin
-        )
+        return await trigger_info_from_driver(self.driver, self.process_plugin)
 
 
 class PilatusDetector(AreaDetector[PilatusDriverIO]):

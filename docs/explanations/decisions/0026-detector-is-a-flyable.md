@@ -1,0 +1,135 @@
+# 26. StandardDetector is a StandardFlyable
+
+Date: 2026-08-28
+
+## Status
+
+Accepted
+
+## Context
+
+`StandardDetector` re-implemented `prepare`, `kickoff` and `complete` and threaded its own
+state between them, while `StandardFlyable` already did that for every other flyer. The
+two drifted apart: the detector guarded its stages by checking a context for `None`, so a
+verb called too early failed with `AttributeError: 'NoneType' object has no attribute ...`.
+
+`StandardFlyable` requires a single `FlyableLogic` in a `logic` property
+([ADR 0021](0021-single-logic-property.md)), and a detector had three logic objects
+registered by `add_detector_logics()`.
+
+## Decision
+
+### One `DetectorLogic` holds the trigger, acquire and data logics
+
+`DetectorLogic` is what `logic` returns, and the orchestration (preparing the trigger
+logic, making the data providers, arming, waiting) moves into it. It is a frozen dataclass
+with no back-reference to its Device, so [ADR 0017](0017-standard-movable.md) holds
+unqualified.
+
+```python
+class MyDetector(StandardDetector):
+    def __init__(self, prefix: str, name: str = "") -> None:
+        self.driver = MyDriverIO(prefix)
+        super().__init__(name=name)
+
+    @cached_property
+    def logic(self) -> DetectorLogic:
+        return DetectorLogic(
+            trigger=MyTriggerLogic(self.driver),
+            acquire=MyAcquireLogic(self.driver),
+        )
+```
+
+- `add_detector_logics()` is removed, not kept as a forwarder: a detector's logics are fixed
+  for its lifetime, and two ways to wire one Device is one too many.
+- `StandardDetector` takes no `__init__` arguments, as they would interfere with multiple
+  inheritance. `logic` is an `abstract_cached_property`; assigning `self.logic` in
+  `__init__` cannot replace it, because `ABCMeta` checks abstract methods before `__init__`
+  runs. `DetectorLogic.with_device()` builds an ad-hoc detector, like any flyer's.
+- Datakeys are named after the Device, whose name only exists once `init_devices` calls
+  `set_name`, so `StandardFlyable` passes the name to `prepare_to_fly`.
+
+### A provider's datakey replaces a registered signal of its name
+
+A value can be both a registered signal and written by a data logic, such as an
+areaDetector plugin scalar that the HDF writer also writes as an NDAttribute. So:
+
+- A registered signal whose name a provider key has is dropped from `read()` and
+  `describe()` while prepared, and keeps its hint, since the replacement has its name.
+- The provider key must have the signal's dtype and shape, optionally with a leading
+  `collections_per_event` dimension. Anything else is a `ValueError` at `describe()`: two
+  different things share a name, and one must be renamed.
+- A registered signal that nothing suppresses is read once per event.
+
+This is a general `StandardReadable` hook mapping a datakey name to `None` or a replacing
+`DataKey`, matched by name so a signal is found wherever it is registered. `None` also drops
+the hint, as it is for a signal that is switched off.
+
+### The detector flies with one `fly()` generator
+
+`FlyableLogic.fly` is one async generator
+([ADR 0022](0022-fly-generator-and-ensure-stopped.md)). Progress is collections written
+since `prepare_to_fly` noted the count (`ctx.unbounded_start_collections`) out of those
+requested. `unstage()` cancels the fly, so no stop logic is needed beyond
+`ensure_stopped`.
+
+A fly scan collects only what the data logics make: registered readables are read only by
+`trigger()`.
+
+### An acquisition is a generator too
+
+`start_acquiring` and `wait_for_idle` had to hold what the first started on the logic, and
+cancelling between them left it running. They become one async generator, `acquire()`, which
+owns what it starts, so closing it at its `yield` ends it:
+
+- An externally triggered detector arms in `prepare()`, so it is waiting on its trigger
+  source when `kickoff()` returns, and the context holds it until `fly` or `trigger()` takes
+  it. It cannot be prepared again before then, so nothing replaces it.
+- One still armed at `unstage()` is closed then, not at garbage collection; stopping the
+  detector stays the job of `ensure_stopped`.
+- `ADAcquireLogic` writes `WaitForPlugins` (on by default) at every `stage()`, not as the
+  IOC booted: without it a step scan silently reads plugin scalars of the previous frame,
+  and the wait is free when a file writer is slowest anyway. `ADContAcqAcquireLogic` has
+  none, as its driver never stops acquiring.
+
+### One kickoff per prepare
+
+The detector was prepared for N events and kicked off a few at a time (`events_to_kickoff`),
+but nothing drove that: the RunEngine kicks off once, as for every other flyer. It goes;
+`kickoff()` requests the whole scan, and a second needs a new `prepare()`. A detector with
+no data logic is still a valid flyer for its triggering.
+
+### One context per prepare, kept until the next `stage()`
+
+One `DetectorCtx` threads from `prepare_to_fly` to `fly`; what exists only once flying
+lives in `fly`, so no field waits for kickoff as `| None`. The logic holds no state: the
+next `prepare()` gets the last context as `previous_ctx`, which is how providers carry over
+([ADR 0025](0025-data-logics-start-providers.md)).
+The trigger logic is not re-prepared per step point.
+
+- A failed `prepare()` needs `unstage()`, and `stage()` forgets the context, so a retry is
+  a first prepare of the stage: it starts every data logic, whatever the failed one got to.
+- The context outlives `complete()`, so `collect_while_completing` can collect after it.
+- A step scan's collect publishes up to the point `trigger()` waited for, never re-reading
+  the counter, so it publishes exactly what `trigger()` saw written.
+
+`trigger()` runs in a `TRIGGERING` state, so `unstage()` cancels it, `kickoff()` cannot
+overlap it, and a failed one needs `unstage()`. It prepares implicitly if nothing has
+been.
+
+## Consequences
+
+- A verb called out of order raises a `TransitionError`, not `Prepare not run`. A verb that
+  changes the state names the states it may start from (`<name>: cannot go to FLYING from
+  STAGED, allowed from: PREPARED`), so a second `kickoff()` without a `prepare()` is
+  rejected. A verb that only reads the context needs a successful `prepare()` since
+  `stage()` (`<name>: describe needs a successful prepare() first`): it checks the context,
+  not the state, as `None` is a valid context of a flyer and the flyer should not list the
+  detector's states. So `describe()` and the collect verbs still work after a failed
+  fly. `read()` also checks the state, as it means something only after `trigger()`; before
+  that it raises rather than return nothing.
+- `StandardDetector` no longer implements `complete`, `kickoff`, `stage` or `unstage`, so
+  lifecycle changes reach detectors too. It adds `__on_*` hooks for `read()`, `describe()`,
+  `hints`, suppression and `unstage()`, registered in lists rather than overriding the
+  verbs, so mix-ins combined on one Device do not shadow each other through the MRO. It
+  overrides none of the flyer's verbs.
