@@ -125,9 +125,10 @@ class StandardReadable(
     # What contributes to each verb, gathered in parallel by the verb methods.
     # Immutable defaults to avoid accidental sharing between instances. A
     # subclass producing data from somewhere other than a registered child adds
-    # to these rather than overriding the verbs. Each registry is named after
-    # the method that gathers it, and each hook added to it is `__on_<method>`,
-    # name-mangled so mix-ins in one MRO never collide.
+    # to these rather than overriding the verbs, as `StandardDetector` does for
+    # its data logics. Each registry is named after the method that gathers it,
+    # and each hook added to it is `__on_<method>`, name-mangled so mix-ins in
+    # one MRO never collide.
     _read_funcs: tuple[Callable[[], Awaitable[dict[str, Reading]]], ...] = ()
     _describe_funcs: tuple[Callable[[], Awaitable[dict[str, DataKey]]], ...] = ()
     _read_configuration_funcs: tuple[
@@ -464,6 +465,33 @@ class StandardReadable(
         )
         for device in devices:
             self.set_readable_format(device, format)
+
+
+def _config_signals(device: Device) -> set[SignalR]:
+    """Return every `Signal` contributing to a Device's `read_configuration()`.
+
+    Recurses into children registered as [](#StandardReadableFormat.CHILD), so
+    a Device that registers a sub-Device whole picks up whatever that
+    sub-Device declares as configuration. A Device that is not a
+    `StandardReadable` contributes nothing.
+
+    Unlike `walk_config_signals` this reads the registry rather than calling
+    `read_configuration()`, so it does no I/O and includes read-only `SignalR`s
+    as well as `SignalRW`s (`ADBaseIO.model` is a `SignalR`, and it is exactly
+    the signal an areaDetector trigger logic needs for deadtime).
+    """
+    signals: set[SignalR] = set()
+    if not isinstance(device, StandardReadable):
+        return signals
+    for entry in device.get_readable_formats():
+        match entry:
+            case (signal, Format.CONFIG_SIGNAL):
+                signals.add(signal)
+            case (child, Format.CHILD):
+                signals |= _config_signals(child)
+            case _:
+                pass
+    return signals
 
 
 #: Reserved key under which [](#store_settings) writes readable formats. It

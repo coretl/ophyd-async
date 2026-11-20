@@ -1,6 +1,7 @@
 import pytest
 
 from ophyd_async.core import (
+    StandardReadableFormat,
     StaticPathProvider,
     TriggerInfo,
     init_devices,
@@ -28,10 +29,12 @@ def test_writer_image_hints(static_path_provider: StaticPathProvider, factory, h
         plugins={"stats": stats},
         name="det",
     )
-    assert det.hints == {"fields": ["det-image"] if hinted else []}
-    det.add_detector_logics(adcore.PluginSignalDataLogic(driver, stats.total))
+    # No hinted fields means no hints at all
+    assert det.hints == ({"fields": ["det-image"]} if hinted else {})
+    det.set_readable_format(stats.total, StandardReadableFormat.HINTED_SIGNAL)
+    # Readable-format signals are hinted ahead of the data logics' fields
     assert det.hints == {
-        "fields": (["det-image"] if hinted else []) + ["det-stats-total"]
+        "fields": ["det-stats-total"] + (["det-image"] if hinted else [])
     }
 
 

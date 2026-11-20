@@ -19,6 +19,11 @@
 - Needs `typing-extensions>=4.14`.
 - `StandardReadable` keeps one format per child, so registering a child again replaces its format. A subclass that added to the private `_describe_config_funcs`, `_read_config_funcs` or `_has_hints` adds a hook to `_describe_configuration_funcs`, `_read_configuration_funcs` or `_hints_funcs` instead.
 - The deprecated `ConfigSignal` and `HintedSignal` are removed: use `StandardReadableFormat.CONFIG_SIGNAL` or `HINTED_SIGNAL`.
+- `StandardDetector` is now a `StandardReadable`: register the signals it reads or reports as configuration with `set_readable_format()`. `add_config_signals()` is deprecated, and a detector with no hinted fields reports `hints` as `{}`.
+- `DetectorTriggerLogic.config_sigs()` is removed: `get_deadtime()` is given every configuration signal of the detector, so register a signal it needs as `CONFIG_SIGNAL`.
+- The `prepare_single` data logic tier is removed, with `ReadableDataProvider`, `SignalDataProvider` and `adcore.PluginSignalDataLogic`: register a plugin scalar such as `NDStatsIO.total` as `HINTED_SIGNAL` instead.
+- The areaDetector driver and plugin classes declare their own read and configuration signals, so a plugin registered as a `CHILD` of an `AreaDetector` adds them to `read()` and `read_configuration()`.
+- `ADAcquireLogic` sets `WaitForPlugins` at `stage()`, from its new `wait_for_plugins` argument (default on), rather than `AreaDetector` hiding it.
 
 ### Added
 
