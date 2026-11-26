@@ -459,6 +459,10 @@
   - ```{autodoc2-docstring} ophyd_async.core._log.config_ophyd_async_logging
     :summary:
     ```
+* - {py:obj}`cancel_and_wait <ophyd_async.core._utils.cancel_and_wait>`
+  - ```{autodoc2-docstring} ophyd_async.core._utils.cancel_and_wait
+    :summary:
+    ```
 * - {py:obj}`error_if_none <ophyd_async.core._utils.error_if_none>`
   - ```{autodoc2-docstring} ophyd_async.core._utils.error_if_none
     :summary:
@@ -497,6 +501,10 @@
     ```
 * - {py:obj}`wait_for_connection <ophyd_async.core._utils.wait_for_connection>`
   - ```{autodoc2-docstring} ophyd_async.core._utils.wait_for_connection
+    :summary:
+    ```
+* - {py:obj}`abstract_cached_property <ophyd_async.core._utils.abstract_cached_property>`
+  - ```{autodoc2-docstring} ophyd_async.core._utils.abstract_cached_property
     :summary:
     ```
 * - {py:obj}`non_zero <ophyd_async.core._utils.non_zero>`
@@ -963,7 +971,7 @@ Bases: {py:obj}`ophyd_async.core._device.Device`, {py:obj}`bluesky.protocols.Loc
 
 ````
 
-````{py:method} stop(success=False)
+````{py:method} stop(*, success: bool = False)
 :canonical: ophyd_async.core._movable.StandardMovable.stop
 :async:
 
@@ -1232,7 +1240,7 @@ Bases: {py:obj}`ophyd_async.core._status.AsyncStatusBase`\[{py:obj}`ophyd_async.
 
 `````
 
-`````{py:class} WatchableAsyncStatus(iterator: ~collections.abc.AsyncIterator[~ophyd_async.core._utils.WatcherUpdate[~ophyd_async.core._utils.T]], name: str | None = None)
+`````{py:class} WatchableAsyncStatus(iterator: ~collections.abc.AsyncGenerator[~ophyd_async.core._utils.WatcherUpdate[~ophyd_async.core._utils.T], None], name: str | None = None)
 :canonical: ophyd_async.core._status.WatchableAsyncStatus
 
 Bases: {py:obj}`ophyd_async.core._status.AsyncStatusBase`\[{py:obj}`None`\], {py:obj}`typing.Generic`\[{py:obj}`ophyd_async.core._utils.T`\]
@@ -1248,7 +1256,7 @@ Bases: {py:obj}`ophyd_async.core._status.AsyncStatusBase`\[{py:obj}`None`\], {py
 
 ````
 
-````{py:method} wrap(f: ~collections.abc.Callable[~ophyd_async.core._utils.P, ~collections.abc.AsyncIterator[~ophyd_async.core._utils.WatcherUpdate[~ophyd_async.core._utils.V]]]) -> ~collections.abc.Callable[~ophyd_async.core._utils.P, ~ophyd_async.core._status.WatchableAsyncStatus[~ophyd_async.core._utils.V]]
+````{py:method} wrap(f: ~collections.abc.Callable[~ophyd_async.core._utils.P, ~collections.abc.AsyncGenerator[~ophyd_async.core._utils.WatcherUpdate[~ophyd_async.core._utils.V], None]]) -> ~collections.abc.Callable[~ophyd_async.core._utils.P, ~ophyd_async.core._status.WatchableAsyncStatus[~ophyd_async.core._utils.V]]
 :canonical: ophyd_async.core._status.WatchableAsyncStatus.wrap
 :classmethod:
 
@@ -1376,7 +1384,7 @@ Bases: {py:obj}`typing.Generic`\[{py:obj}`ophyd_async.core._utils.T`\]
 ```
 ````
 
-````{py:function} forward_watcher_updates(statuses: list[~ophyd_async.core._status.WatchableAsyncStatus], name: str, combine: bool = True) -> ~collections.abc.AsyncIterator[~ophyd_async.core._utils.WatcherUpdate]
+````{py:function} forward_watcher_updates(statuses: list[~ophyd_async.core._status.WatchableAsyncStatus], name: str, combine: bool = True) -> ~collections.abc.AsyncGenerator[~ophyd_async.core._utils.WatcherUpdate, None]
 :canonical: ophyd_async.core._status.forward_watcher_updates
 :async:
 
@@ -1553,7 +1561,7 @@ Bases: {py:obj}`ophyd_async.core._signal.Signal`
 `````{py:class} SignalBackend(datatype: type[~ophyd_async.core._signal_backend.SignalDatatypeT] | None)
 :canonical: ophyd_async.core._signal_backend.SignalBackend
 
-Bases: {py:obj}`typing.Generic`\[{py:obj}`ophyd_async.core._signal_backend.SignalDatatypeT`\]
+Bases: {py:obj}`abc.ABC`, {py:obj}`typing.Generic`\[{py:obj}`ophyd_async.core._signal_backend.SignalDatatypeT`\]
 
 ```{autodoc2-docstring} ophyd_async.core._signal_backend.SignalBackend
 ```
@@ -2811,7 +2819,7 @@ Bases: {py:obj}`ophyd_async.core._device.Device`, {py:obj}`bluesky.protocols.Sta
 
 ````
 
-````{py:method} trigger() -> ~collections.abc.AsyncIterator[~ophyd_async.core._utils.WatcherUpdate[int]]
+````{py:method} trigger() -> ~collections.abc.AsyncGenerator[~ophyd_async.core._utils.WatcherUpdate[int], None]
 :canonical: ophyd_async.core._detector.StandardDetector.trigger
 :async:
 
@@ -3086,6 +3094,8 @@ Bases: {py:obj}`ophyd_async.core._path_providers.FilenameProvider`
 `````{py:class} ReadableDataProvider
 :canonical: ophyd_async.core._data_providers.ReadableDataProvider
 
+Bases: {py:obj}`abc.ABC`
+
 ```{autodoc2-docstring} ophyd_async.core._data_providers.ReadableDataProvider
 ```
 
@@ -3113,6 +3123,8 @@ Bases: {py:obj}`ophyd_async.core._path_providers.FilenameProvider`
 
 `````{py:class} StreamableDataProvider
 :canonical: ophyd_async.core._data_providers.StreamableDataProvider
+
+Bases: {py:obj}`abc.ABC`
 
 ```{autodoc2-docstring} ophyd_async.core._data_providers.StreamableDataProvider
 ```
@@ -3308,7 +3320,7 @@ Bases: {py:obj}`ophyd_async.core._standard_base._StandardBase`, {py:obj}`bluesky
 
 ````
 
-````{py:method} prepare(value: ~ophyd_async.core._flyable.PrepareT) -> ~collections.abc.AsyncIterator[~ophyd_async.core._utils.WatcherUpdate]
+````{py:method} prepare(value: ~ophyd_async.core._flyable.PrepareT) -> ~collections.abc.AsyncGenerator[~ophyd_async.core._utils.WatcherUpdate, None]
 :canonical: ophyd_async.core._flyable.StandardFlyable.prepare
 :async:
 
@@ -3326,7 +3338,7 @@ Bases: {py:obj}`ophyd_async.core._standard_base._StandardBase`, {py:obj}`bluesky
 
 ````
 
-````{py:method} complete() -> ~collections.abc.AsyncIterator[~ophyd_async.core._utils.WatcherUpdate]
+````{py:method} complete() -> ~collections.abc.AsyncGenerator[~ophyd_async.core._utils.WatcherUpdate, None]
 :canonical: ophyd_async.core._flyable.StandardFlyable.complete
 :async:
 
@@ -3419,7 +3431,7 @@ Bases: {py:obj}`ophyd_async.core._utils.ConfinedModel`
 `````{py:class} FlyableLogic
 :canonical: ophyd_async.core._flyable.FlyableLogic
 
-Bases: {py:obj}`typing.Generic`\[{py:obj}`ophyd_async.core._flyable.PrepareT`\, {py:obj}`ophyd_async.core._flyable.CtxT`\]
+Bases: {py:obj}`abc.ABC`, {py:obj}`typing.Generic`\[{py:obj}`ophyd_async.core._flyable.PrepareT`\, {py:obj}`ophyd_async.core._flyable.CtxT`\]
 
 ```{autodoc2-docstring} ophyd_async.core._flyable.FlyableLogic
 ```
@@ -3511,6 +3523,8 @@ Bases: {py:obj}`collections.abc.MutableMapping`\[{py:obj}`ophyd_async.core._sign
 
 `````{py:class} SettingsProvider
 :canonical: ophyd_async.core._settings.SettingsProvider
+
+Bases: {py:obj}`abc.ABC`
 
 ```{autodoc2-docstring} ophyd_async.core._settings.SettingsProvider
 ```
@@ -3688,6 +3702,14 @@ Bases: {py:obj}`typing.Generic`\[{py:obj}`ophyd_async.core._utils.T`\]
 
 ````
 
+````{py:function} cancel_and_wait(*tasks: ~asyncio.Task[~typing.Any]) -> None
+:canonical: ophyd_async.core._utils.cancel_and_wait
+:async:
+
+```{autodoc2-docstring} ophyd_async.core._utils.cancel_and_wait
+```
+````
+
 ````{py:function} error_if_none(value: ~ophyd_async.core._utils.T | None, msg: str) -> ~ophyd_async.core._utils.T
 :canonical: ophyd_async.core._utils.error_if_none
 
@@ -3731,7 +3753,7 @@ Bases: {py:obj}`typing.Generic`\[{py:obj}`ophyd_async.core._utils.T`\]
 ```
 ````
 
-````{py:function} get_unique(values: dict[str, ~ophyd_async.core._utils.T], types: str) -> ~ophyd_async.core._utils.T
+````{py:function} get_unique(values: ~collections.abc.Mapping[str, ~ophyd_async.core._utils.T], types: str) -> ~ophyd_async.core._utils.T
 :canonical: ophyd_async.core._utils.get_unique
 
 ```{autodoc2-docstring} ophyd_async.core._utils.get_unique
@@ -3768,6 +3790,13 @@ Bases: {py:obj}`typing.Generic`\[{py:obj}`ophyd_async.core._utils.T`\]
 
 ````
 
+````{py:function} abstract_cached_property(func: ~collections.abc.Callable[[~typing.Any], ~ophyd_async.core._utils.T]) -> ~functools.cached_property[~ophyd_async.core._utils.T]
+:canonical: ophyd_async.core._utils.abstract_cached_property
+
+```{autodoc2-docstring} ophyd_async.core._utils.abstract_cached_property
+```
+````
+
 ````{py:function} non_zero(value)
 :canonical: ophyd_async.core._utils.non_zero
 
@@ -3775,7 +3804,7 @@ Bases: {py:obj}`typing.Generic`\[{py:obj}`ophyd_async.core._utils.T`\]
 ```
 ````
 
-````{py:function} simulate_move(old_position: float, new_position: float, velocity: float, acceleration_time: float) -> ~collections.abc.AsyncIterator[float]
+````{py:function} simulate_move(old_position: float, new_position: float, velocity: float, acceleration_time: float) -> ~collections.abc.AsyncGenerator[float, None]
 :canonical: ophyd_async.core._utils.simulate_move
 :async:
 
@@ -4078,7 +4107,7 @@ Bases: {py:obj}`ophyd_async.core._device.Device`, {py:obj}`typing.Generic`\[{py:
 `````{py:class} CommandBackend(signature: ~inspect.Signature | None)
 :canonical: ophyd_async.core._command.CommandBackend
 
-Bases: {py:obj}`typing.Generic`\[{py:obj}`ophyd_async.core._utils.P`\, {py:obj}`ophyd_async.core._utils.T`\]
+Bases: {py:obj}`abc.ABC`, {py:obj}`typing.Generic`\[{py:obj}`ophyd_async.core._utils.P`\, {py:obj}`ophyd_async.core._utils.T`\]
 
 ```{autodoc2-docstring} ophyd_async.core._command.CommandBackend
 ```
