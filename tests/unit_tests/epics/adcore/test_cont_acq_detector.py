@@ -145,7 +145,10 @@ async def test_cont_acq_skips_dirty_frames(
         return await cb.pre_count.get_value() if await cb.capture.get_value() else value
 
     callback_on_mock_put(cb.pre_count, set_pre_count)
+    set_mock_value(det.driver.array_counter, 7)
     await det.stage()
+    # Staging zeroes the driver's counter, not the CB's
+    assert await det.driver.array_counter.get_value() == 0
     assert await cb.capture.get_value()
     assert await det.driver.acquire.get_value()
     await det.prepare(TriggerInfo(exposures_per_collection=exposures_per_collection))

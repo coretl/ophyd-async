@@ -32,6 +32,8 @@ class ADAcquireLogic(DetectorAcquireLogic):
         thing in the chain anyway. Turn it off for a detector whose plugin
         chain must not gate acquisition.
     :param timeout: How long to wait for the driver to arm and to return to idle.
+
+    `ensure_ready` also resets the driver's `ArrayCounter` to 0.
     """
 
     def __init__(
@@ -57,7 +59,10 @@ class ADAcquireLogic(DetectorAcquireLogic):
         # the IOC happened to boot with, so a scan does not depend on who
         # touched the PV last.
         await self.ensure_stopped()
-        await self.driver.wait_for_plugins.set(self.wait_for_plugins)
+        await asyncio.gather(
+            self.driver.wait_for_plugins.set(self.wait_for_plugins),
+            self.driver.array_counter.set(0),
+        )
 
     async def start_acquiring(self):
         self.acquire_status = await set_and_wait_for_other_value(
@@ -86,7 +91,8 @@ class ADContAcqAcquireLogic(DetectorAcquireLogic):
     """Gate continuous acquisition using the circular buffer (CB) plugin.
 
     The CB plugin must read directly from the driver, so `stage()` raises if its
-    `NDArrayPort` is not the driver's port.
+    `NDArrayPort` is not the driver's port. `stage()` also resets the driver's
+    `ArrayCounter` to 0; the CB plugin's own counter is left alone.
 
     Deliberately has no `wait_for_plugins` equivalent to [](#ADAcquireLogic).
     That setting gates the driver's `AcquireBusy` going to 0 at the end of an
@@ -135,6 +141,7 @@ class ADContAcqAcquireLogic(DetectorAcquireLogic):
         await self.ensure_stopped()
 
         await asyncio.gather(
+            self.driver.array_counter.set(0),
             self.cb_plugin.enable_callbacks.set(EnableDisable.ENABLE),
             self.cb_plugin.pre_count.set(0),
             # Set preset trigger count to 0 to allow triggering to continue indefinitely

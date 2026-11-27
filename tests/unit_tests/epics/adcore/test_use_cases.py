@@ -579,8 +579,10 @@ async def test_acquire_logic_writes_wait_for_plugins_on_stage(wait_for_plugins: 
             name="det",
         )
     set_mock_value(det.driver.wait_for_plugins, not wait_for_plugins)
+    set_mock_value(det.driver.array_counter, 5)
     await det.stage()
     assert await det.driver.wait_for_plugins.get_value() is wait_for_plugins
+    assert await det.driver.array_counter.get_value() == 0
 
 
 async def test_step_scan_keep_numimages(
