@@ -41,6 +41,7 @@ from ophyd_async.core import (
     soft_signal_rw,
 )
 from ophyd_async.core import StandardReadableFormat as Format
+from ophyd_async.testing import wait_for_pending_wakeups
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -406,6 +407,19 @@ async def test_d3_fly_scan_with_an_unbounded_source_non_zero_at_kickoff(tmp_path
 STATES = ["U", "S", "P", "T", "K", "C"]
 
 
+class SlowToArmAcquire(FillingAcquire):
+    """Arms only once `arm` is set, so a kickoff that arms it stays unfinished."""
+
+    def __init__(self, *sources: Source) -> None:
+        super().__init__(*sources)
+        self.arm = asyncio.Event()
+
+    async def acquire(self):
+        await self.arm.wait()
+        async for _ in super().acquire():
+            yield
+
+
 class GatedAcquire(FillingAcquire):
     """Runs acquire() to its end only once `done` is set, so a fly stays FLYING."""
 
@@ -527,6 +541,27 @@ async def test_lifecycle_verb_from_state(state, verb, ok, tmp_path):
         with pytest.raises(RuntimeError, match=re.escape(MESSAGES[(state, verb)])):
             await call(det, verb)
     # Ends a fly still running in "K"
+    await det.unstage()
+
+
+async def test_complete_while_kickoff_is_still_arming_raises(tmp_path):
+    source = Source()
+    acquire = SlowToArmAcquire(source)
+    det = make_detector("det", FakeData(source, tmp_path=tmp_path), acquire=acquire)
+    await det.stage()
+    await det.prepare(TriggerInfo())
+    kickoff = det.kickoff()
+    await wait_for_pending_wakeups()
+    assert not kickoff.done
+
+    with pytest.raises(
+        TransitionError, match=r"det.*from FLYING, kickoff\(\) has not finished"
+    ):
+        det.complete()
+
+    acquire.arm.set()
+    await wait_for_pending_wakeups()
+    assert kickoff.done
     await det.unstage()
 
 
