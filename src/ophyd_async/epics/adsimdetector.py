@@ -14,7 +14,7 @@ from ophyd_async.core import (
 from .adcore import (
     ADAcquireLogic,
     ADBaseIO,
-    ADWriterFactory,
+    ADDataFactory,
     AreaDetector,
     NDPluginBaseIO,
     NDProcessIO,
@@ -55,8 +55,8 @@ class SimDetector(AreaDetector[ADBaseIO]):
     :param driver_suffix: Suffix for the driver PV, defaults to "cam1:"
     :param proc_suffix: If provided, an NDProcessIO plugin is created at this suffix
     :param plugins:
-        Additional areaDetector plugins to include. "proc" is reserved: use
-        proc_suffix instead.
+        areaDetector plugins to add, each registered as a readable. "proc" is
+        reserved: use proc_suffix instead.
     :param config_sigs: Additional signals to include in configuration
     :param name: Name for the detector device
     """
@@ -64,7 +64,7 @@ class SimDetector(AreaDetector[ADBaseIO]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         driver_suffix="cam1:",
         proc_suffix: str | None = None,
         plugins: dict[str, NDPluginBaseIO] | None = None,

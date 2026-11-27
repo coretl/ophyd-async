@@ -181,8 +181,7 @@ def pure_fly(
         ),
     )
     yield from bps.wait()
-    yield from bps.kickoff_all(motor)
-    yield from bps.kickoff_all(detector)
+    yield from bps.kickoff_all(motor, detector)
     yield from bps.collect_while_completing(
         flyers=[motor],
         detectors=[detector],
@@ -260,8 +259,7 @@ def fly_inside_step(
             ),
         )
         yield from bps.wait()
-        yield from bps.kickoff_all(row_motor)
-        yield from bps.kickoff_all(detector)
+        yield from bps.kickoff_all(row_motor, detector)
         yield from bps.collect_while_completing(
             flyers=[row_motor],
             detectors=[detector],

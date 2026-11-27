@@ -19,7 +19,7 @@ from ophyd_async.core import (
 from .adcore import (
     ADAcquireLogic,
     ADBaseIO,
-    ADWriterFactory,
+    ADDataFactory,
     AreaDetector,
     NDPluginBaseIO,
     NDProcessIO,
@@ -101,8 +101,8 @@ class AravisDetector(AreaDetector[AravisDriverIO]):
         If provided, this value is used for deadtime instead of looking up
         based on camera model.
     :param plugins:
-        Additional areaDetector plugins to include. "proc" is reserved: use
-        proc_suffix instead.
+        areaDetector plugins to add, each registered as a readable. "proc" is
+        reserved: use proc_suffix instead.
     :param config_sigs: Additional signals to include in configuration
     :param name: Name for the detector device
     """
@@ -110,7 +110,7 @@ class AravisDetector(AreaDetector[AravisDriverIO]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         driver_suffix: str = "cam1:",
         proc_suffix: str | None = None,
         override_deadtime: float | None = None,

@@ -14,7 +14,7 @@ from collections.abc import (
 from contextlib import contextmanager
 from enum import Enum
 from functools import cached_property
-from typing import Literal
+from typing import Literal, cast
 
 from bluesky.protocols import HasHints, Hints, Reading
 from event_model import DataKey
@@ -92,6 +92,20 @@ def _without_signals(
     ]
 
 
+def _switched_off_names(suppressed: Mapping[str, DataKey | None]) -> set[str]:
+    """The names that are switched off, which have no replacement."""
+    return {name for name, datakey in suppressed.items() if datakey is None}
+
+
+def _without_fields(hints: Hints, names: Collection[str]) -> Hints:
+    """`hints` with `names` left out of its fields."""
+    fields = hints.get("fields")
+    if isinstance(fields, str) or not isinstance(fields, Sequence):
+        # Absent or malformed: hints reports the malformed ones
+        return hints
+    return cast(Hints, {**hints, "fields": [n for n in fields if n not in names]})
+
+
 class _SealDefaultFormatsMeta(type(_StandardBase)):
     """Record the formats a `StandardReadable` was constructed with.
 
@@ -155,10 +169,14 @@ class StandardReadable(
         Callable[[], Awaitable[dict[str, DataKey]]], ...
     ] = ()
     _hints_funcs: tuple[Callable[[], Iterator[Hints]], ...] = ()
-    # The names of registered children that something else provides instead, by
-    # name so a child's own children are covered. Each is dropped from read() and
-    # describe() after checking it against the DataKey, and kept in hints.
-    _suppressed_datakeys_funcs: tuple[Callable[[], Mapping[str, DataKey]], ...] = ()
+    # The names of registered children that are not read for now, by name so a
+    # child's own children are covered. A DataKey means something else provides
+    # that name instead: the child is dropped from read() and describe() after
+    # checking it against the DataKey, and kept in hints. None means the name is
+    # switched off: it is dropped from read(), describe() and hints.
+    _suppressed_datakeys_funcs: tuple[
+        Callable[[], Mapping[str, DataKey | None]], ...
+    ] = ()
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -236,7 +254,7 @@ class StandardReadable(
                     pass
         return await merge_gathered_dicts(coros)
 
-    def _suppressed_datakeys(self) -> dict[str, DataKey]:
+    def _suppressed_datakeys(self) -> dict[str, DataKey | None]:
         return merge_dicts(func() for func in self._suppressed_datakeys_funcs)
 
     async def __on_describe(self) -> dict[str, DataKey]:
@@ -246,8 +264,12 @@ class StandardReadable(
         replacement can stand in for it.
         """
         coros = []
-        replacements = self._suppressed_datakeys()
-        for entry in self._readables.values():
+        suppressed = self._suppressed_datakeys()
+        replacements = {
+            name: datakey for name, datakey in suppressed.items() if datakey is not None
+        }
+        switched_off = _switched_off_names(suppressed)
+        for entry in _without_signals(self._readables.values(), switched_off):
             match entry:
                 case (device, Format.CHILD):
                     if isinstance(device, AsyncReadable):
@@ -277,7 +299,7 @@ class StandardReadable(
                 "with a different shape or dtype from the data that would replace "
                 "them, so rename one of them"
             )
-        return {k: v for k, v in datakeys.items() if k not in replacements}
+        return {k: v for k, v in datakeys.items() if k not in suppressed}
 
     async def __on_read(self) -> dict[str, Reading]:
         """What the registered children contribute to `read()`."""
@@ -303,11 +325,12 @@ class StandardReadable(
 
     def __on_hints(self) -> Iterator[Hints]:
         """What the registered children contribute to `hints`."""
-        for entry in self._readables.values():
+        switched_off = _switched_off_names(self._suppressed_datakeys())
+        for entry in _without_signals(self._readables.values(), switched_off):
             match entry:
                 case (device, Format.CHILD):
                     if isinstance(device, HasHints):
-                        yield device.hints
+                        yield _without_fields(device.hints, switched_off)
                 case (
                     signal,
                     Format.HINTED_SIGNAL | Format.HINTED_UNCACHED_SIGNAL,

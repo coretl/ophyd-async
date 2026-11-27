@@ -1,19 +1,52 @@
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
+import numpy as np
 from bluesky.protocols import StreamAsset
 from event_model import ComposeStreamResource, DataKey, StreamRange
+from event_model.documents import PartialEventPage
 
-from ._signal import SignalR, SignalW
-from ._utils import ConfinedModel
+from ._datatypes import Array1D
+from ._signal import SignalR, SignalW, observe_value
+from ._utils import (
+    ConfinedModel,
+    _gather_or_cancel_all,
+    error_if_none,
+    get_dtype,
+)
+
+ARRAY_WAIT_TIMEOUT = 2.0
+"""How long `EventPageDataProvider` waits for an array to hold the collections
+counted, in seconds. Longer than the one second between the posts of an
+areaDetector time series."""
+
+
+async def _wait_for_length(signal: SignalR[Array1D[Any]], needed: int) -> Array1D[Any]:
+    """Return the first value of `signal` holding at least `needed` collections."""
+    held = 0
+    kept = None
+    try:
+        async for value in observe_value(signal, done_timeout=ARRAY_WAIT_TIMEOUT):
+            held = len(value)
+            if held >= needed:
+                kept = value
+                break
+    except TimeoutError:
+        raise TimeoutError(
+            f"{signal.source} held {held} collections after {ARRAY_WAIT_TIMEOUT}s, "
+            f"but {needed} were needed"
+        ) from None
+    return error_if_none(kept, f"{signal.source} was not observed")
 
 
 class DataProvider(ABC):
     """What a [](#DetectorDataLogic) returns to publish the data it is writing.
 
-    A provider counts its events from an origin: collection 0 of
-    `collections_written` unless `start_new_resources` says otherwise.
+    The two kinds, [](#StreamableDataProvider) and [](#PageableDataProvider),
+    differ in how the data is published; what they share is here. A provider
+    counts its events from an origin: collection 0 of `collections_written`
+    unless `start_new_resources` says otherwise.
 
     :param collections_written: counts the collections written so far, reset to
         0 by the data logic before it returns the provider
@@ -54,6 +87,109 @@ class StreamableDataProvider(DataProvider):
 
         :param index: the event to publish up to, counted from the origin
         """
+
+
+class PageableDataProvider(DataProvider):
+    """Publishes its data as event pages.
+
+    For a source read back as arrays rather than written to a file: an
+    areaDetector stats time series, or a scaler's MCA arrays.
+    """
+
+    @abstractmethod
+    async def make_page(self, index: int) -> PartialEventPage | None:
+        """Return one page of the events from where the last call got to.
+
+        :param index: the event to publish up to
+        :return: the page, or `None` if there are no new events
+        """
+
+
+class EventPageDataProvider(PageableDataProvider):
+    """Emits a fixed-length array of collections as event pages.
+
+    For a device that fills one array per field as it acquires, alongside an
+    array of per-collection timestamps: an areaDetector stats time series, or a
+    scaler's MCA arrays. Each array is sliced into `collections_per_event`-length
+    chunks, one per event, and the last collection of an event supplies that
+    event's timestamp. A page waits up to `ARRAY_WAIT_TIMEOUT` for each array to
+    hold every collection of its events, and raises `TimeoutError` naming the
+    signal if one does not.
+
+    :param data: datakey (already suffixed) to the array signal that backs it
+    :param timestamps: the acquisition time of each collection
+    :param collections_written: counts the collections written so far
+    :param collections_per_event: how many collections make up one event
+    :param refresh:
+        awaited before each page's arrays are read, for a device that posts its
+        arrays less often than it counts collections: it asks the device to post
+        them, so they hold every collection counted
+    """
+
+    def __init__(
+        self,
+        data: Mapping[str, SignalR[Array1D[Any]]],
+        timestamps: SignalR[Array1D[np.float64]],
+        collections_written: SignalR[int],
+        collections_per_event: int,
+        refresh: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        super().__init__(collections_written, collections_per_event)
+        self.data = dict(data)
+        self.timestamps = timestamps
+        self.refresh = refresh
+        self.start_new_resources(0)
+
+    def start_new_resources(self, origin: int) -> None:
+        self._origin = origin
+        # The events published by make_page
+        self._published = 0
+
+    async def make_datakeys(self) -> dict[str, DataKey]:
+        return {
+            datakey: DataKey(
+                source=signal.source,
+                shape=[self.collections_per_event],
+                dtype="array",
+                dtype_numpy=get_dtype(
+                    error_if_none(signal.datatype, f"{signal.source} has no datatype")
+                ).str,
+            )
+            for datakey, signal in self.data.items()
+        }
+
+    async def make_page(self, index: int) -> PartialEventPage | None:
+        if index <= self._published:
+            return None
+        if self.refresh:
+            await self.refresh()
+        cpe = self.collections_per_event
+        needed = self._origin + index * cpe
+        # Wait for every array and the per-collection timestamps to hold the
+        # collections counted, all at once
+        *arrays_held, stamps = await _gather_or_cancel_all(
+            [
+                *(_wait_for_length(signal, needed) for signal in self.data.values()),
+                _wait_for_length(self.timestamps, needed),
+            ]
+        )
+        arrays = dict(zip(self.data, arrays_held, strict=True))
+        starts = [self._origin + event * cpe for event in range(self._published, index)]
+        self._published = index
+        # One timestamp per event: the acquisition time of its last collection
+        event_times = [float(stamps[start + cpe - 1]) for start in starts]
+        data = {
+            datakey: [array[start : start + cpe] for start in starts]
+            for datakey, array in arrays.items()
+        }
+        return {
+            # TODO: numpy arrays are not in PartialEventPage's value type, but
+            # they round trip through the bundler fine; fix upstream in
+            # event-model rather than converting to lists here
+            "data": data,  # type: ignore[typeddict-item]
+            "time": event_times,
+            "timestamps": dict.fromkeys(data, event_times),
+        }
 
 
 class StreamResourceInfo(ConfinedModel):

@@ -42,7 +42,8 @@ def check_name(name: str, device: Device):
         # remove trailing underscore from name,
         # used to resolve clashes with Bluesky terms
         name = name[:-1] if name.endswith("_") else name
-        assert inflection.underscore(pv) == name
+        # A field of a record, such as TSTimestamp.NELM, is named record_field
+        assert inflection.underscore(pv.replace(".", "_")) == name
     elif isinstance(device, DeviceVector):
         return
     else:

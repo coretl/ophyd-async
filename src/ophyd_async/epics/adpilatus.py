@@ -21,7 +21,7 @@ from ophyd_async.core import (
 from .adcore import (
     ADAcquireLogic,
     ADBaseIO,
-    ADWriterFactory,
+    ADDataFactory,
     AreaDetector,
     NDPluginBaseIO,
     NDProcessIO,
@@ -143,8 +143,8 @@ class PilatusDetector(AreaDetector[PilatusDriverIO]):
     :param driver_suffix: Suffix for the driver PV, defaults to "cam1:"
     :param proc_suffix: If provided, an NDProcessIO plugin is created at this suffix
     :param plugins:
-        Additional areaDetector plugins to include. "proc" is reserved: use
-        proc_suffix instead.
+        areaDetector plugins to add, each registered as a readable. "proc" is
+        reserved: use proc_suffix instead.
     :param config_sigs: Additional signals to include in configuration
     :param name: Name for the detector device
     """
@@ -152,7 +152,7 @@ class PilatusDetector(AreaDetector[PilatusDriverIO]):
     def __init__(
         self,
         prefix: str,
-        *writer_factories: ADWriterFactory,
+        *writer_factories: ADDataFactory,
         readout_time: PilatusReadoutTime = PilatusReadoutTime.PILATUS3,
         edge_trigger_mode: PilatusTriggerMode = PilatusTriggerMode.EXT_TRIGGER,
         driver_suffix="cam1:",
