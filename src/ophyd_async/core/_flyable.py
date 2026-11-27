@@ -326,9 +326,14 @@ class StandardFlyable(
         fly's status is returned until the next `prepare()` or `stage()`.
         """
         if self._fly_status is None:
+            state = self._state.state
+            allowed = (
+                "kickoff() has not finished"
+                if state is _State.FLYING
+                else "allowed only after kickoff()"
+            )
             raise TransitionError(
-                f"{self.name}: cannot complete from {self._state.state.name}, "
-                "allowed only after kickoff()"
+                f"{self.name}: cannot complete from {state.name}, {allowed}"
             )
         return self._fly_status
 

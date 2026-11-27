@@ -258,6 +258,22 @@ async def test_flyable_verb_in_the_wrong_state_raises(setup, verb, current):
     await flyer.unstage()
 
 
+async def test_complete_while_kickoff_is_still_running_raises():
+    logic = BlockingFlyableLogic(block="kickoff")
+    flyer = await make_staged_flyer(logic)
+    await flyer.prepare(1)
+    kickoff = flyer.kickoff()
+    await wait_for_pending_wakeups()
+    assert not kickoff.done
+
+    with pytest.raises(
+        TransitionError, match=r"flyer.*from FLYING, kickoff\(\) has not finished"
+    ):
+        flyer.complete()
+    assert not kickoff.done
+    await flyer.unstage()
+
+
 @pytest.mark.parametrize("verb", ["prepare", "kickoff", "complete"])
 async def test_stage_during_a_verb_raises_and_unstage_cancels_it(verb):
     logic = BlockingFlyableLogic(block=verb)
