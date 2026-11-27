@@ -97,6 +97,30 @@ def test_area_detector_rejects_duplicate_writer_names(
         )
 
 
+def test_plugin_named_like_a_factory_attribute_raises(
+    static_path_provider: StaticPathProvider,
+):
+    driver = adcore.ADBaseIO("PREFIX:DRV:")
+
+    with pytest.raises(ValueError, match=r"attribute 'stats'"):
+        adcore.AreaDetector(
+            driver,
+            "PREFIX:",
+            adcore.ADWriterFactory.hdf(static_path_provider, writer_name="stats"),
+            plugins={"stats": adcore.NDStatsIO("PREFIX:STATS:")},
+            name="det",
+        )
+
+
+def test_plugin_named_like_the_driver_raises():
+    driver = adcore.ADBaseIO("PREFIX:DRV:")
+
+    with pytest.raises(ValueError, match=r"attribute 'driver'"):
+        adcore.AreaDetector(
+            driver, plugins={"driver": adcore.NDStatsIO("PREFIX:S:")}, name="det"
+        )
+
+
 # ---------------------------------------------------------------------------
 # AreaDetector.get_plugin guards
 # ---------------------------------------------------------------------------
@@ -156,9 +180,10 @@ async def test_get_ndarray_resource_info_undefined_datatype(
         )
     set_mock_value(det.driver.data_type, adcore.ADBaseDataType.UNDEFINED)
     set_mock_value(det.get_plugin("hdf", adcore.NDFileHDF5IO).file_path_exists, True)
+    await det.stage()
     with pytest.raises(
         ValueError,
-        match=r"^mock\+ca://PREFIX:DRV:DataType_RBV is blank, this is not supported$",
+        match=r"^mock\+ca://PREFIX:DRV:DataType_RBV is blank, this is not supported",
     ):
         await det.prepare(TriggerInfo())
 
@@ -175,9 +200,10 @@ async def test_get_ndarray_resource_info_unsupported_color_mode(
         )
     set_mock_value(det.driver.color_mode, adcore.ADBaseColorMode.BAYER)
     set_mock_value(det.get_plugin("hdf", adcore.NDFileHDF5IO).file_path_exists, True)
+    await det.stage()
     with pytest.raises(
         RuntimeError,
-        match=r"^Unsupported ColorMode Bayer! Only Mono and RGB1 are supported\.$",
+        match=r"^Unsupported ColorMode Bayer! Only Mono and RGB1 are supported\.",
     ):
         await det.prepare(TriggerInfo())
 
@@ -187,4 +213,16 @@ def test_plugins_proc_is_reserved_for_proc_suffix(proc_suffix: str | None):
     with pytest.raises(ValueError, match=r"Pass proc_suffix to add a process plugin"):
         adcore.plugins_with_proc(
             {"proc": adcore.NDProcessIO("PREFIX:PROC:")}, "PREFIX:", proc_suffix
+        )
+
+
+@pytest.mark.parametrize("cb_plugin_name", ["cb", "buffer"])
+def test_cont_acq_detector_plugins_cannot_reuse_the_cb_plugin_name(cb_plugin_name):
+    with pytest.raises(
+        ValueError, match=r"Pass cb_plugin_name to name the circular buffer plugin"
+    ):
+        adcore.ContAcqDetector(
+            "PREFIX:",
+            cb_plugin_name=cb_plugin_name,
+            plugins={cb_plugin_name: adcore.NDStatsIO("PREFIX:STAT:")},
         )

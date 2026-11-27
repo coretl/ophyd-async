@@ -2,13 +2,11 @@ import asyncio
 from dataclasses import dataclass
 
 from ophyd_async.core import (
-    DetectorTrigger,
-    EnableDisable,
-    SignalR,
-    TriggerInfo,
+    DetectorTriggerLogic as _DetectorTriggerLogic,
 )
 from ophyd_async.core import (
-    DetectorTriggerLogic as _DetectorTriggerLogic,
+    EnableDisable,
+    TriggerInfo,
 )
 
 from ._io import (
@@ -82,30 +80,47 @@ async def prepare_filter(
     )
 
 
-async def trigger_info_from_driver(
-    num_images_signal: SignalR[int],
-    process_plugin: NDProcessIO | None = None,
-) -> TriggerInfo:
-    """Default TriggerInfo for AD detectors, reading num_images from the driver.
+async def _exposures_per_collection_from_filter(
+    process_plugin: NDProcessIO | None,
+) -> int:
+    """Read the exposures per collection from the process plugin's filter.
 
-    :param num_images_signal: SignalR for the number of images to acquire
-    :param process_plugin: Optional NDProcessIO plugin for exposures per collection
+    :param process_plugin: The NDProcessIO plugin instance, if any
+    :return: `num_filter` if the filter is enabled, otherwise 1
+    :raises ValueError: If the filter is enabled with `num_filter` below 1
     """
-    num_images = await num_images_signal.get_value()
-    exposures_per_collection = 1
+    if process_plugin is None or not await process_plugin.enable_filter.get_value():
+        return 1
+    num_filter = await process_plugin.num_filter.get_value()
+    if num_filter < 1:
+        raise ValueError(
+            f"{process_plugin.name}: filter enabled with "
+            f"num_filter={num_filter}, set it to 1 or more"
+        )
+    return num_filter
 
-    if process_plugin is not None and await process_plugin.enable_filter.get_value():
-        exposures_per_collection = await process_plugin.num_filter.get_value()
-        if exposures_per_collection < 1:
-            raise ValueError(
-                f"{process_plugin.name}: filter enabled with ",
-                f"num_filter={exposures_per_collection}, set it to 1 or more",
-            )
 
+async def trigger_info_from_driver(
+    driver: ADBaseIO, process_plugin: NDProcessIO | None = None
+) -> TriggerInfo:
+    """Read the default TriggerInfo for AD detectors back from the driver.
+
+    :param driver: The driver to read num_images, acquire_time and acquire_period from
+    :param process_plugin: The NDProcessIO plugin filtering exposures, if any
+    """
+    num_images, livetime, period = await asyncio.gather(
+        driver.num_images.get_value(),
+        driver.acquire_time.get_value(),
+        driver.acquire_period.get_value(),
+    )
+    exposures_per_collection = await _exposures_per_collection_from_filter(
+        process_plugin
+    )
     return TriggerInfo(
         collections_per_event=max(1, num_images // exposures_per_collection),
         exposures_per_collection=exposures_per_collection,
-        trigger=DetectorTrigger.INTERNAL,
+        livetime=livetime,
+        deadtime=max(0.0, period - livetime),
     )
 
 
@@ -149,6 +164,17 @@ class ADContAcqTriggerLogic(_DetectorTriggerLogic):
         # Read post_count (not driver.num_images) because the CB plugin's
         # post_count is what governs how many frames are buffered per trigger
         # in continuous-acquisition mode, not the driver's num_images.
-        return await trigger_info_from_driver(
-            self.cb_plugin.post_count, self.process_plugin
+        post_count, livetime, period = await asyncio.gather(
+            self.cb_plugin.post_count.get_value(),
+            self.driver.acquire_time.get_value(),
+            self.driver.acquire_period.get_value(),
+        )
+        exposures_per_collection = await _exposures_per_collection_from_filter(
+            self.process_plugin
+        )
+        return TriggerInfo(
+            collections_per_event=max(1, post_count // exposures_per_collection),
+            exposures_per_collection=exposures_per_collection,
+            livetime=livetime,
+            deadtime=max(0.0, period - livetime),
         )

@@ -4,7 +4,7 @@ from abc import abstractmethod
 from collections.abc import AsyncGenerator, Mapping
 from dataclasses import replace
 from functools import cached_property
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, TypeVar
 
 from bluesky.protocols import Flyable, Preparable
 from pydantic import Field
@@ -38,6 +38,8 @@ CtxT = TypeVarWithDefault("CtxT", default=None)
 
 #: Yielded by `FlyableLogic.fly` to mark the flyer as flying.
 KICKED_OFF = Sentinel("KICKED_OFF")
+#: The context of a `StandardFlyable` with no successful `prepare()` since `stage()`
+NOT_PREPARED = Sentinel("NOT_PREPARED")
 
 
 class FlyableLogic(Logic, Generic[PrepareT, CtxT]):
@@ -199,7 +201,7 @@ class StandardFlyable(
     """
 
     # The context of the last finished prepare(), until the next stage()
-    _ctx: CtxT | None = None
+    _ctx: CtxT | NOT_PREPARED = NOT_PREPARED
     # The fly started by kickoff(), returned by complete() until the next prepare()
     # or stage()
     _fly_status: WatchableAsyncStatus | None = None
@@ -233,13 +235,21 @@ class StandardFlyable(
 
     async def __on_stage(self) -> None:
         # Forget the last run
-        self._ctx = None
+        self._ctx = NOT_PREPARED
         self._fly_status = None
         await self.logic.ensure_ready()
 
     async def __on_unstage(self) -> None:
         # Always stop, a set() in progress included
         await self.logic.ensure_stopped()
+
+    def _prepared_ctx(self, verb: str) -> CtxT:
+        """The context of the last successful `prepare()`, for the called `verb`."""
+        if self._ctx is NOT_PREPARED:
+            raise TransitionError(
+                f"{self.name}: {verb} needs a successful prepare() first"
+            )
+        return self._ctx
 
     @WatchableAsyncStatus.wrap
     async def prepare(self, value: PrepareT) -> AsyncGenerator[WatcherUpdate, None]:
@@ -251,7 +261,8 @@ class StandardFlyable(
         # A failed prepare must leave nothing to kick off
         async with self._state.transition(_State.PREPARING, end=_State.PREPARED):
             self._fly_status = None
-            previous_ctx, self._ctx = self._ctx, None
+            previous_ctx = None if self._ctx is NOT_PREPARED else self._ctx
+            self._ctx = NOT_PREPARED
             hook = f"{type(self.logic).__name__}.prepare_to_fly()"
             preparing = self.logic.prepare_to_fly(self.name, value, previous_ctx)
             async with contextlib.aclosing(preparing):
@@ -296,8 +307,7 @@ class StandardFlyable(
     ) -> AsyncGenerator[WatcherUpdate, None]:
         async with self._state.transition(_State.FLYING, end=_State.FLOWN):
             hook = f"{type(self.logic).__name__}.fly()"
-            # FLYING is only entered from PREPARED, so the context is set
-            fly = self.logic.fly(cast(CtxT, self._ctx))
+            fly = self.logic.fly(self._prepared_ctx("kickoff"))
             async with contextlib.aclosing(fly):
                 try:
                     first = await anext(fly)
